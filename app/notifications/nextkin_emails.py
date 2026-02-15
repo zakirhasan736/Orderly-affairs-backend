@@ -1,0 +1,109 @@
+from datetime import datetime
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+from app.config import settings
+
+
+class NextKinEmailEvent:
+    CREATED = "created"
+    ACCESS_APPROVED = "access_approved"
+    ACCESS_REVOKED = "access_revoked"
+    DELETED = "deleted"
+    OWNER_DECEASED = "owner_deceased"
+
+
+async def send_nextkin_email(
+    *,
+    event: str,
+    nextkin: dict,
+    owner: dict,
+    plain_password: str | None = None,
+):
+    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
+
+    subject = ""
+    html = ""
+
+    owner_name = owner.get("full_name") or owner["email"]
+    nk_name = nextkin.get("full_name") or nextkin["email"]
+
+    if event == NextKinEmailEvent.CREATED:
+        subject = "Orderly Affairs – You’ve been designated as Next-of-Kin"
+        html = f"""
+        <p>Hello {nk_name},</p>
+        <p>{owner_name} has designated you as their Next-of-Kin.</p>
+        <p>You will receive access when it is approved.</p>
+        """
+
+    elif event == NextKinEmailEvent.ACCESS_APPROVED:
+        subject = "Orderly Affairs – Access Granted"
+        html = f"""
+        <p>Hello {nk_name},</p>
+        <p>{owner_name} has granted you <b>Immediate Access</b>.</p>
+
+        <p><b>Login details:</b></p>
+        <ul>
+          <li>Email: {nextkin["email"]}</li>
+          {f"<li>Password: {plain_password}</li>" if plain_password else ""}
+        </ul>
+
+        <p>
+          <a href="{settings.FRONTEND_URL}/nextkin-login">
+            Log in to Orderly Affairs
+          </a>
+        </p>
+        """
+
+    elif event == NextKinEmailEvent.ACCESS_REVOKED:
+        subject = "Orderly Affairs – Access Revoked"
+        html = f"""
+        <p>Hello {nk_name},</p>
+        <p>{owner_name} has revoked your access.</p>
+        """
+
+    elif event == NextKinEmailEvent.DELETED:
+        subject = "Orderly Affairs – Next-of-Kin Removed"
+        html = f"""
+        <p>Hello {nk_name},</p>
+        <p>Your Next-of-Kin designation under {owner_name} has been removed.</p>
+        """
+
+    elif event == NextKinEmailEvent.OWNER_DECEASED:
+        subject = "Orderly Affairs – Access Available"
+        html = f"""
+        <p>Hello {nk_name},</p>
+        <p>{owner_name} has passed away.</p>
+        <p>You may now access their Orderly Affairs Kit.</p>
+        """
+
+    else:
+        return  # unknown event → do nothing safely
+
+    message = Mail(
+        from_email=settings.EMAIL_SENDER,
+        to_emails=nextkin["email"],
+        subject=subject,
+        html_content=html,
+    )
+
+    try:
+        sg.send(message)
+    except Exception as e:
+        print(f"⚠️ NextKin email failed ({event}):", e)
+
+
+async def send_message_email(*, to: str, subject: str, html: str):
+    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
+
+    message = Mail(
+        from_email=settings.EMAIL_SENDER,
+        to_emails=to,
+        subject=subject,
+        html_content=html,
+    )
+
+    try:
+        sg.send(message)
+    except Exception as e:
+        print("⚠️ Message delivery email failed:", e)
+        raise

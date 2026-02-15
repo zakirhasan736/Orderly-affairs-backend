@@ -1,0 +1,78 @@
+from fastapi import Header, HTTPException
+from typing import Dict, Any, Tuple
+from datetime import datetime
+from app.security.jwt_handler import verify_token
+from app.database import users_collection, kits_collection
+
+async def require_owner(authorization: str | None):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = authorization.split(" ")[1]
+    decoded = verify_token(token)
+    if not decoded or decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+    return owner
+
+async def require_nok(authorization: str | None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = authorization.split(" ")[1]
+    decoded = verify_token(token)
+    if not decoded or decoded.get("role") != "nextkin":
+        raise HTTPException(status_code=403, detail="Next-of-Kin token required")
+
+    nk = await users_collection.find_one({"email": decoded["email"], "role": "nextkin"})
+    if not nk:
+        raise HTTPException(status_code=404, detail="Next-of-Kin not found")
+    if not nk.get("immediate_access", False):
+        raise HTTPException(status_code=403, detail="Access not yet approved")
+
+    owner_id = nk.get("owner_id")
+    if not owner_id:
+        raise HTTPException(status_code=404, detail="No linked owner")
+    return nk, {"owner_id": owner_id}
+
+async def get_or_init_kit(owner_id: str) -> Dict[str, Any]:
+    kit = await kits_collection.find_one({"owner_id": owner_id})
+    if kit:
+        return kit
+    now = datetime.utcnow()
+    kit = {
+        "owner_id": owner_id,
+        "sections": [],
+        "disabled_sections": {},
+        "disabled_subsections": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+    await kits_collection.insert_one(kit)
+    return kit
+
+def ensure_section_struct(kit: Dict[str, Any], section_id: str) -> None:
+    if not any(s.get("id") == section_id for s in kit["sections"]):
+        kit["sections"].append({"id": section_id, "title": "", "data": {}, "subsections": []})
+
+def ensure_subsection_struct(kit: Dict[str, Any], section_id: str, sub_id: str) -> None:
+    ensure_section_struct(kit, section_id)
+    for s in kit["sections"]:
+        if s["id"] == section_id:
+            if not any(ss.get("id") == sub_id for ss in s["subsections"]):
+                s["subsections"].append({"id": sub_id, "title": "", "data": {}, "version": 1})
+            break
+
+def filter_sections_for_nok(kit: Dict[str, Any], nk: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply NOK access (full vs. list of section IDs)."""
+    access_level = nk.get("access_level", "Full Kit Access")
+    authorized = nk.get("authorized_sections") or []
+    full = access_level == "Full Kit Access"
+    if full:
+        return kit
+    allowed = set(str(x) for x in authorized)
+    filtered = {
+        **kit,
+        "sections": [s for s in kit["sections"] if s.get("id") in allowed]
+    }
+    return filtered
