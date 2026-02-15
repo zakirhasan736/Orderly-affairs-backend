@@ -19,16 +19,10 @@ pwd_context = CryptContext(
 )
 
 def _normalize_password(password: str) -> bytes:
-    """
-    Hash password with SHA-256 first.
-    Output is always 32 bytes (safe for bcrypt).
-    """
     return hashlib.sha256(password.encode("utf-8")).digest()
 
 def hash_password(password: str) -> str:
-    normalized = _normalize_password(password)
-    return pwd_context.hash(normalized)
+    return pwd_context.hash(_normalize_password(password))
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    normalized = _normalize_password(plain_password)
-    return pwd_context.verify(normalized, hashed_password)
+    return pwd_context.verify(_normalize_password(plain_password), hashed_password)
