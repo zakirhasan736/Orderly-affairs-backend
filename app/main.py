@@ -54,7 +54,7 @@ app = FastAPI(title="Orderly Affairs Backend API")
 
 origins = [
     "http://localhost:3000",
-    "https://your-frontend-domain.com"
+    "https://portal.orderly-affairs.com"
 ]
 
 app.add_middleware(
