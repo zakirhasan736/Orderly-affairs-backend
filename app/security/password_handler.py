@@ -14,9 +14,10 @@ import hashlib
 from passlib.context import CryptContext
 
 pwd_context = CryptContext(
-    schemes=["bcrypt"],
-    deprecated="auto"
+    schemes=["argon2", "bcrypt"],
+    deprecated="auto",
 )
+
 
 def _normalize_password(password: str) -> bytes:
     return hashlib.sha256(password.encode("utf-8")).digest()

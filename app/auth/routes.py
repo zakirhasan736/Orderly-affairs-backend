@@ -4,6 +4,7 @@ from typing import List, Union
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 from random import randint
+from app.auth.service import trigger_death_letters
 from bson.errors import InvalidId
 from secrets import token_urlsafe
 from io import BytesIO
@@ -28,7 +29,7 @@ import string, random
 from sendgrid import SendGridAPIClient
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # ============================================================
 # MODELS
 # ============================================================
@@ -281,7 +282,7 @@ async def nextkin_login(request: Request):
     if not user:
         raise HTTPException(status_code=404, detail="Next-of-Kin not found")
 
-    if not pwd_context.verify(master_password, user["password_hash"]):
+    if not verify_password(master_password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid password")
     
     if not user.get("immediate_access", False):
@@ -379,7 +380,7 @@ async def create_nextkin(
             "card_storage_location": req.card_storage_location,
             "special_instructions": req.special_instructions,
 
-            "password_hash": pwd_context.hash(plain_password),
+            "password_hash": hash_password(plain_password),
 
             "role": "nextkin",
             "owner_id": str(owner["_id"]),
@@ -394,7 +395,9 @@ async def create_nextkin(
 
         # 🔥 IF owner checked "Immediate Access" at creation time
         nextkin = await users_collection.find_one({"_id": new_id})
-        await _approve_and_notify_if_needed(nextkin, owner)
+        # await _approve_and_notify_if_needed(nextkin, owner)
+        if req.immediate_access:
+             await _approve_and_notify_if_needed(nextkin, owner, approved=True)
 
         # ✅ CASE 1: Immediate access → approve + send ACCESS email (with password)
         if req.immediate_access:
@@ -572,8 +575,7 @@ async def update_nextkin(
 
     # Optional: hash master_password if changed
     if payload.master_password:
-        update_data["password_hash"] = pwd_context.hash(payload.master_password)
-
+        update_data["password_hash"] = hash_password(payload.master_password)
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No valid fields provided to update")
@@ -1007,10 +1009,12 @@ async def get_me(authorization: str = Header(None)):
     if not decoded:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     user = await users_collection.find_one({"email": decoded["sub"]})
-    enforce_billing(user)
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    enforce_billing(user)
+
     return {
         "email": user["email"],
         "role": user.get("role", "owner"),
@@ -1079,10 +1083,14 @@ async def update_owner_status(
     if status not in ["alive", "deceased"]:
         raise HTTPException(400, "Invalid status")
 
+    # await users_collection.update_one(
+    #     {"_id": user["sub"]},
+    #     {"$set": {"owner_status": status}}
+    # )
     await users_collection.update_one(
-        {"_id": user["sub"]},
-        {"$set": {"owner_status": status}}
-    )
+    {"email": user["sub"], "role": "owner"},
+    {"$set": {"owner_status": status}}
+)
 
     # 🔥 TRIGGER DEATH LETTERS
     if status == "deceased":
