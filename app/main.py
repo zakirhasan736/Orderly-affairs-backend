@@ -19,7 +19,6 @@ from app.sections.section1_vital_information.router import (
     router as section1_router
 )
 from app.onboarding.routes import router as onboarding_router
-
 from app.sections.section5_vehicles.router import router as section5_router
 from app.sections.section6_main_residence.router import router as section6_router
 from app.sections.section7_insurance_policies.router import (
@@ -56,7 +55,7 @@ app = FastAPI(title="Orderly Affairs Backend API")
 
 origins = [
     "http://localhost:3000",
-    "https://portal.orderly-affairs.com"
+    "https://your-frontend-domain.com"
 ]
 
 app.add_middleware(
@@ -117,7 +116,6 @@ app.include_router(section20_router)
 app.include_router(section21_router)
 app.include_router(message_of_nextkin_letters_router)
 app.include_router(onboarding_router)
-
 
 @app.get("/")
 def health_check():
