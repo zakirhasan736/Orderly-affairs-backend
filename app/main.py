@@ -54,8 +54,8 @@ from app.sections.section21_estate_planning_finalwishes.router import router as 
 app = FastAPI(title="Orderly Affairs Backend API")
 
 origins = [
-    "http://localhost:3000",
-    "https://your-frontend-domain.com"
+   "https://portal.orderly-affairs.com",
+    "http://localhost:3000",  # keep for dev
 ]
 
 app.add_middleware(
