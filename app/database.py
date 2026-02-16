@@ -23,5 +23,6 @@ kits_collection = db["kits"]
 letters_collection = db["letters"] 
 section_data_collection = db["sections"] 
 messageofnextkin_collection = db["nexrkinmessage"] 
+onboarding_progress = db["onboarding_progress"]
 
 print("✅ MongoDB connected successfully")
