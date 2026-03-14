@@ -58,6 +58,14 @@ class LinkAuthenticatorRequest(BaseModel):
     code: str
     secret: str
 
+class OwnerResetRequest(BaseModel):
+    email: EmailStr
+
+class OwnerResetPassword(BaseModel):
+    email: EmailStr
+    otp: int
+    new_password: str
+
 # ---- Next-of-Kin ----
 class NextKinCreateRequest(BaseModel):
     email: EmailStr
@@ -1097,3 +1105,122 @@ async def update_owner_status(
         await trigger_death_letters(user["sub"])
 
     return {"status": "updated"}
+
+# ============================================================
+# OWNER REQUEST PASSWORD RESET
+# ============================================================
+@router.post("/request-password-reset")
+async def owner_request_password_reset(payload: OwnerResetRequest):
+
+    email = payload.email.lower()
+
+    owner = await users_collection.find_one({
+        "email": email,
+        "role": "owner"
+    })
+
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+
+    # 🔒 Rate limit: 5 reset attempts per hour
+    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+
+    attempts = await otp_collection.count_documents({
+        "email": email,
+        "type": "password_reset",
+        "created_at": {"$gte": one_hour_ago}
+    })
+
+    if attempts >= 5:
+        raise HTTPException(
+            status_code=429,
+            detail="Maximum password reset attempts reached. Try again later."
+        )
+
+    otp = randint(100000, 999999)
+
+    expiry = datetime.utcnow() + timedelta(minutes=10)
+
+    await otp_collection.insert_one({
+        "email": email,
+        "otp": otp,
+        "type": "password_reset",
+        "expires": expiry,
+        "created_at": datetime.utcnow()
+    })
+
+    # Send email
+    try:
+        sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
+
+        message = Mail(
+            from_email=settings.EMAIL_SENDER,
+            to_emails=email,
+            subject="Orderly Affairs Password Reset",
+            html_content=f"""
+            <div style="font-family:Arial">
+                <h3>Password Reset Request</h3>
+                <p>Your password reset code:</p>
+                <h2>{otp}</h2>
+                <p>This code expires in 10 minutes.</p>
+            </div>
+            """
+        )
+
+        sg.send(message)
+
+    except Exception as e:
+        print("SendGrid error:", e)
+
+    return {"message": "Password reset OTP sent"}
+
+# ============================================================
+# OWNER RESET PASSWORD
+# ============================================================
+@router.post("/reset-password")
+async def owner_reset_password(payload: OwnerResetPassword):
+
+    email = payload.email.lower()
+
+    owner = await users_collection.find_one({
+        "email": email,
+        "role": "owner"
+    })
+
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+
+    record = await otp_collection.find_one({
+        "email": email,
+        "otp": payload.otp,
+        "type": "password_reset"
+    })
+
+    if not record:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    if datetime.utcnow() > record["expires"]:
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    # 🔒 Hash new password
+    hashed_password = hash_password(payload.new_password)
+
+    await users_collection.update_one(
+        {"email": email},
+        {
+            "$set": {
+                "password": hashed_password,
+                "updated_at": datetime.utcnow()
+            }
+        }
+    )
+
+    # 🔒 Delete used OTP
+    await otp_collection.delete_many({
+        "email": email,
+        "type": "password_reset"
+    })
+
+    return {
+        "message": "Password reset successful"
+    }
