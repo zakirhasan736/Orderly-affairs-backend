@@ -29,10 +29,22 @@ async def send_nextkin_email(
 
     if event == NextKinEmailEvent.CREATED:
         subject = "Orderly Affairs – You’ve been designated as Next-of-Kin"
+
         html = f"""
         <p>Hello {nk_name},</p>
-        <p>{owner_name} has designated you as their Next-of-Kin.</p>
-        <p>You will receive access when it is approved.</p>
+
+        <p>{owner_name} has designated you as their <strong>Next-of-Kin</strong> within their Orderly Affairs account.</p>
+
+        <p>This means that, at the appropriate time and once access is approved, you may be provided with access to important information they have prepared.</p>
+
+        <p>{owner_name} may also send you a separate letter or email containing instructions about the location of their <strong>Password Card</strong> and the procedures required to access their records.</p>
+
+        <p>Please keep any such instructions in a safe place.</p>
+
+        <p>If you believe you received this message in error, you may disregard it.</p>
+
+        <p>Kind regards,<br>
+        The Orderly Affairs Team</p>
         """
 
     elif event == NextKinEmailEvent.ACCESS_APPROVED:

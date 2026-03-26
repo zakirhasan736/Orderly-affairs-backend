@@ -136,20 +136,58 @@ async def _approve_and_notify_if_needed(nextkin: dict, owner: dict, approved: bo
 
     try:
         sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
+
+        login_url = f"{settings.FRONTEND_URL}/nextkin-login"
+
         message = Mail(
             from_email=settings.EMAIL_SENDER,
             to_emails=nextkin["email"],
             subject="Orderly Affairs – Immediate Access Granted",
             html_content=f"""
-            <div style="font-family:Arial,sans-serif">
-              <p>Hello {nextkin.get("full_name")},</p>
-              <p>
-                <b>{owner.get("full_name") or owner["email"]}</b>
-                has granted you <b>Immediate Access</b> to their Orderly Affairs Kit.
-              </p>
-              <p>You may now log in and view the permitted sections.</p>
-              <hr/>
-              <small>{datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}</small>
+            <div style="font-family: Arial, sans-serif; line-height:1.6; color:#333;">
+            
+            <p>Hello {nextkin.get("full_name")},</p>
+
+            <p>
+                <b>{owner.get("full_name") or owner["email"]}</b> has granted you 
+                <b>Immediate Access</b> to their <b>Orderly Affairs Kit</b>.
+            </p>
+
+            <p>
+                You may now log in and view the sections that have been made available to you.
+            </p>
+
+            <p><b>Login Details:</b></p>
+
+            <ul>
+                <li>Email: {nextkin["email"]}</li>
+                {f"<li>Password: {plain_password}</li>" if plain_password else ""}
+            </ul>
+
+            <p>
+                <a href="{login_url}" 
+                style="
+                    display:inline-block;
+                    padding:10px 18px;
+                    background:#2563eb;
+                    color:#ffffff;
+                    text-decoration:none;
+                    border-radius:6px;
+                    font-weight:bold;">
+                Log in to Orderly Affairs
+                </a>
+            </p>
+
+            <p>
+                For security reasons, we recommend logging in and updating your password after your first access.
+            </p>
+
+            <hr style="margin-top:30px;margin-bottom:20px"/>
+
+            <small style="color:#666;">
+                Access granted on {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}
+            </small>
+
             </div>
             """,
         )
