@@ -1,0 +1,75 @@
+SECTION6_FULL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "section": {
+            "type": "string",
+            "enum": ["main_residence"],
+        },
+        "scope": {
+            "type": "string",
+            "enum": ["section", "subsection"],
+        },
+        "subsection": {
+            "type": ["string", "null"],
+            "enum": [None, "6A"],
+        },
+        "confidence": {
+            "type": "number",
+        },
+        "patch": {
+            "type": "object",
+            "properties": {
+                "6A": {
+                    "type": "object",
+                    "properties": {
+                        "home_address": {"type": ["string", "null"]},
+                        "residence_type": {"type": ["string", "null"]},
+                        "custom_residence_type": {"type": ["string", "null"]},
+                        "ownership_status": {"type": ["string", "null"]},
+                        "ownership_type": {"type": ["string", "null"]},
+                        "custom_ownership_type": {"type": ["string", "null"]},
+                        "year_purchased_leased": {"type": ["string", "null"]},
+                        "joint_owners": {"type": ["string", "null"]},
+                        "county": {"type": ["string", "null"]},
+
+                        "mortgage_lienholder_landlord": {"type": ["string", "null"]},
+                        "payment_methods": {"type": ["string", "null"]},
+                        "property_deeds_titles": {"type": ["string", "null"]},
+                        "mortgage_lease_statement": {"type": ["string", "null"]},
+                        "second_mortgage_heloc": {"type": ["string", "null"]},
+                        "property_tax_bills": {"type": ["string", "null"]},
+                        "closing_refinancing_docs": {"type": ["string", "null"]},
+                        "paid_off_documentation": {"type": ["string", "null"]},
+                        "reverse_mortgage_info": {"type": ["string", "null"]},
+                        "realtor_landlord_contact": {"type": ["string", "null"]},
+
+                        "residents": {"type": ["string", "null"]},
+                        "pets": {"type": ["string", "null"]},
+                        "year_built": {"type": ["string", "null"]},
+                        "square_footage": {"type": ["string", "null"]},
+                        "lot_size": {"type": ["string", "null"]},
+                        "bedrooms": {"type": ["string", "null"]},
+                        "bathrooms": {"type": ["string", "null"]},
+                        "home_features": {"type": ["string", "null"]},
+                        "major_appliances": {"type": ["string", "null"]},
+                        "home_inventory": {"type": ["string", "null"]},
+                        "inventory_date_location": {"type": ["string", "null"]},
+
+                        "builder_info": {"type": ["string", "null"]},
+                        "home_warranty": {"type": ["string", "null"]},
+                        "appliance_manuals": {"type": ["string", "null"]},
+                        "utility_shutoffs": {"type": ["string", "null"]},
+                        "circuit_breaker": {"type": ["string", "null"]},
+                        "home_systems_notes": {"type": ["string", "null"]},
+                        "security_system": {"type": ["string", "null"]},
+                        "smart_home_devices": {"type": ["string", "null"]},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    "required": ["section", "scope", "subsection", "confidence", "patch"],
+    "additionalProperties": False,
+}

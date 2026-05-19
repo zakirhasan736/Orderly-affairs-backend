@@ -34,7 +34,13 @@ class Settings(BaseSettings):
     STRIPE_PRICE_MONTHLY: str
     STRIPE_PRICE_YEARLY: str
     TRIAL_DAYS: int = 15
-    
+
+    # === SMS (Twilio) ===
+    TWILIO_ACCOUNT_SID: str
+    TWILIO_AUTH_TOKEN: str
+    TWILIO_PHONE_NUMBER: str
+    TWILIO_VERIFY_SERVICE_SID: str
+
     STRIPE_WEBHOOK_SECRET: str
      # === Base url Info ===
     FRONTEND_URL: str

@@ -5,6 +5,8 @@ from fastapi import FastAPI
 from app.uploads.routes import router as upload_router
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth.routes import router as auth_router
+
+
 # from app.routes.nextkin_routes import router as nextkin_router
 from app.billing.trial_scheduler import start_trial_scheduler
 from app.kits.routes_core import router as kit_router
@@ -51,6 +53,8 @@ from app.sections.section19_assets_valuables.router import router as section19_r
 from app.sections.section20_legal_document_records.router import router as section20_router
 from app.sections.section21_estate_planning_finalwishes.router import router as section21_router
 
+from app.ai.ai_upload_routes import router as ai_upload_router
+from app.ai.ai_autofill_routes import router as ai_autofill_router
 app = FastAPI(title="Orderly Affairs Backend API")
 
 origins = [
@@ -116,6 +120,9 @@ app.include_router(section20_router)
 app.include_router(section21_router)
 app.include_router(message_of_nextkin_letters_router)
 app.include_router(onboarding_router)
+
+app.include_router(ai_upload_router)
+app.include_router(ai_autofill_router)
 
 @app.get("/")
 def health_check():

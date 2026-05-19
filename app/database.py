@@ -18,11 +18,14 @@ db = client["orderly_affairs"]
 
 # ✅ Define all collections you use
 users_collection = db["users"]
+pending_signup_collection = db["pending_signups"]
+sms_mfa_attempts_collection = db["sms_mfa_attempts"]
 otp_collection = db["otp"] 
 kits_collection = db["kits"]  
 letters_collection = db["letters"] 
 section_data_collection = db["sections"] 
 messageofnextkin_collection = db["nexrkinmessage"] 
 onboarding_progress = db["onboarding_progress"]
+ai_documents_collection = db["ai_documents"]
 
 print("✅ MongoDB connected successfully")
