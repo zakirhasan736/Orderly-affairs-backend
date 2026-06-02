@@ -9,6 +9,7 @@ class NextKinBase(BaseModel):
     access_level: Optional[str] = "limited"
     authorized_sections: Optional[List[str]] = []
     immediate_access: Optional[bool] = False
+    nok_letter_received: Optional[bool] = False
     master_password: Optional[str] = None
     password_card_generated: Optional[bool] = False
     card_storage_location: Optional[str] = None

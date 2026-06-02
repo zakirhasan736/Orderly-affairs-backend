@@ -9,7 +9,7 @@ from app.config import settings
 def render_letter_text(doc: Dict[str, Any]) -> str:
     def fmt_date(v):
         if not v:
-            return "[Date]"
+            return "Upon Death"
         try:
             d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
             return d.strftime("%B %d, %Y")

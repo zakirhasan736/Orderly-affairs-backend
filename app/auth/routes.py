@@ -90,6 +90,9 @@ class ResendSignupSMSRequest(BaseModel):
 class PhoneRequest(BaseModel):
     phoneNumber: str
 
+class MFAMethodRequest(BaseModel):
+    method: str
+
 # ---- Next-of-Kin ----
 class NextKinCreateRequest(BaseModel):
     email: EmailStr
@@ -99,6 +102,7 @@ class NextKinCreateRequest(BaseModel):
     access_level: str = "full" 
     authorized_sections: list[str] | None = []
     immediate_access: bool | None = False
+    nok_letter_received: bool | None = False
     master_password: str | None = None
     password_card_generated: bool | None = False
     card_storage_location: str | None = None
@@ -112,6 +116,7 @@ class NextKinUpdateRequest(BaseModel):
     access_level: str | None = None
     authorized_sections: list[str] | None = None
     immediate_access: bool | None = None
+    nok_letter_received: bool | None = None
     master_password: str | None = None
     password_card_generated: bool | None = None
     card_storage_location: str | None = None
@@ -120,6 +125,66 @@ class NextKinUpdateRequest(BaseModel):
 class NextKinLoginRequest(BaseModel):
     email: EmailStr
     master_password: str
+
+MFA_METHODS = ("authenticator", "email", "sms")
+
+
+def normalize_mfa_methods(user: dict) -> dict[str, bool]:
+    stored = user.get("mfa_methods") or {}
+    methods = {method: bool(stored.get(method)) for method in MFA_METHODS}
+    primary = user.get("primary_mfa")
+
+    if primary in methods:
+        methods[primary] = True
+
+    return methods
+
+
+def first_enabled_mfa_method(methods: dict[str, bool]) -> str | None:
+    for method in MFA_METHODS:
+        if methods.get(method):
+            return method
+    return None
+
+
+def mfa_login_response(user: dict, billing: dict) -> dict:
+    methods = normalize_mfa_methods(user)
+    preferred = user.get("primary_mfa")
+    if preferred not in methods or not methods.get(preferred):
+        preferred = first_enabled_mfa_method(methods)
+
+    return {
+        "message": "Password verified",
+        "mfa_required": True,
+        "method": preferred,
+        "methods": [method for method, enabled in methods.items() if enabled],
+        "mfa_methods": methods,
+        "email": user["email"],
+        "phone": user.get("phone"),
+        "billing_status": billing.get("status", "pending"),
+        "requires_billing": billing.get("status") in ["pending", "blocked"],
+    }
+
+
+async def get_authorized_owner_for_email(
+    email: str,
+    authorization: str | None,
+) -> dict | None:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+
+    decoded = verify_token(authorization.split(" ")[1])
+    if not decoded:
+        return None
+
+    owner = await users_collection.find_one({
+        "email": decoded["sub"],
+        "role": "owner"
+    })
+    if not owner or owner.get("email") != email:
+        return None
+
+    return owner
 
 def build_owner_user_document(
     *,
@@ -233,7 +298,13 @@ async def approve_nextkin_access(
 
     await users_collection.update_one(
         {"_id": nextkin["_id"]},
-        {"$set": {"immediate_access": True, "updated_at": datetime.utcnow()}},
+        {
+            "$set": {
+                "immediate_access": True,
+                "nok_letter_received": False,
+                "updated_at": datetime.utcnow(),
+            }
+        },
     )
 
     await send_nextkin_email(
@@ -245,14 +316,15 @@ async def approve_nextkin_access(
 
 # Helper to flip immediate_access and notify the Next-of-Kin
 async def _approve_and_notify_if_needed(nextkin: dict, owner: dict, approved: bool = True):
-    if nextkin.get("immediate_access", False):
-        return  # already approved → no duplicate email
+    if bool(nextkin.get("immediate_access", False)) == approved:
+        return
 
     await users_collection.update_one(
         {"_id": nextkin["_id"]},
         {
             "$set": {
                 "immediate_access": approved,
+                **({"nok_letter_received": False} if approved else {}),
                 "updated_at": datetime.utcnow(),
             }
         },
@@ -659,72 +731,26 @@ async def owner_login(data: LoginRequest):
 
     billing = user.get("billing", {})
 
-    if user.get("mfa_enabled"):
-        primary_mfa = user.get("primary_mfa")
-
-        if primary_mfa == "sms":
-            phone = user.get("phone")
-
-            if not phone:
-                raise HTTPException(status_code=400, detail="Phone number not configured")
-
-            try:
-                await enforce_sms_resend_cooldown(phone)
-                send_verification_code(phone)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=str(e))
-
-            return {
-                "message": "OTP sent to registered phone",
-                "mfa_required": True,
-                "method": "sms",
-                "email": email,
-                "phone": phone,
-                "billing_status": billing.get("status", "pending"),
-                "requires_billing": billing.get("status") in ["pending", "blocked"]
-            }
-
-        if primary_mfa == "email":
-            otp = randint(100000, 999999)
-            expiry = datetime.utcnow() + timedelta(minutes=10)
-
-            await otp_collection.delete_many({"email": email})
-            await otp_collection.insert_one({
-                "email": email,
-                "otp": otp,
-                "expires": expiry,
-                "created_at": datetime.utcnow()
-            })
-
-            try:
-                sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-                message = Mail(
-                    from_email=settings.EMAIL_SENDER,
-                    to_emails=email,
-                    subject="Your Orderly Affairs verification code",
-                    html_content=f"<p>Your verification code is <b>{otp}</b>. It expires in 10 minutes.</p>",
-                )
-                sg.send(message)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Failed to send email OTP: {str(e)}")
-
-            return {
-                "message": "OTP sent to registered email",
-                "mfa_required": True,
-                "method": "email",
-                "email": email,
-                "billing_status": billing.get("status", "pending"),
-                "requires_billing": billing.get("status") in ["pending", "blocked"]
-            }
-
-        return {
-            "message": "Password verified",
-            "mfa_required": True,
-            "method": primary_mfa,
-            "email": email,
-            "billing_status": billing.get("status", "pending"),
-            "requires_billing": billing.get("status") in ["pending", "blocked"]
-        }
+    methods = normalize_mfa_methods(user)
+    if user.get("mfa_enabled") or any(methods.values()):
+        if not any(methods.values()):
+            await users_collection.update_one(
+                {"_id": user["_id"]},
+                {
+                    "$set": {
+                        "mfa_enabled": False,
+                        "primary_mfa": None,
+                        "mfa_methods": {
+                            "email": False,
+                            "authenticator": False,
+                            "sms": False,
+                        },
+                        "updated_at": datetime.utcnow(),
+                    }
+                },
+            )
+        else:
+            return mfa_login_response(user, billing)
 
     token = create_access_token(user)
 
@@ -847,6 +873,9 @@ async def create_nextkin(
             "access_level": req.access_level,
             "authorized_sections": req.authorized_sections or [],
             "immediate_access": False,
+            "nok_letter_received": (
+                bool(req.nok_letter_received) if not req.immediate_access else False
+            ),
 
             "password_card_generated": req.password_card_generated,
             "card_storage_location": req.card_storage_location,
@@ -875,7 +904,13 @@ async def create_nextkin(
         if req.immediate_access:
             await users_collection.update_one(
                 {"_id": new_id},
-                {"$set": {"immediate_access": True, "updated_at": datetime.utcnow()}},
+                {
+                    "$set": {
+                        "immediate_access": True,
+                        "nok_letter_received": False,
+                        "updated_at": datetime.utcnow(),
+                    }
+                },
             )
 
             await send_nextkin_email(
@@ -1006,6 +1041,7 @@ async def get_my_nextkin(authorization: str = Header(None)):
             "access_level": nk.get("access_level"),
             "authorized_sections": nk.get("authorized_sections", []),
             "immediate_access": nk.get("immediate_access", False),
+            "nok_letter_received": nk.get("nok_letter_received", False),
 
             "password_card_generated": nk.get("password_card_generated"),
             "card_storage_location": nk.get("card_storage_location"),
@@ -1044,6 +1080,9 @@ async def update_nextkin(
 
     # ✅ Only update provided fields
     update_data = {k: v for k, v in payload.dict().items() if v is not None}
+
+    if update_data.get("immediate_access") is True:
+        update_data["nok_letter_received"] = False
 
     # Optional: hash master_password if changed
     if payload.master_password:
@@ -1156,6 +1195,7 @@ async def get_nextkin_access(authorization: str = Header(None)):
         "authorized_sections": "all" if full_access else nextkin.get("authorized_sections", []),
         "access_level": access_level,
         "immediate_access": True,
+        "nok_letter_received": nextkin.get("nok_letter_received", False),
         "owner_id": nextkin["owner_id"],
         "nextkin": {
             "id": str(nextkin["_id"]),
@@ -1303,7 +1343,8 @@ async def verify_totp(payload: VerifyTOTPRequest):
     totp = pyotp.TOTP(user["totp_secret"])
     if not totp.verify(payload.code):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
-    if user.get("primary_mfa") != "authenticator":
+    methods = normalize_mfa_methods(user)
+    if not methods["authenticator"]:
         raise HTTPException(status_code=403, detail="Authenticator MFA not enabled")
 
     await users_collection.update_one(
@@ -1312,15 +1353,15 @@ async def verify_totp(payload: VerifyTOTPRequest):
             "$set": {
                 "verified": True,
                 "mfa_enabled": True,
-                "primary_mfa": "authenticator",
+                "primary_mfa": user.get("primary_mfa") or "authenticator",
                 "mfa_methods.authenticator": True,
                 "updated_at": datetime.utcnow(),
             }
         },
     )
 
-
-    token = create_access_token(user)
+    updated_user = await users_collection.find_one({"email": payload.email.lower()})
+    token = create_access_token(updated_user)
     return {"access_token": token, "message": "Login successful"}
 
 
@@ -1328,20 +1369,29 @@ async def verify_totp(payload: VerifyTOTPRequest):
 # 7️⃣ GENERATE MFA QR
 # ============================================================
 @router.post("/generate-mfa")
-async def generate_mfa(payload: EmailRequest):
-    user = await users_collection.find_one({"email": payload.email.lower()})
+async def generate_mfa(payload: EmailRequest, authorization: str | None = Header(default=None)):
+    email = payload.email.lower().strip()
+    user = await users_collection.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.get("mfa_linked"):
+    methods = normalize_mfa_methods(user)
+    if user.get("mfa_linked") and methods["authenticator"]:
         raise HTTPException(status_code=400, detail="Authenticator already linked")
 
+    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    if not authorized_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="Sign in and enable authenticator MFA from Vault Settings."
+        )
+
     secret = pyotp.random_base32()
-    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=payload.email, issuer_name="Orderly Affairs")
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=email, issuer_name="Orderly Affairs")
     qr = qrcode.make(uri)
     buf = BytesIO()
     qr.save(buf, format="PNG")
     img_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    await users_collection.update_one({"email": payload.email.lower()}, {"$set": {"provisioned_secret": secret}})
+    await users_collection.update_one({"email": email}, {"$set": {"provisioned_secret": secret}})
     return {"qrCodeUrl": f"data:image/png;base64,{img_base64}", "secret": secret}
 
 
@@ -1349,7 +1399,10 @@ async def generate_mfa(payload: EmailRequest):
 # 8️⃣ LINK AUTHENTICATOR
 # ============================================================
 @router.post("/link-authenticator")
-async def link_authenticator(payload: LinkAuthenticatorRequest):
+async def link_authenticator(
+    payload: LinkAuthenticatorRequest,
+    authorization: str | None = Header(default=None),
+):
     email = payload.email.lower().strip()
 
     # first check pending signup
@@ -1382,6 +1435,13 @@ async def link_authenticator(payload: LinkAuthenticatorRequest):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    if not authorized_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="Sign in and enable authenticator MFA from Vault Settings."
+        )
+
     totp = pyotp.TOTP(payload.secret)
     if not totp.verify(payload.code):
         raise HTTPException(status_code=400, detail="Invalid verification code")
@@ -1395,7 +1455,7 @@ async def link_authenticator(payload: LinkAuthenticatorRequest):
                 "mfa_linked": True,
                 "mfa_enabled": True,
                 "verified": True,
-                "primary_mfa": "authenticator",
+                "primary_mfa": user.get("primary_mfa") or "authenticator",
                 "mfa_methods.authenticator": True,
                 "updated_at": datetime.utcnow(),
             }
@@ -1409,7 +1469,10 @@ async def link_authenticator(payload: LinkAuthenticatorRequest):
 # 9️⃣ EMAIL OTP — SEND & VERIFY
 # ============================================================
 @router.post("/send-email")
-async def send_email_otp(payload: EmailRequest):
+async def send_email_otp(
+    payload: EmailRequest,
+    authorization: str | None = Header(default=None),
+):
     email = payload.email.lower().strip()
 
     otp = randint(100000, 999999)
@@ -1435,6 +1498,18 @@ async def send_email_otp(payload: EmailRequest):
         )
     else:
         # ✅ 2. Existing login email MFA
+        user = await users_collection.find_one({"email": email, "role": "owner"})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        methods = normalize_mfa_methods(user)
+        authorized_owner = await get_authorized_owner_for_email(email, authorization)
+        if not methods["email"] and not authorized_owner:
+            raise HTTPException(
+                status_code=403,
+                detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
+            )
+
         await otp_collection.delete_many({"email": email})
         await otp_collection.insert_one({
             "email": email,
@@ -1471,7 +1546,10 @@ async def send_email_otp(payload: EmailRequest):
 
 
 @router.post("/verify-email")
-async def verify_email_code(payload: VerifyEmailRequest):
+async def verify_email_code(
+    payload: VerifyEmailRequest,
+    authorization: str | None = Header(default=None),
+):
     email = payload.email.lower().strip()
 
     # first check pending signup email flow
@@ -1521,9 +1599,31 @@ async def verify_email_code(payload: VerifyEmailRequest):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    methods = normalize_mfa_methods(user)
+    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    if not methods["email"] and not authorized_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
+        )
+
     await otp_collection.delete_many({"email": email})
 
-    token = create_access_token(user)
+    await users_collection.update_one(
+        {"_id": user["_id"]},
+        {
+            "$set": {
+                "verified": True,
+                "mfa_enabled": True,
+                "primary_mfa": user.get("primary_mfa") or "email",
+                "mfa_methods.email": True,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+
+    updated_user = await users_collection.find_one({"_id": user["_id"]})
+    token = create_access_token(updated_user)
     return {
         "access_token": token,
         "message": "Login successful via email MFA",
@@ -1574,10 +1674,68 @@ async def get_me(authorization: str = Header(None)):
 
     return {
         "email": user["email"],
+        "phone": user.get("phone"),
         "role": user.get("role", "owner"),
-        "mfa_enabled": user.get("mfa_enabled", False),
+        "mfa_enabled": any(normalize_mfa_methods(user).values()),
         "primary_mfa": user.get("primary_mfa"),
-        "mfa_methods": user.get("mfa_methods", {}),
+        "mfa_methods": normalize_mfa_methods(user),
+    }
+
+@router.post("/mfa/disable")
+async def disable_mfa_method(payload: MFAMethodRequest, authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+
+    method = payload.method
+    if method not in MFA_METHODS:
+        raise HTTPException(status_code=400, detail="Invalid MFA method")
+
+    decoded = verify_token(authorization.split(" ")[1])
+    if not decoded:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = await users_collection.find_one({
+        "email": decoded["sub"],
+        "role": "owner"
+    })
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    methods = normalize_mfa_methods(user)
+    if methods.get(method) and sum(1 for enabled in methods.values() if enabled) <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one MFA method must remain linked."
+        )
+
+    methods[method] = False
+    next_primary = user.get("primary_mfa")
+    if next_primary == method:
+        next_primary = first_enabled_mfa_method(methods)
+
+    update_doc = {
+        "$set": {
+            f"mfa_methods.{method}": False,
+            "mfa_enabled": any(methods.values()),
+            "primary_mfa": next_primary,
+            "updated_at": datetime.utcnow(),
+        }
+    }
+
+    if method == "authenticator":
+        update_doc["$set"]["mfa_linked"] = False
+        update_doc["$unset"] = {
+            "totp_secret": "",
+            "provisioned_secret": "",
+        }
+
+    await users_collection.update_one({"_id": user["_id"]}, update_doc)
+
+    return {
+        "message": f"{method} MFA disabled",
+        "mfa_enabled": any(methods.values()),
+        "primary_mfa": next_primary,
+        "mfa_methods": methods,
     }
 
 @router.post("/mfa/reset")
@@ -1779,7 +1937,10 @@ async def owner_reset_password(payload: OwnerResetPassword):
 # ============================================================
 
 @router.post("/start-sms-mfa")
-async def start_sms_mfa(payload: StartSMSMFARequest):
+async def start_sms_mfa(
+    payload: StartSMSMFARequest,
+    authorization: str | None = Header(default=None),
+):
     user = await users_collection.find_one({
         "email": payload.email.lower().strip(),
         "role": "owner"
@@ -1789,6 +1950,17 @@ async def start_sms_mfa(payload: StartSMSMFARequest):
         raise HTTPException(status_code=404, detail="User not found")
 
     phone = user.get("phone")
+    methods = normalize_mfa_methods(user)
+    authorized_owner = await get_authorized_owner_for_email(
+        payload.email.lower().strip(),
+        authorization,
+    )
+
+    if not methods["sms"] and not authorized_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="SMS MFA is not linked. Sign in and enable it from Vault Settings."
+        )
 
     if not phone and not payload.phoneNumber:
         return {
@@ -1797,6 +1969,12 @@ async def start_sms_mfa(payload: StartSMSMFARequest):
         }
 
     if payload.phoneNumber:
+        if not authorized_owner:
+            raise HTTPException(
+                status_code=403,
+                detail="Sign in to Vault Settings before changing the SMS phone number."
+            )
+
         try:
             phone = format_phone(payload.phoneNumber)
         except ValueError as e:
@@ -1808,6 +1986,7 @@ async def start_sms_mfa(payload: StartSMSMFARequest):
         )
 
     try:
+        await enforce_sms_resend_cooldown(phone)
         send_verification_code(phone)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1858,7 +2037,8 @@ async def resend_sms_mfa(payload: EmailRequest):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if not user.get("mfa_enabled") or user.get("primary_mfa") != "sms":
+    methods = normalize_mfa_methods(user)
+    if not methods["sms"]:
         raise HTTPException(status_code=400, detail="SMS MFA not enabled")
 
     phone = user.get("phone")
@@ -1881,7 +2061,10 @@ async def resend_sms_mfa(payload: EmailRequest):
 # ============================================================
 
 @router.post("/verify-sms-otp")
-async def verify_sms_otp(payload: VerifySMSOTPRequest):
+async def verify_sms_otp(
+    payload: VerifySMSOTPRequest,
+    authorization: str | None = Header(default=None),
+):
     email = payload.email.lower().strip()
     otp = payload.code.strip()
 
@@ -1925,6 +2108,14 @@ async def verify_sms_otp(payload: VerifySMSOTPRequest):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    methods = normalize_mfa_methods(user)
+    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    if not methods["sms"] and not authorized_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="SMS MFA is not linked. Sign in and enable it from Vault Settings."
+        )
+
     phone = user.get("phone")
     if not phone:
         raise HTTPException(status_code=400, detail="Phone number not configured")
@@ -1940,7 +2131,20 @@ async def verify_sms_otp(payload: VerifySMSOTPRequest):
             detail=f"Verification failed: {result.status}"
         )
 
-    token = create_access_token(user)
+    await users_collection.update_one(
+        {"_id": user["_id"]},
+        {
+            "$set": {
+                "mfa_enabled": True,
+                "primary_mfa": user.get("primary_mfa") or "sms",
+                "mfa_methods.sms": True,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+
+    updated_user = await users_collection.find_one({"_id": user["_id"]})
+    token = create_access_token(updated_user)
 
     return {
         "access_token": token,
@@ -1980,7 +2184,7 @@ async def link_sms(payload: PhoneRequest, authorization: str = Header(...)):
             "$set": {
                 "phone": phone,
                 "mfa_enabled": True,
-                "primary_mfa": "sms",
+                "primary_mfa": user.get("primary_mfa") or "sms",
                 "mfa_methods.sms": True,
                 "updated_at": datetime.utcnow()
             }

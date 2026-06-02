@@ -37,6 +37,7 @@ class NextKinCreateRequest(BaseModel):
     access_level: str | None = "limited"
     authorized_sections: list[str] | None = []
     immediate_access: bool | None = False
+    nok_letter_received: bool | None = False
     master_password: str | None = None
     password_card_generated: bool | None = False
     card_storage_location: str | None = None

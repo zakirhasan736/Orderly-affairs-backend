@@ -38,6 +38,12 @@ async def _process_due(limit: int = 50):
             letter = await nok_letters.find_one({"_id": ObjectId(letter_id)}) if letter_id else None
             if not letter:
                 raise RuntimeError("Letter not found")
+            if letter.get("delivery_status") == "sent":
+                await scheduled_letters.update_one(
+                    {"_id": job["_id"]},
+                    {"$set": {"status": "cancelled", "updated_at": now}}
+                )
+                continue
 
             to_email = letter.get("nok_email")
             if not to_email:
@@ -50,6 +56,10 @@ async def _process_due(limit: int = 50):
             await scheduled_letters.update_one(
                 {"_id": job["_id"]},
                 {"$set": {"status": "sent", "sent_at": now, "updated_at": now}}
+            )
+            await nok_letters.update_one(
+                {"_id": letter["_id"]},
+                {"$set": {"delivery_status": "sent", "sent_at": now, "updated_at": now}}
             )
         except Exception as e:
             attempts = int(job.get("attempts", 0)) + 1

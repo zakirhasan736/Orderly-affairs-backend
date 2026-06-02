@@ -6,10 +6,20 @@ from fastapi import Request
 from app.security.jwt_handler import verify_token
 from app.security.crypto import encrypt_data,decrypt_data
 from app.database import messageofnextkin_collection
-from .models import LetterCreate, LetterUpdate
+from .models import LetterCreate, LetterUpdate, MediaDeleteRequest
 from app.security.cloudinary_service import upload_file, delete_file
 
 router = APIRouter(prefix="/message", tags=["Message"])
+
+MESSAGE_MEDIA_FOLDER = "messages/media/"
+
+def delete_media_file(media: dict | None):
+    if not media:
+        return
+
+    public_id = media.get("public_id")
+    if public_id:
+        delete_file(public_id)
 
 @router.post("")
 async def create_letter(
@@ -100,7 +110,27 @@ async def update_letter(
 ):
     user = verify_token(authorization.split(" ")[1])
 
-    update_data = payload.dict(exclude_unset=True)
+    owner_id = user.get("owner_id") or user.get("sub")
+
+    letter = await messageofnextkin_collection.find_one({
+        "_id": ObjectId(letter_id),
+        "owner_id": owner_id,
+        "is_deleted": False,
+    })
+
+    if not letter:
+        raise HTTPException(status_code=404, detail="Letter not found")
+
+    update_data = payload.model_dump(exclude_unset=True)
+
+    if "media" in update_data:
+        old_media = letter.get("media")
+        new_media = update_data.get("media")
+        old_public_id = (old_media or {}).get("public_id")
+        new_public_id = (new_media or {}).get("public_id")
+
+        if old_public_id and old_public_id != new_public_id:
+            delete_media_file(old_media)
 
     # Encrypt only if content/subject changed
     if "subject" in update_data or "content" in update_data:
@@ -112,7 +142,6 @@ async def update_letter(
 
     update_data["updated_at"] = datetime.utcnow()
 
-    owner_id = user.get("owner_id") or user.get("sub")
     result = await messageofnextkin_collection.update_one(
         {
             "_id": ObjectId(letter_id),
@@ -132,12 +161,52 @@ async def delete_letter(letter_id: str, authorization: str = Header(...)):
     user = verify_token(authorization.split(" ")[1])
 
     owner_id = user.get("owner_id") or user.get("sub")
+    letter = await messageofnextkin_collection.find_one({
+        "_id": ObjectId(letter_id),
+        "owner_id": owner_id,
+        "is_deleted": False,
+    })
+
+    if not letter:
+        raise HTTPException(status_code=404, detail="Letter not found")
+
+    delete_media_file(letter.get("media"))
+
     await messageofnextkin_collection.update_one(
         {"_id": ObjectId(letter_id), "owner_id": owner_id},
-        {"$set": {"is_deleted": True}}
+        {
+            "$set": {
+                "is_deleted": True,
+                "media": None,
+                "updated_at": datetime.utcnow(),
+            }
+        }
     )
 
     return {"status": "deleted"}
+
+@router.delete("/{letter_id}/media")
+async def delete_letter_media(letter_id: str, authorization: str = Header(...)):
+    user = verify_token(authorization.split(" ")[1])
+
+    owner_id = user.get("owner_id") or user.get("sub")
+    letter = await messageofnextkin_collection.find_one({
+        "_id": ObjectId(letter_id),
+        "owner_id": owner_id,
+        "is_deleted": False,
+    })
+
+    if not letter:
+        raise HTTPException(status_code=404, detail="Letter not found")
+
+    delete_media_file(letter.get("media"))
+
+    await messageofnextkin_collection.update_one(
+        {"_id": ObjectId(letter_id), "owner_id": owner_id},
+        {"$set": {"media": None, "updated_at": datetime.utcnow()}}
+    )
+
+    return {"status": "media_deleted"}
 
 @router.post("/media")
 async def upload_message_media(
@@ -165,4 +234,22 @@ async def upload_message_media(
         "format": uploaded.get("format"),
         "size": uploaded.get("bytes"),
     }
+
+@router.post("/media/delete")
+async def delete_uploaded_message_media(
+    payload: MediaDeleteRequest,
+    authorization: str = Header(...)
+):
+    token = authorization.split(" ")[1]
+    verify_token(token)
+
+    if not payload.public_id.startswith(MESSAGE_MEDIA_FOLDER):
+        raise HTTPException(
+            status_code=400,
+            detail="Only message media can be deleted from this endpoint"
+        )
+
+    delete_file(payload.public_id)
+
+    return {"status": "deleted"}
 

@@ -45,6 +45,9 @@ class LetterUpdate(BaseModel):
             raise ValueError("delivery_date is required when delivery_trigger is 'date'")
         return self
 
+class MediaDeleteRequest(BaseModel):
+    public_id: str
+
 class LetterDB(BaseModel):
     owner_id: str
 

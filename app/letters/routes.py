@@ -1,7 +1,7 @@
 # app/nok_letter/routes.py
 from fastapi import APIRouter, Header, HTTPException, Query
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from bson import ObjectId
 
 from app.database import db, kits_collection
@@ -11,6 +11,7 @@ from .models import NOKLetterIn, NOKLetterOut
 router = APIRouter(prefix="/nok-letter", tags=["nok-letter"])
 
 nok_letters_collection = db["nok_letters"]
+scheduled_letters_collection = db["scheduled_letters"]
 users_collection = db["users"]
 
 
@@ -38,9 +39,103 @@ def to_out(doc: Dict[str, Any]) -> NOKLetterOut:
         incomplete_kit_message=doc.get("incomplete_kit_message"),
         closing_message=doc.get("closing_message"),
         letter_signature=doc.get("letter_signature"),
+        delivery_trigger=doc.get("delivery_trigger"),
+        delivery_status=doc.get("delivery_status"),
+        scheduled_send_at=doc.get("scheduled_send_at"),
+        sent_at=doc.get("sent_at"),
         created_at=doc.get("created_at"),
         updated_at=doc.get("updated_at"),
     )
+
+
+def parse_letter_send_at(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
+
+
+async def sync_letter_delivery(doc: Dict[str, Any]) -> Dict[str, Any]:
+    if doc.get("delivery_status") == "sent":
+        return doc
+
+    letter_id = str(doc["_id"])
+    now = datetime.now(timezone.utc)
+    send_at = parse_letter_send_at(doc.get("letter_date"))
+
+    if send_at:
+        delivery_update = {
+            "delivery_trigger": "date",
+            "delivery_status": "scheduled",
+            "scheduled_send_at": send_at,
+            "updated_at": now,
+        }
+        await nok_letters_collection.update_one(
+            {"_id": doc["_id"]},
+            {"$set": delivery_update},
+        )
+
+        job_update = {
+            "letter_id": letter_id,
+            "owner_id": doc.get("owner_id"),
+            "nok_user_id": doc.get("nok_user_id"),
+            "status": "scheduled",
+            "send_at": send_at,
+            "subject": "Letter to Next of Kin",
+            "attempts": 0,
+            "updated_at": now,
+        }
+
+        existing_job = await scheduled_letters_collection.find_one(
+            {"letter_id": letter_id, "status": "scheduled"}
+        )
+
+        if existing_job:
+            await scheduled_letters_collection.update_one(
+                {"_id": existing_job["_id"]},
+                {"$set": job_update},
+            )
+            await scheduled_letters_collection.update_many(
+                {
+                    "letter_id": letter_id,
+                    "status": "scheduled",
+                    "_id": {"$ne": existing_job["_id"]},
+                },
+                {"$set": {"status": "cancelled", "updated_at": now}},
+            )
+        else:
+            await scheduled_letters_collection.insert_one(
+                {**job_update, "created_at": now}
+            )
+    else:
+        await nok_letters_collection.update_one(
+            {"_id": doc["_id"]},
+            {
+                "$set": {
+                    "delivery_trigger": "death",
+                    "delivery_status": "pending",
+                    "scheduled_send_at": None,
+                    "updated_at": now,
+                }
+            },
+        )
+        await scheduled_letters_collection.update_many(
+            {"letter_id": letter_id, "status": "scheduled"},
+            {"$set": {"status": "cancelled", "updated_at": now}},
+        )
+
+    return await nok_letters_collection.find_one({"_id": doc["_id"]})
 
 
 async def fetch_nok_by_id(owner_id: str, nok_id: str) -> Optional[Dict[str, Any]]:
@@ -52,7 +147,9 @@ async def fetch_nok_by_id(owner_id: str, nok_id: str) -> Optional[Dict[str, Any]
         "_id": _id,
         "role": "nextkin",
         "owner_id": owner_id,
-        "verified": True
+        "verified": True,
+        "immediate_access": {"$ne": True},
+        "nok_letter_received": True,
     })
     if not doc:
         return None
@@ -69,7 +166,13 @@ async def fetch_nok_by_id(owner_id: str, nok_id: str) -> Optional[Dict[str, Any]
 
 async def fetch_primary_nok(owner_id: str) -> Optional[Dict[str, Any]]:
     cursor = users_collection.find(
-        {"owner_id": owner_id, "role": "nextkin", "verified": True}
+        {
+            "owner_id": owner_id,
+            "role": "nextkin",
+            "verified": True,
+            "immediate_access": {"$ne": True},
+            "nok_letter_received": True,
+        }
     )
     people = await cursor.to_list(length=None)
     if not people:
@@ -79,10 +182,9 @@ async def fetch_primary_nok(owner_id: str) -> Optional[Dict[str, Any]]:
         lvl = (p.get("access_level") or "").lower()
         is_full = 2 if ("full kit access" in lvl or "full access" in lvl) else 0
         has_sections = 1 if (p.get("authorized_sections") or []) else 0
-        immediate = 1 if p.get("immediate_access") else 0
         created_at = p.get("created_at")
         ts = created_at.timestamp() if isinstance(created_at, datetime) else 0
-        return (is_full, has_sections, immediate, ts)
+        return (is_full, has_sections, ts)
 
     p = max(people, key=score)
     return {
@@ -200,6 +302,18 @@ async def get_my_nok_letter(
 
     doc = await nok_letters_collection.find_one(match)
     if doc:
+        merged = await apply_autofill(
+            owner_id,
+            NOKLetterIn(**doc),
+            nok_id or doc.get("nok_user_id"),
+        )
+        if merged:
+            await nok_letters_collection.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {**merged, "updated_at": datetime.utcnow()}},
+            )
+            doc = await nok_letters_collection.find_one({"_id": doc["_id"]})
+        doc = await sync_letter_delivery(doc)
         return to_out(doc)
 
     # No doc yet -> build and insert
@@ -208,6 +322,7 @@ async def get_my_nok_letter(
     new_doc = {**merged, "owner_id": owner_id, "created_at": now, "updated_at": now}
     res = await nok_letters_collection.insert_one(new_doc)
     new_doc["_id"] = res.inserted_id
+    new_doc = await sync_letter_delivery(new_doc)
     return to_out(new_doc)
 
 
@@ -234,11 +349,13 @@ async def create_or_replace_my_nok_letter(
             {"$set": {**merged, "updated_at": now}},
         )
         doc = await nok_letters_collection.find_one({"_id": existing["_id"]})
+        doc = await sync_letter_delivery(doc)
         return to_out(doc)
 
     doc = {**merged, "owner_id": owner_id, "created_at": now, "updated_at": now}
     res = await nok_letters_collection.insert_one(doc)
     doc["_id"] = res.inserted_id
+    doc = await sync_letter_delivery(doc)
     return to_out(doc)
 
 
@@ -267,4 +384,5 @@ async def update_my_nok_letter(
         {"$set": {**merged, "updated_at": datetime.utcnow()}},
     )
     doc = await nok_letters_collection.find_one({"_id": existing["_id"]})
+    doc = await sync_letter_delivery(doc)
     return to_out(doc)
