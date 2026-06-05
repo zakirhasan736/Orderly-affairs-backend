@@ -20,6 +20,8 @@ db = client["orderly_affairs"]
 users_collection = db["users"]
 pending_signup_collection = db["pending_signups"]
 sms_mfa_attempts_collection = db["sms_mfa_attempts"]
+otp_fraud_logs_collection = db["otp_fraud_logs"]
+otp_verify_locks_collection = db["otp_verify_locks"]
 otp_collection = db["otp"] 
 kits_collection = db["kits"]  
 letters_collection = db["letters"] 
@@ -28,4 +30,4 @@ messageofnextkin_collection = db["nexrkinmessage"]
 onboarding_progress = db["onboarding_progress"]
 ai_documents_collection = db["ai_documents"]
 
-print("✅ MongoDB connected successfully")
+print("MongoDB connected successfully")

@@ -41,6 +41,22 @@ class Settings(BaseSettings):
     TWILIO_PHONE_NUMBER: str
     TWILIO_VERIFY_SERVICE_SID: str
 
+    # === OTP Security ===
+    OTP_CAPTCHA_ENABLED: bool = True
+    TURNSTILE_SECRET_KEY: str | None = None
+    OTP_ALLOWED_COUNTRIES: str = "*"
+    OTP_PHONE_COOLDOWN_SECONDS: int = 60
+    OTP_PHONE_MAX_PER_HOUR: int = 5
+    OTP_PHONE_MAX_PER_DAY: int = 10
+    OTP_EMAIL_COOLDOWN_SECONDS: int = 60
+    OTP_EMAIL_MAX_PER_HOUR: int = 5
+    OTP_EMAIL_MAX_PER_DAY: int = 10
+    OTP_IP_MAX_PER_HOUR: int = 10
+    OTP_IP_MAX_PER_DAY: int = 30
+    OTP_SESSION_MAX_PER_HOUR: int = 5
+    OTP_VERIFY_MAX_ATTEMPTS: int = 5
+    OTP_VERIFY_LOCK_MINUTES: int = 30
+
     STRIPE_WEBHOOK_SECRET: str
      # === Base url Info ===
     FRONTEND_URL: str
@@ -64,4 +80,4 @@ if private_key_path.exists() and public_key_path.exists():
 
 # Print to confirm (optional debug)
 if settings.APP_ENV == "development":
-    print(f"✅ Loaded config for {settings.APP_NAME}")
+    print(f"Loaded config for {settings.APP_NAME}")

@@ -47,6 +47,7 @@ class LetterUpdate(BaseModel):
 
 class MediaDeleteRequest(BaseModel):
     public_id: str
+    resource_type: Optional[str] = None
 
 class LetterDB(BaseModel):
     owner_id: str

@@ -13,6 +13,8 @@ class NextKinBase(BaseModel):
     master_password: Optional[str] = None
     password_card_generated: Optional[bool] = False
     card_storage_location: Optional[str] = None
+    key_bag_location: Optional[str] = None
+    documents_bag_location: Optional[str] = None
     special_instructions: Optional[str] = None
 
 

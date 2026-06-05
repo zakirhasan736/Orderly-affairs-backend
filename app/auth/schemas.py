@@ -41,6 +41,8 @@ class NextKinCreateRequest(BaseModel):
     master_password: str | None = None
     password_card_generated: bool | None = False
     card_storage_location: str | None = None
+    key_bag_location: str | None = None
+    documents_bag_location: str | None = None
     special_instructions: str | None = None
 
 

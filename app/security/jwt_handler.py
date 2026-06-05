@@ -61,3 +61,28 @@ def verify_token(token: str):
         return payload
     except Exception:
         return None
+
+
+def create_mfa_challenge_token(email: str, expires_minutes: int = 10) -> str:
+    expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
+    payload = {
+        "sub": email.lower().strip(),
+        "purpose": "mfa_login",
+        "exp": expire,
+    }
+    private_key = settings.JWT_PRIVATE_KEY.replace("\\n", "\n")
+    return jwt.encode(payload, private_key, algorithm=settings.JWT_ALGORITHM)
+
+
+def verify_mfa_challenge_token(token: str | None, email: str) -> bool:
+    if not token or not token.strip():
+        return False
+
+    payload = verify_token(token.strip())
+    if not payload:
+        return False
+
+    if payload.get("purpose") != "mfa_login":
+        return False
+
+    return payload.get("sub", "").lower() == email.lower().strip()

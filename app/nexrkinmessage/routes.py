@@ -2,6 +2,7 @@ from fastapi import Header
 from fastapi import APIRouter, Depends, HTTPException,  UploadFile, File
 from datetime import datetime
 from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import Request
 from app.security.jwt_handler import verify_token
 from app.security.crypto import encrypt_data,decrypt_data
@@ -11,15 +12,40 @@ from app.security.cloudinary_service import upload_file, delete_file
 
 router = APIRouter(prefix="/message", tags=["Message"])
 
-MESSAGE_MEDIA_FOLDER = "messages/media/"
+MESSAGE_MEDIA_FOLDER = "messages/media"
 
-def delete_media_file(media: dict | None):
+
+def parse_message_id(letter_id: str) -> ObjectId:
+    try:
+        return ObjectId(letter_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid message id")
+
+
+def get_authenticated_user(authorization: str):
+    if not authorization or " " not in authorization:
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+
+    user = verify_token(authorization.split(" ", 1)[1])
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    return user
+
+
+def delete_media_file(media: dict | None) -> bool:
     if not media:
-        return
+        return True
 
     public_id = media.get("public_id")
-    if public_id:
-        delete_file(public_id)
+    if not public_id:
+        return True
+
+    deleted = delete_file(public_id, media.get("type"))
+    if not deleted:
+        print(f"⚠️ Failed to hard-delete message media from Cloudinary: {public_id}")
+
+    return deleted
 
 @router.post("")
 async def create_letter(
@@ -58,8 +84,8 @@ async def create_letter(
         "updated_at": datetime.utcnow(),
     }
 
-    await messageofnextkin_collection.insert_one(doc)
-    return {"status": "saved"}
+    result = await messageofnextkin_collection.insert_one(doc)
+    return {"status": "saved", "_id": str(result.inserted_id)}
 
 
 @router.get("")
@@ -102,18 +128,45 @@ async def get_letters(authorization: str = Header(...)):
 
     return result
 
+@router.delete("")
+async def delete_all_letters(authorization: str = Header(...)):
+    user = verify_token(authorization.split(" ")[1])
+    owner_id = user.get("owner_id") or user.get("sub")
+
+    letters = await messageofnextkin_collection.find({
+        "owner_id": owner_id,
+        "is_deleted": False,
+    }).to_list(None)
+
+    for letter in letters:
+        delete_media_file(letter.get("media"))
+
+    if letters:
+        await messageofnextkin_collection.update_many(
+            {"owner_id": owner_id, "is_deleted": False},
+            {
+                "$set": {
+                    "is_deleted": True,
+                    "media": None,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+
+    return {"status": "cleared", "count": len(letters)}
+
 @router.put("/{letter_id}")
 async def update_letter(
     letter_id: str,
     payload: LetterUpdate,
     authorization: str = Header(...)
 ):
-    user = verify_token(authorization.split(" ")[1])
-
+    user = get_authenticated_user(authorization)
     owner_id = user.get("owner_id") or user.get("sub")
+    letter_oid = parse_message_id(letter_id)
 
     letter = await messageofnextkin_collection.find_one({
-        "_id": ObjectId(letter_id),
+        "_id": letter_oid,
         "owner_id": owner_id,
         "is_deleted": False,
     })
@@ -144,7 +197,7 @@ async def update_letter(
 
     result = await messageofnextkin_collection.update_one(
         {
-            "_id": ObjectId(letter_id),
+            "_id": letter_oid,
             "owner_id": owner_id,
             "is_deleted": False,
         },
@@ -158,11 +211,12 @@ async def update_letter(
 
 @router.delete("/{letter_id}")
 async def delete_letter(letter_id: str, authorization: str = Header(...)):
-    user = verify_token(authorization.split(" ")[1])
-
+    user = get_authenticated_user(authorization)
     owner_id = user.get("owner_id") or user.get("sub")
+    letter_oid = parse_message_id(letter_id)
+
     letter = await messageofnextkin_collection.find_one({
-        "_id": ObjectId(letter_id),
+        "_id": letter_oid,
         "owner_id": owner_id,
         "is_deleted": False,
     })
@@ -170,10 +224,11 @@ async def delete_letter(letter_id: str, authorization: str = Header(...)):
     if not letter:
         raise HTTPException(status_code=404, detail="Letter not found")
 
+    # Hard-delete media from Cloudinary first so no orphaned files remain.
     delete_media_file(letter.get("media"))
 
     await messageofnextkin_collection.update_one(
-        {"_id": ObjectId(letter_id), "owner_id": owner_id},
+        {"_id": letter_oid, "owner_id": owner_id},
         {
             "$set": {
                 "is_deleted": True,
@@ -183,15 +238,16 @@ async def delete_letter(letter_id: str, authorization: str = Header(...)):
         }
     )
 
-    return {"status": "deleted"}
+    return {"status": "deleted", "media_removed": True}
 
 @router.delete("/{letter_id}/media")
 async def delete_letter_media(letter_id: str, authorization: str = Header(...)):
-    user = verify_token(authorization.split(" ")[1])
-
+    user = get_authenticated_user(authorization)
     owner_id = user.get("owner_id") or user.get("sub")
+    letter_oid = parse_message_id(letter_id)
+
     letter = await messageofnextkin_collection.find_one({
-        "_id": ObjectId(letter_id),
+        "_id": letter_oid,
         "owner_id": owner_id,
         "is_deleted": False,
     })
@@ -202,7 +258,7 @@ async def delete_letter_media(letter_id: str, authorization: str = Header(...)):
     delete_media_file(letter.get("media"))
 
     await messageofnextkin_collection.update_one(
-        {"_id": ObjectId(letter_id), "owner_id": owner_id},
+        {"_id": letter_oid, "owner_id": owner_id},
         {"$set": {"media": None, "updated_at": datetime.utcnow()}}
     )
 
@@ -216,7 +272,15 @@ async def upload_message_media(
     token = authorization.split(" ")[1]
     verify_token(token)
 
-    if not file.content_type.startswith(("video/", "audio/")):
+    content_type = (file.content_type or "").lower()
+    filename = (file.filename or "").lower()
+    allowed_types = content_type.startswith(("video/", "audio/"))
+    allowed_extensions = filename.endswith((
+        ".mp4", ".mov", ".webm", ".m4v",
+        ".mp3", ".m4a", ".wav", ".aac", ".ogg",
+    ))
+
+    if not allowed_types and not allowed_extensions:
         raise HTTPException(
             status_code=400,
             detail="Only audio/video files are allowed"
@@ -246,10 +310,10 @@ async def delete_uploaded_message_media(
     if not payload.public_id.startswith(MESSAGE_MEDIA_FOLDER):
         raise HTTPException(
             status_code=400,
-            detail="Only message media can be deleted from this endpoint"
+            detail="Only message media can be deleted from this endpoint",
         )
 
-    delete_file(payload.public_id)
+    delete_file(payload.public_id, payload.resource_type)
 
     return {"status": "deleted"}
 

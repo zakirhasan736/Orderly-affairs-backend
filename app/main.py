@@ -83,13 +83,13 @@ async def startup():
             try:
                 await check_scheduled_letters()
             except Exception as e:
-                print("❌ NOK message scheduler error:", e)
+                print("NOK message scheduler error:", e)
 
             await asyncio.sleep(60)
 
     asyncio.create_task(message_scheduler_loop())
 
-    print("✅ Both letter & message schedulers started")
+    print("Both letter & message schedulers started")
 
 app.include_router(upload_router)
 app.include_router(auth_router)

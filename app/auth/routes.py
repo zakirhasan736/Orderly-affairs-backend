@@ -14,15 +14,25 @@ from bson import ObjectId
 from passlib.context import CryptContext
 from app.security.usage_guard import enforce_usage
 from app.auth.phone import format_phone
-from app.auth.twilio_verify import (
-    send_verification_code,
-    check_verification_code,
+from app.auth.twilio_verify import check_verification_code
+from app.auth.otp_security import (
+    send_otp_sms_secure,
+    send_email_otp_secure,
+    ensure_verify_not_locked,
+    record_verify_attempt,
+    ensure_email_verify_not_locked,
+    record_email_verify_attempt,
 )
 
 from app.database import users_collection, otp_collection, sms_mfa_attempts_collection, pending_signup_collection
 from app.security.billing_guard import enforce_billing
 from app.security.password_handler import hash_password, verify_password
-from app.security.jwt_handler import create_access_token, verify_token
+from app.security.jwt_handler import (
+    create_access_token,
+    verify_token,
+    create_mfa_challenge_token,
+    verify_mfa_challenge_token,
+)
 from app.config import settings
 from datetime import datetime
 from app.notifications.nextkin_emails import (
@@ -44,6 +54,8 @@ class SignupRequest(BaseModel):
     full_name: str | None = None
     phone_number: str | None = None
     mfa_method: str | None = None  # "sms" | "email" | "authenticator"
+    captcha_token: str | None = None
+    otp_session_id: str | None = None
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -55,10 +67,13 @@ class VerifyTOTPRequest(BaseModel):
 
 class EmailRequest(BaseModel):
     email: EmailStr
+    captcha_token: str | None = None
+    otp_session_id: str | None = None
 
 class VerifyEmailRequest(BaseModel):
     email: EmailStr
     code: int
+    otp_session_id: str | None = None
 
 class LinkAuthenticatorRequest(BaseModel):
     email: EmailStr
@@ -77,15 +92,28 @@ class OwnerResetPassword(BaseModel):
 class StartSMSMFARequest(BaseModel):
     email: EmailStr
     phoneNumber: str | None = None
+    captcha_token: str | None = None
+    otp_session_id: str | None = None
+    mfa_challenge_token: str | None = None
+
+
+class StartEmailMFARequest(BaseModel):
+    email: EmailStr
+    captcha_token: str | None = None
+    otp_session_id: str | None = None
+    mfa_challenge_token: str | None = None
 
 
 class VerifySMSOTPRequest(BaseModel):
     email: EmailStr
     code: str
+    otp_session_id: str | None = None
 
 
 class ResendSignupSMSRequest(BaseModel):
     email: EmailStr
+    captcha_token: str | None = None
+    otp_session_id: str | None = None
 
 class PhoneRequest(BaseModel):
     phoneNumber: str
@@ -106,6 +134,8 @@ class NextKinCreateRequest(BaseModel):
     master_password: str | None = None
     password_card_generated: bool | None = False
     card_storage_location: str | None = None
+    key_bag_location: str | None = None
+    documents_bag_location: str | None = None
     special_instructions: str | None = None
 
 class NextKinUpdateRequest(BaseModel):
@@ -120,6 +150,8 @@ class NextKinUpdateRequest(BaseModel):
     master_password: str | None = None
     password_card_generated: bool | None = None
     card_storage_location: str | None = None
+    key_bag_location: str | None = None
+    documents_bag_location: str | None = None
     special_instructions: str | None = None
 
 class NextKinLoginRequest(BaseModel):
@@ -163,7 +195,64 @@ def mfa_login_response(user: dict, billing: dict) -> dict:
         "phone": user.get("phone"),
         "billing_status": billing.get("status", "pending"),
         "requires_billing": billing.get("status") in ["pending", "blocked"],
+        "otp_sent": False,
     }
+
+
+async def _store_login_email_otp(email: str, otp: int, expiry: datetime) -> None:
+    await otp_collection.delete_many({"email": email})
+    await otp_collection.insert_one({
+        "email": email,
+        "otp": otp,
+        "expires": expiry,
+        "created_at": datetime.utcnow(),
+    })
+
+
+async def _trigger_login_mfa_otp(
+    *,
+    request: Request,
+    user: dict,
+    method: str | None,
+    email: str,
+) -> tuple[bool, int | None, str | None]:
+    if method == "email":
+        try:
+            result = await send_email_otp_secure(
+                request=request,
+                email=email,
+                captcha_token=None,
+                session_id=None,
+                skip_captcha=True,
+            )
+            await _store_login_email_otp(email, result["otp"], result["expiry"])
+            return True, result["cooldown_seconds"], None
+        except HTTPException as exc:
+            return False, None, str(exc.detail)
+        except Exception as exc:
+            return False, None, str(exc)
+
+    if method == "sms":
+        phone = user.get("phone")
+        if not phone:
+            return False, None, "Phone number not configured"
+
+        try:
+            await send_otp_sms_secure(
+                request=request,
+                phone=phone,
+                email=email,
+                captcha_token=None,
+                session_id=None,
+                skip_captcha=True,
+            )
+            return True, settings.OTP_PHONE_COOLDOWN_SECONDS, None
+        except HTTPException as exc:
+            return False, None, str(exc.detail)
+        except Exception as exc:
+            return False, None, str(exc)
+
+    return False, None, None
 
 
 async def get_authorized_owner_for_email(
@@ -266,26 +355,7 @@ async def create_real_user_from_pending(pending: dict):
         "email": pending["email"],
         "role": "owner"
     })
-async def enforce_sms_resend_cooldown(phone: str, cooldown_seconds: int = 30):
-    recent = await sms_mfa_attempts_collection.find_one(
-        {"phone": phone, "type": "sms_verify_send"},
-        sort=[("created_at", -1)]
-    )
 
-    if recent:
-        delta = datetime.utcnow() - recent["created_at"]
-        if delta.total_seconds() < cooldown_seconds:
-            remaining = int(cooldown_seconds - delta.total_seconds())
-            raise HTTPException(
-                status_code=429,
-                detail=f"Please wait {remaining}s before requesting another OTP"
-            )
-
-    await sms_mfa_attempts_collection.insert_one({
-        "phone": phone,
-        "type": "sms_verify_send",
-        "created_at": datetime.utcnow()
-    })
 
 async def approve_nextkin_access(
     *,
@@ -436,7 +506,7 @@ async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
 # ============================================================
 
 @router.post("/signup")
-async def signup(user: SignupRequest):
+async def signup(user: SignupRequest, request: Request):
     email = user.email.lower().strip()
 
     # real user already exists
@@ -487,8 +557,16 @@ async def signup(user: SignupRequest):
         await pending_signup_collection.insert_one(pending_doc)
 
         try:
-            await enforce_sms_resend_cooldown(phone)
-            send_verification_code(phone)
+            await send_otp_sms_secure(
+                request=request,
+                phone=phone,
+                email=email,
+                captcha_token=user.captcha_token,
+                session_id=user.otp_session_id,
+            )
+        except HTTPException:
+            await pending_signup_collection.delete_one({"email": email})
+            raise
         except Exception as e:
             await pending_signup_collection.delete_one({"email": email})
             raise HTTPException(status_code=400, detail=str(e))
@@ -499,38 +577,47 @@ async def signup(user: SignupRequest):
             "method": "sms",
             "email": email,
             "phone": phone,
-            "flow": "signup"
+            "flow": "signup",
+            "cooldown_seconds": settings.OTP_PHONE_COOLDOWN_SECONDS,
         }
 
     # Email signup
     if user.mfa_method == "email":
-        otp = randint(100000, 999999)
-        expiry = datetime.utcnow() + timedelta(minutes=10)
-
-        pending_doc["email_otp"] = otp
-        pending_doc["email_otp_expires"] = expiry
+        pending_doc["email_otp"] = None
+        pending_doc["email_otp_expires"] = None
 
         await pending_signup_collection.insert_one(pending_doc)
 
         try:
-            sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-            message = Mail(
-                from_email=settings.EMAIL_SENDER,
-                to_emails=email,
-                subject="Your Orderly Affairs verification code",
-                html_content=f"<p>Your verification code is <b>{otp}</b>. It expires in 10 minutes.</p>",
+            email_result = await send_email_otp_secure(
+                request=request,
+                email=email,
+                captcha_token=user.captcha_token,
+                session_id=user.otp_session_id,
             )
-            sg.send(message)
+            await pending_signup_collection.update_one(
+                {"email": email},
+                {
+                    "$set": {
+                        "email_otp": email_result["otp"],
+                        "email_otp_expires": email_result["expiry"],
+                    }
+                },
+            )
+        except HTTPException:
+            await pending_signup_collection.delete_one({"email": email})
+            raise
         except Exception as e:
             await pending_signup_collection.delete_one({"email": email})
-            raise HTTPException(status_code=400, detail=f"Failed to send email OTP: {str(e)}")
+            raise HTTPException(status_code=400, detail=str(e))
 
         return {
             "message": "Signup started. OTP sent to email.",
             "otp_required": True,
             "method": "email",
             "email": email,
-            "flow": "signup"
+            "flow": "signup",
+            "cooldown_seconds": email_result["cooldown_seconds"],
         }
 
     # Authenticator signup
@@ -704,7 +791,7 @@ async def signup(user: SignupRequest):
 #         "requires_billing": billing.get("status") in ["pending", "blocked"]
 #     }
 @router.post("/login")
-async def owner_login(data: LoginRequest):
+async def owner_login(data: LoginRequest, request: Request):
     email = data.email.lower().strip()
 
     # do not let pending signup pretend to be a real user
@@ -750,7 +837,23 @@ async def owner_login(data: LoginRequest):
                 },
             )
         else:
-            return mfa_login_response(user, billing)
+            response = mfa_login_response(user, billing)
+            preferred = response.get("method")
+            response["mfa_challenge_token"] = create_mfa_challenge_token(email)
+
+            otp_sent, cooldown_seconds, otp_error = await _trigger_login_mfa_otp(
+                request=request,
+                user=user,
+                method=preferred,
+                email=email,
+            )
+            response["otp_sent"] = otp_sent
+            if cooldown_seconds is not None:
+                response["cooldown_seconds"] = cooldown_seconds
+            if otp_error:
+                response["otp_error"] = otp_error
+
+            return response
 
     token = create_access_token(user)
 
@@ -879,6 +982,8 @@ async def create_nextkin(
 
             "password_card_generated": req.password_card_generated,
             "card_storage_location": req.card_storage_location,
+            "key_bag_location": req.key_bag_location,
+            "documents_bag_location": req.documents_bag_location,
             "special_instructions": req.special_instructions,
 
             "password_hash": hash_password(plain_password),
@@ -1045,6 +1150,8 @@ async def get_my_nextkin(authorization: str = Header(None)):
 
             "password_card_generated": nk.get("password_card_generated"),
             "card_storage_location": nk.get("card_storage_location"),
+            "key_bag_location": nk.get("key_bag_location"),
+            "documents_bag_location": nk.get("documents_bag_location"),
             "special_instructions": nk.get("special_instructions"),
 
             "created_at": nk.get("created_at"),
@@ -1471,19 +1578,47 @@ async def link_authenticator(
 @router.post("/send-email")
 async def send_email_otp(
     payload: EmailRequest,
+    request: Request,
     authorization: str | None = Header(default=None),
 ):
     email = payload.email.lower().strip()
 
-    otp = randint(100000, 999999)
-    expiry = datetime.utcnow() + timedelta(minutes=10)
-
-    # ✅ 1. Pending signup email MFA
     pending = await pending_signup_collection.find_one({
         "email": email,
         "mfa_method": "email",
         "expires_at": {"$gt": datetime.utcnow()}
     })
+
+    if not pending:
+        user = await users_collection.find_one({"email": email, "role": "owner"})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        methods = normalize_mfa_methods(user)
+        authorized_owner = await get_authorized_owner_for_email(email, authorization)
+        if not methods["email"] and not authorized_owner:
+            raise HTTPException(
+                status_code=403,
+                detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
+            )
+
+    try:
+        email_result = await send_email_otp_secure(
+            request=request,
+            email=email,
+            captcha_token=payload.captcha_token,
+            session_id=payload.otp_session_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to send verification email: {str(e)}",
+        )
+
+    otp = email_result["otp"]
+    expiry = email_result["expiry"]
 
     if pending:
         await pending_signup_collection.update_one(
@@ -1497,19 +1632,6 @@ async def send_email_otp(
             }
         )
     else:
-        # ✅ 2. Existing login email MFA
-        user = await users_collection.find_one({"email": email, "role": "owner"})
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        methods = normalize_mfa_methods(user)
-        authorized_owner = await get_authorized_owner_for_email(email, authorization)
-        if not methods["email"] and not authorized_owner:
-            raise HTTPException(
-                status_code=403,
-                detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
-            )
-
         await otp_collection.delete_many({"email": email})
         await otp_collection.insert_one({
             "email": email,
@@ -1518,39 +1640,21 @@ async def send_email_otp(
             "created_at": datetime.utcnow()
         })
 
-    try:
-        sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-        message = Mail(
-            from_email=settings.EMAIL_SENDER,
-            to_emails=email,
-            subject="Your Orderly Affairs verification code",
-            html_content=f"""
-            <p>Your verification code is <b>{otp}</b>.</p>
-            <p>It expires in 10 minutes.</p>
-            """,
-        )
-        response = sg.send(message)
-
-        print("✅ Email OTP sent:", response.status_code)
-
-    except Exception as e:
-        print("❌ SendGrid Email Error:", str(e))
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to send verification email: {str(e)}"
-        )
-
     return {
-        "message": f"Verification code sent to {email}"
+        "message": f"Verification code sent to {email}",
+        "cooldown_seconds": email_result["cooldown_seconds"],
     }
 
 
 @router.post("/verify-email")
 async def verify_email_code(
     payload: VerifyEmailRequest,
+    request: Request,
     authorization: str | None = Header(default=None),
 ):
     email = payload.email.lower().strip()
+
+    await ensure_email_verify_not_locked(email)
 
     # first check pending signup email flow
     pending = await pending_signup_collection.find_one({
@@ -1570,7 +1674,19 @@ async def verify_email_code(
             raise HTTPException(status_code=400, detail="OTP expired")
 
         if otp != payload.code:
-            raise HTTPException(status_code=400, detail="Invalid OTP")
+            await record_email_verify_attempt(
+                request=request,
+                email=email,
+                success=False,
+                session_id=payload.otp_session_id,
+            )
+
+        await record_email_verify_attempt(
+            request=request,
+            email=email,
+            success=True,
+            session_id=payload.otp_session_id,
+        )
 
         created_user = await create_real_user_from_pending(pending)
         token = create_access_token(created_user)
@@ -1589,7 +1705,12 @@ async def verify_email_code(
         raise HTTPException(status_code=400, detail="OTP expired")
 
     if record["otp"] != payload.code:
-        raise HTTPException(status_code=400, detail="Invalid OTP")
+        await record_email_verify_attempt(
+            request=request,
+            email=email,
+            success=False,
+            session_id=payload.otp_session_id,
+        )
 
     user = await users_collection.find_one({
         "email": email,
@@ -1606,6 +1727,13 @@ async def verify_email_code(
             status_code=403,
             detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
         )
+
+    await record_email_verify_attempt(
+        request=request,
+        email=email,
+        success=True,
+        session_id=payload.otp_session_id,
+    )
 
     await otp_collection.delete_many({"email": email})
 
@@ -1939,6 +2067,7 @@ async def owner_reset_password(payload: OwnerResetPassword):
 @router.post("/start-sms-mfa")
 async def start_sms_mfa(
     payload: StartSMSMFARequest,
+    request: Request,
     authorization: str | None = Header(default=None),
 ):
     user = await users_collection.find_one({
@@ -1985,23 +2114,86 @@ async def start_sms_mfa(
             {"$set": {"phone": phone, "updated_at": datetime.utcnow()}}
         )
 
+    skip_captcha = verify_mfa_challenge_token(
+        payload.mfa_challenge_token,
+        payload.email.lower().strip(),
+    )
+
     try:
-        await enforce_sms_resend_cooldown(phone)
-        send_verification_code(phone)
+        await send_otp_sms_secure(
+            request=request,
+            phone=phone,
+            email=payload.email.lower().strip(),
+            captcha_token=payload.captcha_token,
+            session_id=payload.otp_session_id,
+            skip_captcha=skip_captcha,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     return {
         "requires_phone": False,
         "phone": phone,
-        "message": "OTP sent"
+        "message": "OTP sent",
+        "cooldown_seconds": settings.OTP_PHONE_COOLDOWN_SECONDS,
     }
+# ============================================================
+# START EMAIL MFA (login or Vault Settings)
+# ============================================================
+
+@router.post("/start-email-mfa")
+async def start_email_mfa(
+    payload: StartEmailMFARequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    email = payload.email.lower().strip()
+
+    user = await users_collection.find_one({"email": email, "role": "owner"})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    methods = normalize_mfa_methods(user)
+    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    if not methods["email"] and not authorized_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
+        )
+
+    skip_captcha = verify_mfa_challenge_token(payload.mfa_challenge_token, email)
+
+    try:
+        result = await send_email_otp_secure(
+            request=request,
+            email=email,
+            captcha_token=payload.captcha_token,
+            session_id=payload.otp_session_id,
+            skip_captcha=skip_captcha,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to send verification email: {str(e)}",
+        )
+
+    await _store_login_email_otp(email, result["otp"], result["expiry"])
+
+    return {
+        "message": f"Verification code sent to {email}",
+        "cooldown_seconds": result["cooldown_seconds"],
+    }
+
 # ============================================================
 # 3️⃣ RESEND OTP (CLEAN)
 # ============================================================
 
 @router.post("/resend-sms-mfa")
-async def resend_sms_mfa(payload: EmailRequest):
+async def resend_sms_mfa(payload: ResendSignupSMSRequest, request: Request):
     email = payload.email.lower().strip()
 
     # pending signup first
@@ -2016,16 +2208,23 @@ async def resend_sms_mfa(payload: EmailRequest):
         if not phone:
             raise HTTPException(status_code=400, detail="Phone number not configured")
 
-        await enforce_sms_resend_cooldown(phone)
-
         try:
-            send_verification_code(phone)
+            await send_otp_sms_secure(
+                request=request,
+                phone=phone,
+                email=email,
+                captcha_token=payload.captcha_token,
+                session_id=payload.otp_session_id,
+            )
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
         return {
             "message": "Signup OTP resent successfully",
-            "phone": phone
+            "phone": phone,
+            "cooldown_seconds": settings.OTP_PHONE_COOLDOWN_SECONDS,
         }
 
     # real user login flow
@@ -2045,16 +2244,23 @@ async def resend_sms_mfa(payload: EmailRequest):
     if not phone:
         raise HTTPException(status_code=400, detail="Phone number not configured")
 
-    await enforce_sms_resend_cooldown(phone)
-
     try:
-        send_verification_code(phone)
+        await send_otp_sms_secure(
+            request=request,
+            phone=phone,
+            email=email,
+            captcha_token=payload.captcha_token,
+            session_id=payload.otp_session_id,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     return {
         "message": "OTP resent successfully",
-        "phone": phone
+        "phone": phone,
+        "cooldown_seconds": settings.OTP_PHONE_COOLDOWN_SECONDS,
     }
 # ============================================================
 # 4️⃣ VERIFY OTP (FINAL LOGIN STEP)
@@ -2063,6 +2269,7 @@ async def resend_sms_mfa(payload: EmailRequest):
 @router.post("/verify-sms-otp")
 async def verify_sms_otp(
     payload: VerifySMSOTPRequest,
+    request: Request,
     authorization: str | None = Header(default=None),
 ):
     email = payload.email.lower().strip()
@@ -2080,16 +2287,38 @@ async def verify_sms_otp(
         if not phone:
             raise HTTPException(status_code=400, detail="Phone number not configured")
 
+        await ensure_verify_not_locked(phone, email)
+
         try:
             result = check_verification_code(phone, otp)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            await record_verify_attempt(
+                request=request,
+                phone=phone,
+                email=email,
+                success=False,
+                session_id=payload.otp_session_id,
+                twilio_status=str(e),
+            )
 
         if result.status != "approved":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Verification failed: {result.status}"
+            await record_verify_attempt(
+                request=request,
+                phone=phone,
+                email=email,
+                success=False,
+                session_id=payload.otp_session_id,
+                twilio_status=result.status,
             )
+
+        await record_verify_attempt(
+            request=request,
+            phone=phone,
+            email=email,
+            success=True,
+            session_id=payload.otp_session_id,
+            twilio_status=result.status,
+        )
 
         created_user = await create_real_user_from_pending(pending)
         token = create_access_token(created_user)
@@ -2120,16 +2349,38 @@ async def verify_sms_otp(
     if not phone:
         raise HTTPException(status_code=400, detail="Phone number not configured")
 
+    await ensure_verify_not_locked(phone, email)
+
     try:
         result = check_verification_code(phone, otp)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        await record_verify_attempt(
+            request=request,
+            phone=phone,
+            email=email,
+            success=False,
+            session_id=payload.otp_session_id,
+            twilio_status=str(e),
+        )
 
     if result.status != "approved":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Verification failed: {result.status}"
+        await record_verify_attempt(
+            request=request,
+            phone=phone,
+            email=email,
+            success=False,
+            session_id=payload.otp_session_id,
+            twilio_status=result.status,
         )
+
+    await record_verify_attempt(
+        request=request,
+        phone=phone,
+        email=email,
+        success=True,
+        session_id=payload.otp_session_id,
+        twilio_status=result.status,
+    )
 
     await users_collection.update_one(
         {"_id": user["_id"]},

@@ -158,6 +158,8 @@ async def fetch_nok_by_id(owner_id: str, nok_id: str) -> Optional[Dict[str, Any]
         "email": doc.get("email"),
         "phone_number": doc.get("phone_number"),
         "card_storage_location": doc.get("card_storage_location"),
+        "key_bag_location": doc.get("key_bag_location"),
+        "documents_bag_location": doc.get("documents_bag_location"),
         "access_level": doc.get("access_level"),
         "authorized_sections": [str(s) for s in (doc.get("authorized_sections") or [])],
         "_id": str(doc.get("_id")),
@@ -192,6 +194,8 @@ async def fetch_primary_nok(owner_id: str) -> Optional[Dict[str, Any]]:
         "email": p.get("email"),
         "phone_number": p.get("phone_number"),
         "card_storage_location": p.get("card_storage_location"),
+        "key_bag_location": p.get("key_bag_location"),
+        "documents_bag_location": p.get("documents_bag_location"),
         "access_level": p.get("access_level"),
         "authorized_sections": [str(s) for s in (p.get("authorized_sections") or [])],
         "_id": str(p.get("_id")),
@@ -269,9 +273,23 @@ async def apply_autofill(owner_id: str, payload: NOKLetterIn, nok_id: Optional[s
         if not data.get("nok_phone"):
             data["nok_phone"] = nok.get("phone_number")
 
-        if not data.get("password_card_location"):
-            data["password_card_location"] = nok.get("card_storage_location")
+        card_loc = nok.get("card_storage_location")
+        if card_loc:
+            data["password_card_location"] = card_loc
+        elif not data.get("password_card_location"):
+            data["password_card_location"] = card_loc
 
+        key_loc = nok.get("key_bag_location")
+        if key_loc:
+            data["key_bag_location"] = key_loc
+        elif not data.get("key_bag_location"):
+            data["key_bag_location"] = key_loc
+
+        doc_loc = nok.get("documents_bag_location")
+        if doc_loc:
+            data["documents_bag_location"] = doc_loc
+        elif not data.get("documents_bag_location"):
+            data["documents_bag_location"] = doc_loc
 
         if not data.get("accessible_sections"):
             catalog = await build_section_catalog(owner_id)

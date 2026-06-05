@@ -1,0 +1,45 @@
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from app.config import settings
+
+
+def verify_captcha_token(token: str | None, remote_ip: str | None = None) -> bool:
+    if not settings.OTP_CAPTCHA_ENABLED:
+        return True
+
+    if settings.APP_ENV == "development" and token == "dev-bypass":
+        return True
+
+    secret = settings.TURNSTILE_SECRET_KEY
+    if not secret:
+        # Allow local development when captcha is enabled but secret is missing.
+        return settings.APP_ENV == "development"
+
+    if not token or not token.strip():
+        return False
+
+    payload = urllib.parse.urlencode(
+        {
+            "secret": secret,
+            "response": token.strip(),
+            **({"remoteip": remote_ip} if remote_ip else {}),
+        }
+    ).encode()
+
+    request = urllib.request.Request(
+        "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            return bool(body.get("success"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        print(f"⚠️ CAPTCHA verification failed: {exc}")
+        return False

@@ -12,6 +12,7 @@ class UploadedFile(BaseModel):
 
 
 class UploadField(BaseModel):
+    text: Optional[str] = None
     files: List[UploadedFile] = []
     _deleted_files: List[str] = []
 

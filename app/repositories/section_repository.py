@@ -1,5 +1,8 @@
 from datetime import datetime
 from app.database import section_data_collection
+from app.notifications.section_update_notifications import (
+    notify_immediate_access_on_section_update,
+)
 
 
 class SectionRepository:
@@ -36,6 +39,11 @@ class SectionRepository:
             },
             upsert=True,
         )
+
+        try:
+            await notify_immediate_access_on_section_update(owner_id, section_id)
+        except Exception as exc:
+            print("⚠️ Section update notification dispatch failed:", section_id, exc)
 
     @staticmethod
     async def delete(owner_id: str, section_id: str):
