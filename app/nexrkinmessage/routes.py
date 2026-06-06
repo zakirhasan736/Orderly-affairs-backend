@@ -8,11 +8,28 @@ from app.security.jwt_handler import verify_token
 from app.security.crypto import encrypt_data,decrypt_data
 from app.database import messageofnextkin_collection
 from .models import LetterCreate, LetterUpdate, MediaDeleteRequest
-from app.security.cloudinary_service import upload_file, delete_file
+from app.security.cloudinary_service import upload_media_file, delete_file
 
 router = APIRouter(prefix="/message", tags=["Message"])
 
 MESSAGE_MEDIA_FOLDER = "messages/media"
+MESSAGE_MEDIA_EXTENSIONS = (
+    ".mp4", ".mov", ".webm", ".m4v",
+    ".mp3", ".m4a", ".wav", ".aac", ".ogg",
+)
+
+
+def is_allowed_message_media(file: UploadFile) -> bool:
+    content_type = (file.content_type or "").lower()
+    filename = (file.filename or "").lower()
+
+    if content_type.startswith(("video/", "audio/")):
+        return True
+
+    if content_type in {"", "application/octet-stream"}:
+        return filename.endswith(MESSAGE_MEDIA_EXTENSIONS)
+
+    return filename.endswith(MESSAGE_MEDIA_EXTENSIONS)
 
 
 def parse_message_id(letter_id: str) -> ObjectId:
@@ -272,23 +289,15 @@ async def upload_message_media(
     token = authorization.split(" ")[1]
     verify_token(token)
 
-    content_type = (file.content_type or "").lower()
-    filename = (file.filename or "").lower()
-    allowed_types = content_type.startswith(("video/", "audio/"))
-    allowed_extensions = filename.endswith((
-        ".mp4", ".mov", ".webm", ".m4v",
-        ".mp3", ".m4a", ".wav", ".aac", ".ogg",
-    ))
-
-    if not allowed_types and not allowed_extensions:
+    if not is_allowed_message_media(file):
         raise HTTPException(
             status_code=400,
             detail="Only audio/video files are allowed"
         )
 
-    uploaded = upload_file(
+    uploaded = upload_media_file(
         file.file,
-        folder="messages/media"
+        folder=MESSAGE_MEDIA_FOLDER,
     )
 
     return {

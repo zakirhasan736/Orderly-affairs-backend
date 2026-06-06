@@ -22,6 +22,24 @@ def upload_file(file, folder: str):
     )
 
 
+def upload_media_file(file, folder: str):
+    """Upload audio/video without a size cap; large files use chunked upload."""
+    file.seek(0, 2)
+    size = file.tell()
+    file.seek(0)
+
+    common_kwargs = {
+        "folder": folder,
+        "resource_type": "video",
+        "invalidate": True,
+    }
+
+    if size > 20 * 1024 * 1024:
+        return cloudinary.uploader.upload_large(file, chunk_size=6_000_000, **common_kwargs)
+
+    return cloudinary.uploader.upload(file, virus_scan="true", **common_kwargs)
+
+
 def _normalize_resource_type(resource_type: str | None) -> str | None:
     if not resource_type or resource_type == "auto":
         return None
