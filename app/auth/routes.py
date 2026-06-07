@@ -33,7 +33,7 @@ from app.security.jwt_handler import (
     create_mfa_challenge_token,
     verify_mfa_challenge_token,
 )
-from app.config import nextkin_login_url, settings
+from app.config import settings
 from datetime import datetime
 from app.notifications.nextkin_emails import (
     send_nextkin_email,
@@ -385,81 +385,47 @@ async def approve_nextkin_access(
     )
 
 # Helper to flip immediate_access and notify the Next-of-Kin
-async def _approve_and_notify_if_needed(nextkin: dict, owner: dict, approved: bool = True):
+async def _approve_and_notify_if_needed(
+    nextkin: dict,
+    owner: dict,
+    approved: bool = True,
+    plain_password: str | None = None,
+):
     if bool(nextkin.get("immediate_access", False)) == approved:
         return
 
+    update_fields: dict = {
+        "immediate_access": approved,
+        "updated_at": datetime.utcnow(),
+    }
+
+    if approved:
+        update_fields["nok_letter_received"] = False
+        update_fields["access_revoked"] = False
+    elif nextkin.get("access_timing") == "immediate":
+        update_fields["access_revoked"] = True
+
     await users_collection.update_one(
         {"_id": nextkin["_id"]},
-        {
-            "$set": {
-                "immediate_access": approved,
-                **({"nok_letter_received": False} if approved else {}),
-                "updated_at": datetime.utcnow(),
-            }
-        },
+        {"$set": update_fields},
     )
 
     try:
-        sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-
-        login_url = nextkin_login_url()
-
-        message = Mail(
-            from_email=settings.EMAIL_SENDER,
-            to_emails=nextkin["email"],
-            subject="Orderly Affairs – Immediate Access Granted",
-            html_content=f"""
-            <div style="font-family: Arial, sans-serif; line-height:1.6; color:#333;">
-            
-            <p>Hello {nextkin.get("full_name")},</p>
-
-            <p>
-                <b>{owner.get("full_name") or owner["email"]}</b> has granted you 
-                <b>Immediate Access</b> to their <b>Orderly Affairs Kit</b>.
-            </p>
-
-            <p>
-                You may now log in and view the sections that have been made available to you.
-            </p>
-
-            <p><b>Login Details:</b></p>
-
-            <ul>
-                <li>Email: {nextkin["email"]}</li>
-                {f"<li>Password: {plain_password}</li>" if plain_password else ""}
-            </ul>
-
-            <p>
-                <a href="{login_url}" 
-                style="
-                    display:inline-block;
-                    padding:10px 18px;
-                    background:#2563eb;
-                    color:#ffffff;
-                    text-decoration:none;
-                    border-radius:6px;
-                    font-weight:bold;">
-                Log in to Orderly Affairs
-                </a>
-            </p>
-
-            <p>
-                For security reasons, we recommend logging in and updating your password after your first access.
-            </p>
-
-            <hr style="margin-top:30px;margin-bottom:20px"/>
-
-            <small style="color:#666;">
-                Access granted on {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}
-            </small>
-
-            </div>
-            """,
-        )
-        sg.send(message)
+        if approved:
+            await send_nextkin_email(
+                event=NextKinEmailEvent.ACCESS_APPROVED,
+                nextkin=nextkin,
+                owner=owner,
+                plain_password=plain_password,
+            )
+        else:
+            await send_nextkin_email(
+                event=NextKinEmailEvent.ACCESS_REVOKED,
+                nextkin=nextkin,
+                owner=owner,
+            )
     except Exception as e:
-        print("⚠️ Immediate-access email failed:", e)
+        print("⚠️ Next-of-Kin access notification email failed:", e)
 
 async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
     try:
@@ -976,6 +942,8 @@ async def create_nextkin(
             "access_level": req.access_level,
             "authorized_sections": req.authorized_sections or [],
             "immediate_access": False,
+            "access_timing": "immediate" if req.immediate_access else "upon_death",
+            "access_revoked": False,
             "nok_letter_received": (
                 bool(req.nok_letter_received) if not req.immediate_access else False
             ),
@@ -999,11 +967,7 @@ async def create_nextkin(
         insert_res = await users_collection.insert_one(new_nok)
         new_id = insert_res.inserted_id
 
-        # 🔥 IF owner checked "Immediate Access" at creation time
         nextkin = await users_collection.find_one({"_id": new_id})
-        # await _approve_and_notify_if_needed(nextkin, owner)
-        if req.immediate_access:
-             await _approve_and_notify_if_needed(nextkin, owner, approved=True)
 
         # ✅ CASE 1: Immediate access → approve + send ACCESS email (with password)
         if req.immediate_access:
@@ -1297,13 +1261,32 @@ async def get_nextkin_access(authorization: str = Header(None)):
     access_level = nextkin.get("access_level", "Full Kit Access")
     full_access = access_level == "Full Kit Access"
 
+    owner = None
+    try:
+        owner = await users_collection.find_one(
+            {"_id": ObjectId(nextkin["owner_id"]), "role": "owner"}
+        )
+    except Exception:
+        owner = None
+
+    owner_summary = None
+    if owner:
+        owner_summary = {
+            "id": str(owner["_id"]),
+            "email": owner.get("email"),
+            "full_name": owner.get("full_name"),
+            "status": owner.get("owner_status", "alive"),
+        }
+
     return {
         "full_access": full_access,
         "authorized_sections": "all" if full_access else nextkin.get("authorized_sections", []),
         "access_level": access_level,
         "immediate_access": True,
+        "access_timing": nextkin.get("access_timing"),
         "nok_letter_received": nextkin.get("nok_letter_received", False),
         "owner_id": nextkin["owner_id"],
+        "owner": owner_summary,
         "nextkin": {
             "id": str(nextkin["_id"]),
             "email": nextkin["email"],
@@ -1906,6 +1889,82 @@ async def owner_logout(authorization: str | None = Header(default=None)):
         if decoded.get("role") and decoded["role"] != "owner":
             raise HTTPException(status_code=403, detail="Not an owner token")
     return {"message": "Owner logged out"}
+
+@router.post("/nextkin/report-owner-deceased")
+async def nextkin_report_owner_deceased(
+    authorization: str = Header(None),
+):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing token")
+
+    token = authorization.split(" ")[1]
+    decoded = verify_token(token)
+    if not decoded or decoded.get("role") != "nextkin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only authenticated Next-of-Kin can report a passing",
+        )
+
+    try:
+        nextkin_id = ObjectId(decoded["sub"])
+    except (InvalidId, KeyError, TypeError):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    nextkin = await users_collection.find_one(
+        {"_id": nextkin_id, "role": "nextkin"}
+    )
+    if not nextkin:
+        raise HTTPException(status_code=404, detail="Next-of-Kin not found")
+
+    if not nextkin.get("immediate_access", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Your access must be approved before reporting a passing",
+        )
+
+    try:
+        owner = await users_collection.find_one(
+            {"_id": ObjectId(nextkin["owner_id"]), "role": "owner"}
+        )
+    except Exception:
+        owner = None
+
+    if not owner:
+        raise HTTPException(status_code=404, detail="Linked kit owner not found")
+
+    if owner.get("owner_status") == "deceased":
+        return {
+            "status": "deceased",
+            "already_reported": True,
+            "message": "This passing has already been recorded.",
+            "upon_death_granted": 0,
+        }
+
+    now = datetime.utcnow()
+    await users_collection.update_one(
+        {"_id": owner["_id"]},
+        {
+            "$set": {
+                "owner_status": "deceased",
+                "deceased_reported_at": now,
+                "deceased_reported_by": str(nextkin["_id"]),
+                "updated_at": now,
+            }
+        },
+    )
+
+    death_result = await trigger_death_letters(str(owner["_id"]))
+
+    return {
+        "status": "deceased",
+        "already_reported": False,
+        "message": (
+            "Passing recorded. Death-triggered letters and upon-death access "
+            "notifications have been sent."
+        ),
+        "upon_death_granted": death_result.get("upon_death_granted", 0),
+    }
+
 
 @router.post("/nextkin-logout")
 async def nextkin_logout(authorization: str | None = Header(default=None)):

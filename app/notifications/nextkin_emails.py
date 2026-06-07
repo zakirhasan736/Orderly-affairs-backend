@@ -83,9 +83,35 @@ async def send_nextkin_email(
     elif event == NextKinEmailEvent.OWNER_DECEASED:
         subject = "Orderly Affairs – Access Available"
         html = f"""
-        <p>Hello {nk_name},</p>
-        <p>{owner_name} has passed away.</p>
-        <p>You may now access their Orderly Affairs Kit.</p>
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+          <p>Hello {nk_name},</p>
+          <p>
+            <strong>{owner_name}</strong> has passed away. You may now access
+            their <strong>Orderly Affairs Kit</strong>.
+          </p>
+          <p><strong>Login details:</strong></p>
+          <ul>
+            <li>Email: {nextkin["email"]}</li>
+            <li>Password: Use the password printed on your Password Card</li>
+          </ul>
+          <p>
+            <a href="{nextkin_login_url()}"
+               style="
+                 display: inline-block;
+                 padding: 10px 18px;
+                 background: #2563eb;
+                 color: #ffffff;
+                 text-decoration: none;
+                 border-radius: 6px;
+                 font-weight: bold;">
+              Log in to Orderly Affairs
+            </a>
+          </p>
+          <p style="color: #666; font-size: 14px;">
+            If you also received a Letter to Next of Kin, please follow any
+            additional instructions it contains.
+          </p>
+        </div>
         """
 
     else:

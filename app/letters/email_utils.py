@@ -4,7 +4,7 @@ from typing import Dict, Any
 from datetime import datetime
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
-from app.config import settings
+from app.config import nextkin_login_url, settings
 
 def render_letter_text(doc: Dict[str, Any]) -> str:
     def fmt_date(v):
@@ -34,7 +34,7 @@ def render_letter_text(doc: Dict[str, Any]) -> str:
 
 {doc.get("kit_description") or "I've subscribed to an Orderly Affairs Kit. Inside, you'll find everything you may need to manage my affairs if I'm no longer able to, or when I'm gone. It includes not only documents, but also instructions—gentle step-by-step guides to make this process less overwhelming."}
 
-You can access the kit online at: {doc.get("access_url") or "https://orderly-affairs.com"}
+You can access the kit online at: {doc.get("access_url") or nextkin_login_url()}
 
 {doc.get("login_credentials_text") or default_login_line}
 
