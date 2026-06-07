@@ -8,6 +8,7 @@ from app.auth.routes import router as auth_router
 
 
 # from app.routes.nextkin_routes import router as nextkin_router
+from app.auth.inactivity_scheduler import start_owner_inactivity_scheduler
 from app.billing.trial_scheduler import start_trial_scheduler
 from app.kits.routes_core import router as kit_router
 from app.letters.routes import router as letters_router
@@ -76,6 +77,9 @@ async def startup():
 
      # 2️⃣ Start Trial reminder scheduler
     start_trial_scheduler()
+
+    # 3️⃣ Owner inactivity check (90 days + 15 day follow-up)
+    start_owner_inactivity_scheduler()
     
     # 2️⃣ Start simple async loop for messages
     async def message_scheduler_loop():

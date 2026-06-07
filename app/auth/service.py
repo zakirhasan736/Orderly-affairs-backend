@@ -111,6 +111,47 @@ async def grant_upon_death_access(owner_ref: str) -> int:
     return granted
 
 
+async def mark_owner_deceased(
+    *,
+    owner_id: str,
+    reported_by_nextkin_id: str | None,
+    source: str,
+) -> dict:
+    owner = await _resolve_owner(owner_id)
+    if not owner:
+        return {"triggered": False, "reason": "owner_not_found"}
+
+    if owner.get("owner_status") == "deceased":
+        return {
+            "triggered": False,
+            "already_deceased": True,
+            "status": "deceased",
+        }
+
+    now = datetime.now(timezone.utc)
+    await users_collection.update_one(
+        {"_id": owner["_id"]},
+        {
+            "$set": {
+                "owner_status": "deceased",
+                "deceased_reported_at": now,
+                "deceased_reported_by": reported_by_nextkin_id,
+                "deceased_detection_source": source,
+                "updated_at": now,
+            }
+        },
+    )
+
+    death_result = await trigger_death_letters(str(owner["_id"]))
+    return {
+        "triggered": True,
+        "status": "deceased",
+        "already_deceased": False,
+        "upon_death_granted": death_result.get("upon_death_granted", 0),
+        "source": source,
+    }
+
+
 async def trigger_death_letters(owner_id: str) -> dict:
     owner_refs = await _owner_refs(owner_id)
 

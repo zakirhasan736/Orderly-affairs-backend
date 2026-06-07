@@ -4,7 +4,8 @@ from typing import List, Union
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 from random import randint
-from app.auth.service import trigger_death_letters
+from app.auth.death_detection import record_nextkin_last_login, record_owner_last_login
+from app.auth.service import mark_owner_deceased, trigger_death_letters
 from bson.errors import InvalidId
 from secrets import token_urlsafe
 from io import BytesIO
@@ -822,6 +823,7 @@ async def owner_login(data: LoginRequest, request: Request):
             return response
 
     token = create_access_token(user)
+    await record_owner_last_login(email)
 
     return {
         "message": "Login successful",
@@ -875,6 +877,8 @@ async def nextkin_login(request: Request):
 
     if owner:
         await notify_owner_nextkin_login(owner=owner, nextkin=user)
+
+    await record_nextkin_last_login(str(user["_id"]))
 
     return {
         "access_token": token,
@@ -1452,6 +1456,8 @@ async def verify_totp(payload: VerifyTOTPRequest):
 
     updated_user = await users_collection.find_one({"email": payload.email.lower()})
     token = create_access_token(updated_user)
+    if updated_user.get("role") == "owner":
+        await record_owner_last_login(updated_user["email"])
     return {"access_token": token, "message": "Login successful"}
 
 
@@ -1735,6 +1741,8 @@ async def verify_email_code(
 
     updated_user = await users_collection.find_one({"_id": user["_id"]})
     token = create_access_token(updated_user)
+    if updated_user.get("role") == "owner":
+        await record_owner_last_login(updated_user["email"])
     return {
         "access_token": token,
         "message": "Login successful via email MFA",
@@ -1932,28 +1940,19 @@ async def nextkin_report_owner_deceased(
     if not owner:
         raise HTTPException(status_code=404, detail="Linked kit owner not found")
 
-    if owner.get("owner_status") == "deceased":
+    result = await mark_owner_deceased(
+        owner_id=str(owner["_id"]),
+        reported_by_nextkin_id=str(nextkin["_id"]),
+        source="manual_report",
+    )
+
+    if result.get("already_deceased"):
         return {
             "status": "deceased",
             "already_reported": True,
             "message": "This passing has already been recorded.",
             "upon_death_granted": 0,
         }
-
-    now = datetime.utcnow()
-    await users_collection.update_one(
-        {"_id": owner["_id"]},
-        {
-            "$set": {
-                "owner_status": "deceased",
-                "deceased_reported_at": now,
-                "deceased_reported_by": str(nextkin["_id"]),
-                "updated_at": now,
-            }
-        },
-    )
-
-    death_result = await trigger_death_letters(str(owner["_id"]))
 
     return {
         "status": "deceased",
@@ -1962,7 +1961,7 @@ async def nextkin_report_owner_deceased(
             "Passing recorded. Death-triggered letters and upon-death access "
             "notifications have been sent."
         ),
-        "upon_death_granted": death_result.get("upon_death_granted", 0),
+        "upon_death_granted": result.get("upon_death_granted", 0),
     }
 
 
@@ -2455,6 +2454,8 @@ async def verify_sms_otp(
 
     updated_user = await users_collection.find_one({"_id": user["_id"]})
     token = create_access_token(updated_user)
+    if updated_user.get("role") == "owner":
+        await record_owner_last_login(updated_user["email"])
 
     return {
         "access_token": token,

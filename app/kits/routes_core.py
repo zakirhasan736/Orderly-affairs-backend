@@ -5,6 +5,8 @@ from datetime import datetime
 from app.database import kits_collection, users_collection, section_data_collection, messageofnextkin_collection, letters_collection
 from app.security.jwt_handler import verify_token
 from app.security.crypto import decrypt_data
+from app.auth.death_detection import maybe_detect_owner_deceased_from_checklist
+
 from .models import ChecklistUpdate, SectionInput, SubsectionInput, TogglesInput
 from .core import require_owner, require_nok, get_or_init_kit, ensure_section_struct, ensure_subsection_struct, filter_sections_for_nok
 from app.notifications.nextkin_emails import send_message_email
@@ -349,4 +351,14 @@ async def save_checklist_progress(
         upsert=True,
     )
 
-    return {"status": "saved"}
+    detection = await maybe_detect_owner_deceased_from_checklist(
+        owner_id=owner_id,
+        nextkin_id=nextkin_id,
+        items=payload.items,
+    )
+
+    return {
+        "status": "saved",
+        "owner_deceased_triggered": bool(detection and detection.get("triggered")),
+        "owner_status": detection.get("status") if detection else None,
+    }
