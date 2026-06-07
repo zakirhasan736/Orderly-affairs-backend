@@ -33,7 +33,7 @@ from app.security.jwt_handler import (
     create_mfa_challenge_token,
     verify_mfa_challenge_token,
 )
-from app.config import settings
+from app.config import nextkin_login_url, settings
 from datetime import datetime
 from app.notifications.nextkin_emails import (
     send_nextkin_email,
@@ -403,7 +403,7 @@ async def _approve_and_notify_if_needed(nextkin: dict, owner: dict, approved: bo
     try:
         sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
 
-        login_url = f"{settings.FRONTEND_URL}/nextkin-login"
+        login_url = nextkin_login_url()
 
         message = Mail(
             from_email=settings.EMAIL_SENDER,

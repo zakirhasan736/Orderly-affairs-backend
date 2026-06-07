@@ -9,7 +9,7 @@ import string, random
 from app.models.nextkin_schema import NextKinCreateRequest, NextKinLoginRequest
 from app.database import users_collection
 from app.security.jwt_handler import create_access_token, verify_token
-from app.config import settings
+from app.config import nextkin_login_url, settings
 
 router = APIRouter(prefix="/nextkin", tags=["Next-of-Kin"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -67,7 +67,7 @@ async def create_nextkin(payload: NextKinCreateRequest, authorization: str = Hea
           <h3>Hello {payload.full_name},</h3>
           <p>You’ve been added as a Next-of-Kin by <b>{owner.get("full_name")}</b>.</p>
           <p>Email: {email}<br>Password: {temp_password}</p>
-          <a href="{settings.FRONTEND_URL}/nextkin-login">Login Here</a>
+          <a href="{nextkin_login_url()}">Login Here</a>
         </div>
         """
         message = Mail(

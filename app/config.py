@@ -69,6 +69,11 @@ class Settings(BaseSettings):
 # --- Initialize Settings ---
 settings = Settings()
 
+
+def nextkin_login_url() -> str:
+    """Public Next-of-Kin sign-in page (frontend route)."""
+    return f"{settings.FRONTEND_URL.rstrip('/')}/next-kin"
+
 SEND_RETRY_BACKOFF = timedelta(minutes=10)
 # If PEM files exist, load them (preferred for clean .env)
 private_key_path = Path("keys/private.pem")

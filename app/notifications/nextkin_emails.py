@@ -1,7 +1,7 @@
 from datetime import datetime
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
-from app.config import settings
+from app.config import nextkin_login_url, settings
 
 
 class NextKinEmailEvent:
@@ -60,7 +60,7 @@ async def send_nextkin_email(
         </ul>
 
         <p>
-          <a href="{settings.FRONTEND_URL}/nextkin-login">
+          <a href="{nextkin_login_url()}">
             Log in to Orderly Affairs
           </a>
         </p>

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
-from app.config import settings
+from app.config import nextkin_login_url, settings
 from app.database import db, users_collection
 
 # Sections that should NOT email immediate-access people when updated.
@@ -95,7 +95,7 @@ async def _send_section_update_email(
     section_title = SECTION_TITLES.get(section_id, f"Section {section_id}")
     owner_name = owner.get("full_name") or owner.get("email") or "The kit owner"
     nk_name = nextkin.get("full_name") or nextkin.get("email")
-    login_url = f"{settings.FRONTEND_URL}/nextkin-login"
+    login_url = nextkin_login_url()
 
     html = f"""
     <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">

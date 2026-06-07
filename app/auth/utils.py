@@ -3,7 +3,7 @@ from sendgrid.helpers.mail import Mail
 from random import randint
 from datetime import datetime, timedelta
 from app.database import otp_collection
-from app.config import settings
+from app.config import nextkin_login_url, settings
 
 
 # ============================================================
@@ -65,8 +65,8 @@ async def send_nextkin_credentials(email: str, owner_email: str, password: str, 
           <p><b>Login credentials:</b></p>
           <p>Email: {email}<br>Password: {password}</p>
           <p>Log in here: 
-             <a href="https://orderlyaffairs.com/nextkin-login">
-             https://orderlyaffairs.com/nextkin-login</a></p>
+             <a href="{nextkin_login_url()}">
+             {nextkin_login_url()}</a></p>
         </div>
         """,
     )
