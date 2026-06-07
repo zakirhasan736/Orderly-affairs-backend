@@ -1,6 +1,12 @@
+import time
+
 import cloudinary
 import cloudinary.uploader
+import cloudinary.utils
 from app.config import settings
+
+MESSAGE_MEDIA_MAX_BYTES = 150 * 1024 * 1024  # 150 MB
+MESSAGE_MEDIA_FOLDER = "messages/media"
 
 cloudinary.config(
     cloud_name=settings.CLOUDINARY_CLOUD_NAME,
@@ -22,11 +28,40 @@ def upload_file(file, folder: str):
     )
 
 
+def validate_message_media_size(size: int) -> None:
+    if size > MESSAGE_MEDIA_MAX_BYTES:
+        raise ValueError("File too large. Maximum size is 150 MB.")
+
+
+def generate_message_media_upload_signature() -> dict:
+    """Return signed params for direct browser uploads to Cloudinary."""
+    timestamp = int(time.time())
+    params_to_sign = {
+        "timestamp": timestamp,
+        "folder": MESSAGE_MEDIA_FOLDER,
+    }
+
+    return {
+        "signature": cloudinary.utils.api_sign_request(
+            params_to_sign,
+            settings.CLOUDINARY_API_SECRET,
+        ),
+        "timestamp": timestamp,
+        "api_key": settings.CLOUDINARY_API_KEY,
+        "cloud_name": settings.CLOUDINARY_CLOUD_NAME,
+        "folder": MESSAGE_MEDIA_FOLDER,
+        "resource_type": "video",
+        "max_bytes": MESSAGE_MEDIA_MAX_BYTES,
+    }
+
+
 def upload_media_file(file, folder: str):
-    """Upload audio/video without a size cap; large files use chunked upload."""
+    """Upload audio/video up to 150 MB; larger files use chunked upload."""
     file.seek(0, 2)
     size = file.tell()
     file.seek(0)
+
+    validate_message_media_size(size)
 
     common_kwargs = {
         "folder": folder,

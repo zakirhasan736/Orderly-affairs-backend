@@ -1,4 +1,4 @@
-from fastapi import Header
+from fastapi import Header, Query
 from fastapi import APIRouter, Depends, HTTPException,  UploadFile, File
 from datetime import datetime
 from bson import ObjectId
@@ -8,11 +8,17 @@ from app.security.jwt_handler import verify_token
 from app.security.crypto import encrypt_data,decrypt_data
 from app.database import messageofnextkin_collection
 from .models import LetterCreate, LetterUpdate, MediaDeleteRequest
-from app.security.cloudinary_service import upload_media_file, delete_file
+from app.security.cloudinary_service import (
+    MESSAGE_MEDIA_FOLDER,
+    MESSAGE_MEDIA_MAX_BYTES,
+    delete_file,
+    generate_message_media_upload_signature,
+    upload_media_file,
+    validate_message_media_size,
+)
 
 router = APIRouter(prefix="/message", tags=["Message"])
 
-MESSAGE_MEDIA_FOLDER = "messages/media"
 MESSAGE_MEDIA_EXTENSIONS = (
     ".mp4", ".mov", ".webm", ".m4v",
     ".mp3", ".m4a", ".wav", ".aac", ".ogg",
@@ -281,6 +287,21 @@ async def delete_letter_media(letter_id: str, authorization: str = Header(...)):
 
     return {"status": "media_deleted"}
 
+@router.get("/media/signature")
+async def get_message_media_upload_signature(
+    authorization: str = Header(...),
+    file_size: int = Query(..., ge=1),
+):
+    verify_token(authorization.split(" ")[1])
+
+    try:
+        validate_message_media_size(file_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return generate_message_media_upload_signature()
+
+
 @router.post("/media")
 async def upload_message_media(
     file: UploadFile = File(...),
@@ -294,6 +315,15 @@ async def upload_message_media(
             status_code=400,
             detail="Only audio/video files are allowed"
         )
+
+    file.file.seek(0, 2)
+    size = file.file.tell()
+    file.file.seek(0)
+
+    try:
+        validate_message_media_size(size)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     uploaded = upload_media_file(
         file.file,
