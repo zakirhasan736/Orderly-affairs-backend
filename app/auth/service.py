@@ -4,6 +4,7 @@ from bson import ObjectId
 
 from app.database import db, messageofnextkin_collection, users_collection
 from app.letters.email_utils import render_email_html, send_email
+from app.security.nok_letter_crypto import load_nok_letter
 from app.nexrkinmessage.sender import send_letter
 from app.notifications.nextkin_emails import NextKinEmailEvent, send_nextkin_email
 
@@ -190,6 +191,7 @@ async def trigger_death_letters(owner_id: str) -> dict:
             if getattr(claim, "modified_count", 0) != 1:
                 continue
 
+            letter = load_nok_letter(letter)
             to_email = letter.get("nok_email")
             if not to_email:
                 raise RuntimeError("NOK email missing")

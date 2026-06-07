@@ -2,18 +2,18 @@ from datetime import datetime
 import sendgrid
 from sendgrid.helpers.mail import Mail
 
-from app.security.crypto import decrypt_data
 from app.database import messageofnextkin_collection
+from app.security.message_crypto import load_message
 from app.config import settings
 
 
 async def send_letter(letter: dict):
-    payload = decrypt_data(letter["encrypted_payload"])
+    letter = load_message(letter)
 
     html = f"""
     <div style="font-family:Arial,sans-serif">
-      <h2>{letter['title']}</h2>
-      <div>{payload.get("content","")}</div>
+      <h2>{letter.get('title', 'A message from your loved one')}</h2>
+      <div>{letter.get("content", "")}</div>
     """
 
     if letter.get("media"):
@@ -30,7 +30,7 @@ async def send_letter(letter: dict):
     message = Mail(
         from_email=settings.EMAIL_SENDER,
         to_emails=letter["recipient_email"],
-        subject=payload.get("subject") or letter["title"],
+        subject=letter.get("subject") or letter.get("title") or "A message from your loved one",
         html_content=html,
     )
 

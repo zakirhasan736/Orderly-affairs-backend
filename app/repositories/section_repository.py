@@ -6,7 +6,7 @@ from app.database import section_data_collection
 from app.notifications.section_update_notifications import (
     notify_immediate_access_on_section_update,
 )
-from app.security.crypto import decrypt_data
+from app.security.section_crypto import decrypt_section_data
 
 
 def _content_fingerprint(data: dict) -> str:
@@ -15,8 +15,14 @@ def _content_fingerprint(data: dict) -> str:
     ).hexdigest()
 
 
-def _fingerprint_from_encrypted(encrypted_data: str) -> str:
-    return _content_fingerprint(decrypt_data(encrypted_data))
+def _fingerprint_from_encrypted(
+    owner_id: str,
+    section_id: str,
+    encrypted_data: str,
+) -> str:
+    return _content_fingerprint(
+        decrypt_section_data(owner_id, section_id, encrypted_data),
+    )
 
 
 def _is_effectively_empty(value) -> bool:
@@ -47,14 +53,20 @@ class SectionRepository:
         subsections: list[str],
     ):
         existing = await SectionRepository.get(owner_id, section_id)
-        new_fingerprint = _fingerprint_from_encrypted(encrypted_data)
-        new_data = decrypt_data(encrypted_data)
+        new_fingerprint = _fingerprint_from_encrypted(
+            owner_id,
+            section_id,
+            encrypted_data,
+        )
+        new_data = decrypt_section_data(owner_id, section_id, encrypted_data)
 
         old_fingerprint = None
         if existing:
             old_fingerprint = existing.get("content_fingerprint")
             if not old_fingerprint and existing.get("encrypted_data"):
                 old_fingerprint = _fingerprint_from_encrypted(
+                    owner_id,
+                    section_id,
                     existing["encrypted_data"],
                 )
 
@@ -70,6 +82,7 @@ class SectionRepository:
                     "section_key": section_key,
                     "encrypted_data": encrypted_data,
                     "content_fingerprint": new_fingerprint,
+                    "encryption_version": 2,
                     "subsections": subsections,
                     "updated_at": now,
                 },

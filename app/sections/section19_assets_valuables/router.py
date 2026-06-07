@@ -3,7 +3,7 @@ from bson import ObjectId
 from app.security.access_control import assert_section_read_access
 from app.database import users_collection
 from app.repositories.section_repository import SectionRepository
-from app.security.crypto import encrypt_data, decrypt_data
+from app.security.section_crypto import encrypt_section_data, decrypt_section_data
 from app.security.jwt_handler import verify_token
 from app.security.cloudinary_service import delete_file
 
@@ -59,7 +59,7 @@ async def save_section19(
 
     cleanup_files(raw_data)
 
-    encrypted_payload = encrypt_data(data)
+    encrypted_payload = encrypt_section_data(str(owner["_id"]), SECTION_ID, data)
 
     await SectionRepository.upsert(
         owner_id=str(owner["_id"]),
@@ -107,7 +107,7 @@ async def get_section19(authorization: str = Header(...)):
     if not section:
         return {}
 
-    decrypted = decrypt_data(section["encrypted_data"])
+    decrypted = decrypt_section_data(owner_id, SECTION_ID, section["encrypted_data"])
 
     return {
         "section_key": SECTION_KEY,

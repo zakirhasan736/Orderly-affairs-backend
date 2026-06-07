@@ -28,6 +28,10 @@ from app.auth.otp_security import (
 from app.database import users_collection, otp_collection, sms_mfa_attempts_collection, pending_signup_collection
 from app.security.billing_guard import enforce_billing
 from app.security.password_handler import hash_password, verify_password
+from app.security.nextkin_profile_crypto import (
+    load_nextkin_profile,
+    prepare_nextkin_profile_for_storage,
+)
 from app.security.jwt_handler import (
     create_access_token,
     verify_token,
@@ -968,10 +972,13 @@ async def create_nextkin(
             "updated_at": datetime.utcnow(),
         }
 
-        insert_res = await users_collection.insert_one(new_nok)
+        stored_nok = prepare_nextkin_profile_for_storage(new_nok)
+        insert_res = await users_collection.insert_one(stored_nok)
         new_id = insert_res.inserted_id
 
-        nextkin = await users_collection.find_one({"_id": new_id})
+        nextkin = load_nextkin_profile(
+            await users_collection.find_one({"_id": new_id})
+        )
 
         # ✅ CASE 1: Immediate access → approve + send ACCESS email (with password)
         if req.immediate_access:
@@ -1104,6 +1111,7 @@ async def get_my_nextkin(authorization: str = Header(None)):
     nextkins = users_collection.find({"owner_id": str(owner["_id"]), "role": "nextkin"})
     results = []
     async for nk in nextkins:
+        nk = load_nextkin_profile(nk)
         results.append({
             "id": str(nk["_id"]),
             "email": nk["email"],
@@ -1166,7 +1174,29 @@ async def update_nextkin(
     if not update_data:
         raise HTTPException(status_code=400, detail="No valid fields provided to update")
 
-    await users_collection.update_one({"_id": ObjectId(nextkin_id)}, {"$set": update_data})
+    merged_profile = load_nextkin_profile(dict(nextkin))
+    merged_profile.update(update_data)
+    merged_profile["owner_id"] = str(owner["_id"])
+    merged_profile["_id"] = nextkin["_id"]
+    stored_profile = prepare_nextkin_profile_for_storage(merged_profile)
+    stored_profile.pop("_id", None)
+
+    unset = {
+        key: ""
+        for key in (
+            "card_storage_location",
+            "key_bag_location",
+            "documents_bag_location",
+            "special_instructions",
+        )
+        if key in nextkin
+    }
+
+    update_doc: dict = {"$set": stored_profile}
+    if unset:
+        update_doc["$unset"] = unset
+
+    await users_collection.update_one({"_id": ObjectId(nextkin_id)}, update_doc)
 
     return {
         "message": f"Next-of-Kin updated successfully.",

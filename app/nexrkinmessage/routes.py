@@ -5,7 +5,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import Request
 from app.security.jwt_handler import verify_token
-from app.security.crypto import encrypt_data,decrypt_data
+from app.security.message_crypto import load_message, prepare_message_for_storage
 from app.database import messageofnextkin_collection
 from .models import LetterCreate, LetterUpdate, MediaDeleteRequest
 from app.security.cloudinary_service import (
@@ -77,35 +77,25 @@ async def create_letter(
 ):
     token = authorization.split(" ")[1]
     user = verify_token(token)
-        # 🔒 ALWAYS use ObjectId string
     owner_id = user.get("owner_id") or user.get("sub")
-    encrypted_payload = encrypt_data({
-        "subject": payload.subject,
-        "content": payload.content,
-    })
 
-    doc = {
-        # "owner_id": user["sub"],
+    doc = prepare_message_for_storage({
         "owner_id": owner_id,
         "title": payload.title,
-        "encrypted_payload": encrypted_payload,
-
+        "subject": payload.subject,
+        "content": payload.content,
         "recipient": payload.recipient,
         "recipient_email": payload.recipient_email,
-
         "message_type": payload.message_type,
         "media": payload.media,
-
         "delivery_trigger": payload.delivery_trigger,
         "delivery_date": payload.delivery_date,
-        "delivery_occasion": payload.delivery_occasion,  # ✅ SAVED
-
+        "delivery_occasion": payload.delivery_occasion,
         "status": "pending",
         "is_deleted": False,
-
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
-    }
+    })
 
     result = await messageofnextkin_collection.insert_one(doc)
     return {"status": "saved", "_id": str(result.inserted_id)}
@@ -123,30 +113,23 @@ async def get_letters(authorization: str = Header(...)):
 
     result = []
 
-    for l in letters:
-        payload = decrypt_data(l["encrypted_payload"])
-
+    for letter in letters:
+        decrypted = load_message(letter)
         result.append({
-            "_id": str(l["_id"]),
-            "title": l["title"],
-
-            # ✅ DECRYPTED DATA
-            "subject": payload.get("subject"),
-            "content": payload.get("content"),
-
-            "recipient": l["recipient"],
-            "recipient_email": l["recipient_email"],
-
-            "message_type": l["message_type"],
-            "media": l.get("media"),
-
-            "delivery_trigger": l["delivery_trigger"],
-            "delivery_date": l.get("delivery_date"),
-            "delivery_occasion": l.get("delivery_occasion"),
-
-            "status": l["status"],
-            "sent_at": l.get("sent_at"),
-            "updated_at": l["updated_at"],
+            "_id": str(decrypted["_id"]),
+            "title": decrypted.get("title"),
+            "subject": decrypted.get("subject"),
+            "content": decrypted.get("content"),
+            "recipient": decrypted.get("recipient"),
+            "recipient_email": decrypted["recipient_email"],
+            "message_type": decrypted["message_type"],
+            "media": decrypted.get("media"),
+            "delivery_trigger": decrypted["delivery_trigger"],
+            "delivery_date": decrypted.get("delivery_date"),
+            "delivery_occasion": decrypted.get("delivery_occasion"),
+            "status": decrypted["status"],
+            "sent_at": decrypted.get("sent_at"),
+            "updated_at": decrypted["updated_at"],
         })
 
     return result
@@ -208,15 +191,21 @@ async def update_letter(
         if old_public_id and old_public_id != new_public_id:
             delete_media_file(old_media)
 
-    # Encrypt only if content/subject changed
-    if "subject" in update_data or "content" in update_data:
-        encrypted_payload = encrypt_data({
-            "subject": update_data.pop("subject", None),
-            "content": update_data.pop("content", None),
-        })
-        update_data["encrypted_payload"] = encrypted_payload
+    merged = load_message(letter)
+    merged.update(update_data)
+    merged["owner_id"] = owner_id
+    merged["updated_at"] = datetime.utcnow()
 
-    update_data["updated_at"] = datetime.utcnow()
+    stored = prepare_message_for_storage(merged)
+    unset = {
+        key: ""
+        for key in ("title", "subject", "content", "recipient")
+        if key in letter
+    }
+
+    update_doc: dict = {"$set": stored}
+    if unset:
+        update_doc["$unset"] = unset
 
     result = await messageofnextkin_collection.update_one(
         {
@@ -224,7 +213,7 @@ async def update_letter(
             "owner_id": owner_id,
             "is_deleted": False,
         },
-        {"$set": update_data}
+        update_doc,
     )
 
     if result.matched_count == 0:
@@ -247,7 +236,6 @@ async def delete_letter(letter_id: str, authorization: str = Header(...)):
     if not letter:
         raise HTTPException(status_code=404, detail="Letter not found")
 
-    # Hard-delete media from Cloudinary first so no orphaned files remain.
     delete_media_file(letter.get("media"))
 
     await messageofnextkin_collection.update_one(
@@ -355,4 +343,3 @@ async def delete_uploaded_message_media(
     delete_file(payload.public_id, payload.resource_type)
 
     return {"status": "deleted"}
-

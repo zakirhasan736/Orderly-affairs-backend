@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from bson import ObjectId
 
 from app.database import db, kits_collection
+from app.security.nok_letter_crypto import load_nok_letter, prepare_nok_letter_for_storage
+from app.security.nextkin_profile_crypto import load_nextkin_profile
 from .core import require_owner
 from .models import NOKLetterIn, NOKLetterOut
 
@@ -153,6 +155,7 @@ async def fetch_nok_by_id(owner_id: str, nok_id: str) -> Optional[Dict[str, Any]
     })
     if not doc:
         return None
+    doc = load_nextkin_profile(doc)
     return {
         "full_name": doc.get("full_name"),
         "email": doc.get("email"),
@@ -188,7 +191,7 @@ async def fetch_primary_nok(owner_id: str) -> Optional[Dict[str, Any]]:
         ts = created_at.timestamp() if isinstance(created_at, datetime) else 0
         return (is_full, has_sections, ts)
 
-    p = max(people, key=score)
+    p = load_nextkin_profile(max(people, key=score))
     return {
         "full_name": p.get("full_name"),
         "email": p.get("email"),
@@ -320,28 +323,34 @@ async def get_my_nok_letter(
 
     doc = await nok_letters_collection.find_one(match)
     if doc:
+        doc = load_nok_letter(doc)
         merged = await apply_autofill(
             owner_id,
             NOKLetterIn(**doc),
             nok_id or doc.get("nok_user_id"),
         )
         if merged:
+            stored = prepare_nok_letter_for_storage(
+                {**merged, "owner_id": owner_id, "updated_at": datetime.utcnow()},
+            )
             await nok_letters_collection.update_one(
                 {"_id": doc["_id"]},
-                {"$set": {**merged, "updated_at": datetime.utcnow()}},
+                {"$set": stored},
             )
             doc = await nok_letters_collection.find_one({"_id": doc["_id"]})
         doc = await sync_letter_delivery(doc)
-        return to_out(doc)
+        return to_out(load_nok_letter(doc))
 
     # No doc yet -> build and insert
     merged = await apply_autofill(owner_id, NOKLetterIn(), nok_id)
     now = datetime.utcnow()
-    new_doc = {**merged, "owner_id": owner_id, "created_at": now, "updated_at": now}
+    new_doc = prepare_nok_letter_for_storage(
+        {**merged, "owner_id": owner_id, "created_at": now, "updated_at": now},
+    )
     res = await nok_letters_collection.insert_one(new_doc)
     new_doc["_id"] = res.inserted_id
     new_doc = await sync_letter_delivery(new_doc)
-    return to_out(new_doc)
+    return to_out(load_nok_letter(new_doc))
 
 
 @router.post("", response_model=NOKLetterOut)
@@ -362,19 +371,24 @@ async def create_or_replace_my_nok_letter(
     now = datetime.utcnow()
     existing = await nok_letters_collection.find_one(match)
     if existing:
+        stored = prepare_nok_letter_for_storage(
+            {**merged, "owner_id": owner_id, "updated_at": now},
+        )
         await nok_letters_collection.update_one(
             {"_id": existing["_id"]},
-            {"$set": {**merged, "updated_at": now}},
+            {"$set": stored},
         )
         doc = await nok_letters_collection.find_one({"_id": existing["_id"]})
         doc = await sync_letter_delivery(doc)
-        return to_out(doc)
+        return to_out(load_nok_letter(doc))
 
-    doc = {**merged, "owner_id": owner_id, "created_at": now, "updated_at": now}
+    doc = prepare_nok_letter_for_storage(
+        {**merged, "owner_id": owner_id, "created_at": now, "updated_at": now},
+    )
     res = await nok_letters_collection.insert_one(doc)
     doc["_id"] = res.inserted_id
     doc = await sync_letter_delivery(doc)
-    return to_out(doc)
+    return to_out(load_nok_letter(doc))
 
 
 @router.put("", response_model=NOKLetterOut)
@@ -397,10 +411,13 @@ async def update_my_nok_letter(
     if not existing:
         raise HTTPException(status_code=404, detail="NOK letter not found")
 
+    stored = prepare_nok_letter_for_storage(
+        {**merged, "owner_id": owner_id, "updated_at": datetime.utcnow()},
+    )
     await nok_letters_collection.update_one(
         {"_id": existing["_id"]},
-        {"$set": {**merged, "updated_at": datetime.utcnow()}},
+        {"$set": stored},
     )
     doc = await nok_letters_collection.find_one({"_id": existing["_id"]})
     doc = await sync_letter_delivery(doc)
-    return to_out(doc)
+    return to_out(load_nok_letter(doc))

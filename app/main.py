@@ -56,6 +56,9 @@ from app.sections.section21_estate_planning_finalwishes.router import router as 
 
 from app.ai.ai_upload_routes import router as ai_upload_router
 from app.ai.ai_autofill_routes import router as ai_autofill_router
+from app.security.encrypt_at_rest_migration import run_encryption_migration
+from app.security.security_audit import run_security_audit
+
 app = FastAPI(title="Orderly Affairs Backend API")
 
 origins = [
@@ -92,6 +95,15 @@ async def startup():
             await asyncio.sleep(60)
 
     asyncio.create_task(message_scheduler_loop())
+
+    async def encryption_migration_loop():
+        try:
+            await run_encryption_migration()
+            await run_security_audit()
+        except Exception as exc:
+            print("Encryption-at-rest migration error:", exc)
+
+    asyncio.create_task(encryption_migration_loop())
 
     print("Both letter & message schedulers started")
 

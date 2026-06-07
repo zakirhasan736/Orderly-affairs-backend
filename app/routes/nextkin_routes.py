@@ -10,6 +10,7 @@ from app.models.nextkin_schema import NextKinCreateRequest, NextKinLoginRequest
 from app.database import users_collection
 from app.security.jwt_handler import create_access_token, verify_token
 from app.config import nextkin_login_url, settings
+from app.security.nextkin_profile_crypto import prepare_nextkin_profile_for_storage
 
 router = APIRouter(prefix="/nextkin", tags=["Next-of-Kin"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -58,7 +59,9 @@ async def create_nextkin(payload: NextKinCreateRequest, authorization: str = Hea
         "created_at": datetime.utcnow(),
     }
 
-    result = await users_collection.insert_one(new_nok)
+    result = await users_collection.insert_one(
+        prepare_nextkin_profile_for_storage(new_nok)
+    )
 
     try:
         sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)

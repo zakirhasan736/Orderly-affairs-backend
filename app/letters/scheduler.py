@@ -7,6 +7,7 @@ from bson import ObjectId
 
 from app.database import db
 from app.config import settings
+from app.security.nok_letter_crypto import load_nok_letter
 from .email_utils import render_email_html, send_email
 
 scheduled_letters = db["scheduled_letters"]
@@ -38,6 +39,7 @@ async def _process_due(limit: int = 50):
             letter = await nok_letters.find_one({"_id": ObjectId(letter_id)}) if letter_id else None
             if not letter:
                 raise RuntimeError("Letter not found")
+            letter = load_nok_letter(letter)
             if letter.get("delivery_status") == "sent":
                 await scheduled_letters.update_one(
                     {"_id": job["_id"]},

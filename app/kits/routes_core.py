@@ -2,9 +2,16 @@ from fastapi import APIRouter, Header, HTTPException
 from bson import ObjectId
 from typing import Any, Dict, List
 from datetime import datetime
-from app.database import kits_collection, users_collection, section_data_collection, messageofnextkin_collection, letters_collection
+from app.database import db, kits_collection, users_collection, section_data_collection, messageofnextkin_collection
 from app.security.jwt_handler import verify_token
-from app.security.crypto import decrypt_data
+from app.security.checklist_crypto import load_checklist_items, prepare_checklist_for_storage
+from app.security.kit_data_crypto import (
+    prepare_kit_section_for_storage,
+    prepare_kit_subsection_for_storage,
+)
+from app.security.message_crypto import load_message
+from app.security.nok_letter_crypto import load_nok_letter
+from app.security.section_crypto import decrypt_section_data
 from app.auth.death_detection import maybe_detect_owner_deceased_from_checklist
 
 from .models import ChecklistUpdate, SectionInput, SubsectionInput, TogglesInput
@@ -33,13 +40,17 @@ async def upsert_section(section_id: str, payload: SectionInput, authorization: 
     owner = await require_owner(authorization)
     kit = await get_or_init_kit(str(owner["_id"]))
     ensure_section_struct(kit, section_id)
+    owner_id = str(owner["_id"])
+    encrypted = prepare_kit_section_for_storage(owner_id, section_id, payload.data)
     res = await kits_collection.update_one(
-        {"owner_id": str(owner["_id"])},
+        {"owner_id": owner_id},
         {
             "$set": {
-                "sections.$[s].data": payload.data,
+                "sections.$[s].encrypted_data": encrypted["encrypted_data"],
+                "sections.$[s].encryption_version": encrypted["encryption_version"],
                 "updated_at": datetime.utcnow(),
-            }
+            },
+            "$unset": {"sections.$[s].data": ""},
         },
         array_filters=[{"s.id": section_id}],
         upsert=True,
@@ -52,13 +63,17 @@ async def upsert_subsection(section_id: str, sub_id: str, payload: SubsectionInp
     owner = await require_owner(authorization)
     kit = await get_or_init_kit(str(owner["_id"]))
     ensure_subsection_struct(kit, section_id, sub_id)
+    owner_id = str(owner["_id"])
+    encrypted = prepare_kit_subsection_for_storage(owner_id, sub_id, payload.data)
     res = await kits_collection.update_one(
-        {"owner_id": str(owner["_id"])},
+        {"owner_id": owner_id},
         {
             "$set": {
-                "sections.$[s].subsections.$[ss].data": payload.data,
+                "sections.$[s].subsections.$[ss].encrypted_data": encrypted["encrypted_data"],
+                "sections.$[s].subsections.$[ss].encryption_version": encrypted["encryption_version"],
                 "sections.$[s].subsections.$[ss].updated_at": datetime.utcnow(),
             },
+            "$unset": {"sections.$[s].subsections.$[ss].data": ""},
             "$inc": {"sections.$[s].subsections.$[ss].version": 1},
         },
         array_filters=[{"s.id": section_id}, {"ss.id": sub_id}],
@@ -131,6 +146,19 @@ async def migrate_from_forms(payload: Dict[str, Any], authorization: str = Heade
     kit["disabled_subsections"] = old.get("disabledSubsections", kit.get("disabled_subsections", {}))
     kit["updated_at"] = datetime.utcnow()
 
+    for section in kit.get("sections", []):
+        section_id = str(section.get("id") or "")
+        if section.get("data") is not None and not section.get("encrypted_data"):
+            encrypted = prepare_kit_section_for_storage(owner_id, section_id, section["data"])
+            section.update(encrypted)
+            section.pop("data", None)
+        for subsection in section.get("subsections", []):
+            sub_id = str(subsection.get("id") or "")
+            if subsection.get("data") is not None and not subsection.get("encrypted_data"):
+                encrypted = prepare_kit_subsection_for_storage(owner_id, sub_id, subsection["data"])
+                subsection.update(encrypted)
+                subsection.pop("data", None)
+
     await kits_collection.replace_one({"owner_id": owner_id}, kit, upsert=True)
     return {"message": "Migration completed", "sections": len(kit["sections"])}
 
@@ -187,7 +215,11 @@ async def get_kit_for_nextkin(authorization: str = Header(None)):
             continue
 
         try:
-            decrypted = decrypt_data(section.get("encrypted_data", ""))
+            decrypted = decrypt_section_data(
+                owner_id,
+                section_id,
+                section.get("encrypted_data", ""),
+            )
         except Exception:
             decrypted = {}
 
@@ -202,12 +234,14 @@ async def get_kit_for_nextkin(authorization: str = Header(None)):
     # -------------------------
     # 3️⃣ Load NOK Letter
     # -------------------------
-    nok_letter = await letters_collection.find_one({
+    nok_letters_collection = db["nok_letters"]
+    nok_letter = await nok_letters_collection.find_one({
         "owner_id": owner_id,
         "nok_user_id": str(nextkin["_id"]),
     })
 
     if nok_letter:
+        nok_letter = load_nok_letter(nok_letter)
         nok_letter["_id"] = str(nok_letter["_id"])
 
     # -------------------------
@@ -240,7 +274,7 @@ async def get_kit_for_nextkin(authorization: str = Header(None)):
 
     checklists = {}
     async for c in checklists_cursor:
-        checklists[c["section_id"]] = c["items"]
+        checklists[c["section_id"]] = load_checklist_items(c)
 
     # -------------------------
     # 5️⃣ Final Response
@@ -290,9 +324,13 @@ async def deliver_message(
         )
 
     # 2️⃣ Decrypt payload
-    payload = decrypt_data(msg["encrypted_payload"])
-    subject = payload.get("subject") or "A message from your loved one"
-    content = payload.get("content") or ""
+    msg = load_message(msg)
+    payload = {
+        "subject": msg.get("subject"),
+        "content": msg.get("content"),
+    }
+    subject = msg.get("subject") or msg.get("title") or "A message from your loved one"
+    content = msg.get("content") or ""
 
     # 3️⃣ Send email immediately (IGNORES date/death trigger)
     await send_message_email(
@@ -336,6 +374,12 @@ async def save_checklist_progress(
     if not owner_id:
         raise HTTPException(status_code=400, detail="Owner ID missing")
 
+    encrypted_checklist = prepare_checklist_for_storage(
+        owner_id=owner_id,
+        nextkin_id=nextkin_id,
+        section_id=payload.section_id,
+        items=payload.items,
+    )
     await kits_collection.update_one(
         {
             "owner_id": owner_id,
@@ -344,9 +388,13 @@ async def save_checklist_progress(
         },
         {
             "$set": {
-                "items": payload.items,
+                **encrypted_checklist,
+                "owner_id": owner_id,
+                "nextkin_id": nextkin_id,
+                "section_id": payload.section_id,
                 "updated_at": datetime.utcnow(),
-            }
+            },
+            "$unset": {"items": ""},
         },
         upsert=True,
     )

@@ -3,6 +3,7 @@ from typing import Dict, Any, Tuple
 from datetime import datetime
 from app.security.jwt_handler import verify_token
 from app.database import users_collection, kits_collection
+from app.security.kit_data_crypto import load_kit_document
 
 async def require_owner(authorization: str | None):
     if not authorization:
@@ -38,7 +39,7 @@ async def require_nok(authorization: str | None) -> Tuple[Dict[str, Any], Dict[s
 async def get_or_init_kit(owner_id: str) -> Dict[str, Any]:
     kit = await kits_collection.find_one({"owner_id": owner_id})
     if kit:
-        return kit
+        return load_kit_document(kit)
     now = datetime.utcnow()
     kit = {
         "owner_id": owner_id,
