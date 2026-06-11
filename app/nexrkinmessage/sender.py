@@ -1,47 +1,12 @@
 from datetime import datetime
-import sendgrid
-from sendgrid.helpers.mail import Mail
 
 from app.database import messageofnextkin_collection
-from app.security.message_crypto import load_message
-from app.config import settings
+from app.notifications.personal_message_emails import send_personal_message_email
 
 
 async def send_letter(letter: dict):
-    letter = load_message(letter)
+    await send_personal_message_email(letter=letter)
 
-    html = f"""
-    <div style="font-family:Arial,sans-serif">
-      <h2>{letter.get('title', 'A message from your loved one')}</h2>
-      <div>{letter.get("content", "")}</div>
-    """
-
-    if letter.get("media"):
-        html += f"""
-        <p style="margin-top:16px">
-          <a href="{letter['media']['url']}" target="_blank">
-            ▶ View attached {letter['message_type']}
-          </a>
-        </p>
-        """
-
-    html += "</div>"
-
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
-        to_emails=letter["recipient_email"],
-        subject=letter.get("subject") or letter.get("title") or "A message from your loved one",
-        html_content=html,
-    )
-
-    try:
-        sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-        sg.send(message)
-    except Exception as e:
-        print("❌ SendGrid error:", e)
-        raise
-
-    # ✅ Mark as sent (DO NOT DELETE FILES)
     await messageofnextkin_collection.update_one(
         {"_id": letter["_id"]},
         {

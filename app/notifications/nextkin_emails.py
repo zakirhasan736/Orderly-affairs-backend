@@ -131,10 +131,11 @@ async def send_nextkin_email(
 
 
 async def send_message_email(*, to: str, subject: str, html: str):
+    """Legacy helper — prefer send_personal_message_email for personal messages."""
     sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
 
     message = Mail(
-        from_email=settings.EMAIL_SENDER,
+        from_email=settings.MESSAGES_FROM_EMAIL,
         to_emails=to,
         subject=subject,
         html_content=html,

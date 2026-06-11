@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # === Email ===
     SENDGRID_API_KEY: str
     EMAIL_SENDER: EmailStr
+    MESSAGES_FROM_EMAIL: EmailStr = "messages@orderly-affairs.com"
 
     # === Cloudinary ===
     CLOUDINARY_CLOUD_NAME: str

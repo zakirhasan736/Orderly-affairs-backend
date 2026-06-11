@@ -16,7 +16,7 @@ from app.auth.death_detection import maybe_detect_owner_deceased_from_checklist
 
 from .models import ChecklistUpdate, SectionInput, SubsectionInput, TogglesInput
 from .core import require_owner, require_nok, get_or_init_kit, ensure_section_struct, ensure_subsection_struct, filter_sections_for_nok
-from app.notifications.nextkin_emails import send_message_email
+from app.notifications.personal_message_emails import send_personal_message_email
 
 router = APIRouter(prefix="/kit", tags=["kit-core"])
 
@@ -325,25 +325,9 @@ async def deliver_message(
 
     # 2️⃣ Decrypt payload
     msg = load_message(msg)
-    payload = {
-        "subject": msg.get("subject"),
-        "content": msg.get("content"),
-    }
-    subject = msg.get("subject") or msg.get("title") or "A message from your loved one"
-    content = msg.get("content") or ""
 
     # 3️⃣ Send email immediately (IGNORES date/death trigger)
-    await send_message_email(
-        to=msg["recipient_email"],
-        subject=subject,
-        html=f"""
-        <div style="font-family:Arial,sans-serif;line-height:1.6">
-          <p>{content}</p>
-          <hr />
-          <small>Delivered via Orderly Affairs</small>
-        </div>
-        """,
-    )
+    await send_personal_message_email(letter=msg)
 
     # 4️⃣ Mark as sent
     await messageofnextkin_collection.update_one(
