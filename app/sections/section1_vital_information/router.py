@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Header, HTTPException
 from bson import ObjectId
 
@@ -43,6 +45,18 @@ async def save_section1(
         encrypted_data=encrypted,
         subsections=SUBSECTIONS,
     )
+
+    legal_name = (payload.vital_info or {}).get("full_legal_name")
+    if isinstance(legal_name, str) and legal_name.strip():
+        await users_collection.update_one(
+            {"_id": owner["_id"]},
+            {
+                "$set": {
+                    "full_name": legal_name.strip(),
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
 
     return {"message": "Section 1 saved"}
 

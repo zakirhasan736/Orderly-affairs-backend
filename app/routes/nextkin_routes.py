@@ -10,6 +10,7 @@ from app.models.nextkin_schema import NextKinCreateRequest, NextKinLoginRequest
 from app.database import users_collection
 from app.security.jwt_handler import create_access_token, verify_token
 from app.config import nextkin_login_url, settings
+from app.notifications.display_names import resolve_owner_display_name
 from app.security.nextkin_profile_crypto import prepare_nextkin_profile_for_storage
 
 router = APIRouter(prefix="/nextkin", tags=["Next-of-Kin"])
@@ -64,11 +65,12 @@ async def create_nextkin(payload: NextKinCreateRequest, authorization: str = Hea
     )
 
     try:
+        owner_name = await resolve_owner_display_name(owner)
         sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
         html = f"""
         <div style="font-family:Arial">
           <h3>Hello {payload.full_name},</h3>
-          <p>You’ve been added as a Next-of-Kin by <b>{owner.get("full_name")}</b>.</p>
+          <p>You’ve been added as a Next-of-Kin by <b>{owner_name}</b>.</p>
           <p>Email: {email}<br>Password: {temp_password}</p>
           <a href="{nextkin_login_url()}">Login Here</a>
         </div>

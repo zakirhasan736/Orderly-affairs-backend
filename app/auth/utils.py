@@ -52,7 +52,12 @@ async def verify_otp(email: str, otp_input: int) -> bool:
 # ============================================================
 # ✅ Send Next-of-Kin Credentials
 # ============================================================
-async def send_nextkin_credentials(email: str, owner_email: str, password: str, full_name: str | None = None):
+async def send_nextkin_credentials(
+    email: str,
+    owner_name: str,
+    password: str,
+    full_name: str | None = None,
+):
     sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
     message = Mail(
         from_email=settings.EMAIL_SENDER,
@@ -61,7 +66,7 @@ async def send_nextkin_credentials(email: str, owner_email: str, password: str, 
         html_content=f"""
         <div style='font-family:Arial,sans-serif'>
           <p>Hello {full_name or ''},</p>
-          <p>You have been designated as a Next-of-Kin by {owner_email}.</p>
+          <p>You have been designated as a Next-of-Kin by {owner_name}.</p>
           <p><b>Login credentials:</b></p>
           <p>Email: {email}<br>Password: {password}</p>
           <p>Log in here: 

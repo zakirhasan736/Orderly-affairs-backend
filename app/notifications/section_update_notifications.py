@@ -5,6 +5,10 @@ from sendgrid.helpers.mail import Mail
 
 from app.config import nextkin_login_url, settings
 from app.database import db, users_collection
+from app.notifications.display_names import (
+    resolve_nextkin_display_name,
+    resolve_owner_display_name,
+)
 
 # Sections that should NOT email immediate-access people when updated.
 SECTIONS_EXCLUDED_FROM_UPDATE_NOTIFICATIONS = frozenset({"4", "8", "9", "11", "17"})
@@ -93,8 +97,8 @@ async def _send_section_update_email(
     section_id: str,
 ) -> None:
     section_title = SECTION_TITLES.get(section_id, f"Section {section_id}")
-    owner_name = owner.get("full_name") or owner.get("email") or "The kit owner"
-    nk_name = nextkin.get("full_name") or nextkin.get("email")
+    owner_name = await resolve_owner_display_name(owner)
+    nk_name = resolve_nextkin_display_name(nextkin)
     login_url = nextkin_login_url()
 
     html = f"""

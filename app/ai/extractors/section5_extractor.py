@@ -19,6 +19,9 @@ Important rules:
 - patch["5A"] must always be an array.
 - If the uploaded document describes one vehicle, return exactly one object inside patch["5A"].
 - If the uploaded document describes multiple vehicles, return one object per vehicle inside patch["5A"].
+- Insurance cards, declarations pages, and multi-vehicle registration documents often list 2 or more vehicles on the same page. Extract EVERY distinct vehicle listed — do not stop after the first one.
+- A distinct vehicle is identified by its own year/make/model and/or VIN. Two rows or blocks on an insurance card usually mean two vehicles.
+- If multiple vehicles share the same insurance policy number or insurance company, copy those shared values into each vehicle object.
 - Keep keys exactly as required by schema.
 - Never invent VIN, license plate, insurance policy number, loan information, or ownership details.
 - If a value is unclear, return null.

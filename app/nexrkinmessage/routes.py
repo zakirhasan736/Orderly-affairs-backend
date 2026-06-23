@@ -279,6 +279,7 @@ async def delete_letter_media(letter_id: str, authorization: str = Header(...)):
 async def get_message_media_upload_signature(
     authorization: str = Header(...),
     file_size: int = Query(..., ge=1),
+    resource_type: str = Query("video"),
 ):
     verify_token(authorization.split(" ")[1])
 
@@ -287,7 +288,8 @@ async def get_message_media_upload_signature(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    return generate_message_media_upload_signature()
+    normalized = resource_type if resource_type in ("video", "image") else "video"
+    return generate_message_media_upload_signature(resource_type=normalized)
 
 
 @router.post("/media")

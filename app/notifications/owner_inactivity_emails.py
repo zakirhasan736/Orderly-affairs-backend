@@ -2,10 +2,11 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
 from app.config import owner_login_url, settings
+from app.notifications.display_names import resolve_owner_display_name
 
 
 async def send_owner_inactivity_check_email(*, owner: dict) -> None:
-    owner_name = owner.get("full_name") or owner.get("email") or "Kit Owner"
+    owner_name = await resolve_owner_display_name(owner)
     login_url = owner_login_url()
 
     html = f"""

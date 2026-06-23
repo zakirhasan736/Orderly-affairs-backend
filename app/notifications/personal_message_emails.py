@@ -9,6 +9,7 @@ from sendgrid.helpers.mail import Mail
 
 from app.config import settings
 from app.database import users_collection
+from app.notifications.display_names import resolve_owner_display_name
 from app.security.message_crypto import load_message
 
 _TEMPLATE_PATH = Path(__file__).parent / "templates" / "personal_message.html"
@@ -120,10 +121,10 @@ async def _resolve_owner(owner_ref: str) -> dict | None:
     return owner
 
 
-def _sender_name(owner: dict | None) -> str:
+async def _sender_name(owner: dict | None) -> str:
     if not owner:
         return "Someone who cares about you"
-    return owner.get("full_name") or owner.get("email") or "Someone who cares about you"
+    return await resolve_owner_display_name(owner)
 
 
 async def send_personal_message_email(*, letter: dict, owner: dict | None = None) -> None:
@@ -132,7 +133,7 @@ async def send_personal_message_email(*, letter: dict, owner: dict | None = None
     if owner is None:
         owner = await _resolve_owner(str(letter.get("owner_id") or ""))
 
-    sender_name = _sender_name(owner)
+    sender_name = await _sender_name(owner)
     recipient_name = letter.get("recipient") or letter.get("recipient_email") or "there"
     message_subject = letter.get("subject") or letter.get("title")
     message_body = letter.get("content") or ""

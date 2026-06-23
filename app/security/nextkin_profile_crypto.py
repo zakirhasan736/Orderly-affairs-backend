@@ -5,6 +5,7 @@ from typing import Any
 from app.security.crypto import decrypt_data, encrypt_data
 
 PROFILE_SENSITIVE_KEYS = (
+    "master_password",
     "card_storage_location",
     "key_bag_location",
     "documents_bag_location",

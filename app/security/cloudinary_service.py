@@ -33,8 +33,11 @@ def validate_message_media_size(size: int) -> None:
         raise ValueError("File too large. Maximum size is 150 MB.")
 
 
-def generate_message_media_upload_signature() -> dict:
+def generate_message_media_upload_signature(
+    resource_type: str = "video",
+) -> dict:
     """Return signed params for direct browser uploads to Cloudinary."""
+    normalized = resource_type if resource_type in ("video", "image") else "video"
     timestamp = int(time.time())
     params_to_sign = {
         "timestamp": timestamp,
@@ -50,7 +53,7 @@ def generate_message_media_upload_signature() -> dict:
         "api_key": settings.CLOUDINARY_API_KEY,
         "cloud_name": settings.CLOUDINARY_CLOUD_NAME,
         "folder": MESSAGE_MEDIA_FOLDER,
-        "resource_type": "video",
+        "resource_type": normalized,
         "max_bytes": MESSAGE_MEDIA_MAX_BYTES,
     }
 

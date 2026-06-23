@@ -44,6 +44,10 @@ from app.notifications.nextkin_emails import (
     send_nextkin_email,
     NextKinEmailEvent,
 )
+from app.notifications.display_names import (
+    resolve_nextkin_display_name,
+    resolve_owner_display_name,
+)
 import string, random
 
 from sendgrid import SendGridAPIClient
@@ -956,7 +960,10 @@ async def create_nextkin(
                 bool(req.nok_letter_received) if not req.immediate_access else False
             ),
 
-            "password_card_generated": req.password_card_generated,
+            "password_card_generated": bool(
+                req.password_card_generated or plain_password
+            ),
+            "master_password": plain_password,
             "card_storage_location": req.card_storage_location,
             "key_bag_location": req.key_bag_location,
             "documents_bag_location": req.documents_bag_location,
@@ -1125,6 +1132,7 @@ async def get_my_nextkin(authorization: str = Header(None)):
             "nok_letter_received": nk.get("nok_letter_received", False),
 
             "password_card_generated": nk.get("password_card_generated"),
+            "master_password": nk.get("master_password"),
             "card_storage_location": nk.get("card_storage_location"),
             "key_bag_location": nk.get("key_bag_location"),
             "documents_bag_location": nk.get("documents_bag_location"),
@@ -1161,20 +1169,28 @@ async def update_nextkin(
     if not nextkin:
         raise HTTPException(status_code=404, detail="Next-of-Kin not found or not linked to this owner")
 
+    current_profile = load_nextkin_profile(dict(nextkin)) or dict(nextkin)
+    previous_password = current_profile.get("master_password")
+
     # ✅ Only update provided fields
     update_data = {k: v for k, v in payload.dict().items() if v is not None}
 
     if update_data.get("immediate_access") is True:
         update_data["nok_letter_received"] = False
 
-    # Optional: hash master_password if changed
-    if payload.master_password:
-        update_data["password_hash"] = hash_password(payload.master_password)
+    password_changed = False
+    new_password = (payload.master_password or "").strip() or None
+    if new_password and new_password != (previous_password or ""):
+        password_changed = True
+        update_data["password_hash"] = hash_password(new_password)
+        update_data["master_password"] = new_password
+    elif "master_password" in update_data and not new_password:
+        update_data.pop("master_password", None)
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No valid fields provided to update")
 
-    merged_profile = load_nextkin_profile(dict(nextkin))
+    merged_profile = dict(current_profile)
     merged_profile.update(update_data)
     merged_profile["owner_id"] = str(owner["_id"])
     merged_profile["_id"] = nextkin["_id"]
@@ -1198,10 +1214,25 @@ async def update_nextkin(
 
     await users_collection.update_one({"_id": ObjectId(nextkin_id)}, update_doc)
 
+    password_email_sent = False
+    if password_changed and new_password:
+        updated_nextkin = load_nextkin_profile(
+            await users_collection.find_one({"_id": ObjectId(nextkin_id)})
+        )
+        if updated_nextkin:
+            await send_nextkin_email(
+                event=NextKinEmailEvent.PASSWORD_UPDATED,
+                nextkin=updated_nextkin,
+                owner=owner,
+                plain_password=new_password,
+            )
+            password_email_sent = True
+
     return {
         "message": f"Next-of-Kin updated successfully.",
         "nextkin_id": nextkin_id,
         "updated_fields": list(update_data.keys()),
+        "password_email_sent": password_email_sent,
     }
 
 # ============================================================
@@ -1236,6 +1267,8 @@ async def delete_nextkin(nextkin_id: str, authorization: str = Header(None)):
 
     # 4️⃣ (Optional) Send notification email
     try:
+        owner_name = await resolve_owner_display_name(owner)
+        nk_name = resolve_nextkin_display_name(nextkin)
         sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
         message = Mail(
             from_email=settings.EMAIL_SENDER,
@@ -1243,9 +1276,9 @@ async def delete_nextkin(nextkin_id: str, authorization: str = Header(None)):
             subject="Orderly Affairs - Next-of-Kin Account Deleted",
             html_content=f"""
             <div style='font-family:Arial,sans-serif'>
-              <p>Hello {nextkin.get("full_name") or nextkin["email"]},</p>
-              <p>Your Next-of-Kin account under <b>{owner.get("full_name") or owner["email"]}</b> has been deleted.</p>
-              <p>If you believe this was a mistake, please contact the account owner directly.</p>
+              <p>Hello {nk_name},</p>
+              <p>Your Next-of-Kin account under <b>{owner_name}</b> has been deleted.</p>
+              <p>If you believe this was a mistake, please contact {owner_name} directly.</p>
               <hr/>
               <small>Deleted on {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</small>
             </div>
@@ -1362,7 +1395,13 @@ async def approve_nextkin_access(
     if not nextkin:
         raise HTTPException(status_code=404, detail="Next-of-Kin not found")
 
-    await _approve_and_notify_if_needed(nextkin, owner, approved=True)
+    nextkin_profile = load_nextkin_profile(dict(nextkin)) or dict(nextkin)
+    await _approve_and_notify_if_needed(
+        nextkin_profile,
+        owner,
+        approved=True,
+        plain_password=nextkin_profile.get("master_password"),
+    )
 
     return {
         "message": "Next-of-Kin access approved",

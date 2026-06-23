@@ -2,12 +2,17 @@ from datetime import datetime
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from app.config import nextkin_login_url, settings
+from app.notifications.display_names import (
+    resolve_nextkin_display_name,
+    resolve_owner_display_name,
+)
 
 
 class NextKinEmailEvent:
     CREATED = "created"
     ACCESS_APPROVED = "access_approved"
     ACCESS_REVOKED = "access_revoked"
+    PASSWORD_UPDATED = "password_updated"
     DELETED = "deleted"
     OWNER_DECEASED = "owner_deceased"
 
@@ -24,8 +29,8 @@ async def send_nextkin_email(
     subject = ""
     html = ""
 
-    owner_name = owner.get("full_name") or owner["email"]
-    nk_name = nextkin.get("full_name") or nextkin["email"]
+    owner_name = await resolve_owner_display_name(owner)
+    nk_name = resolve_nextkin_display_name(nextkin)
 
     if event == NextKinEmailEvent.CREATED:
         subject = "Orderly Affairs – You’ve been designated as Next-of-Kin"
@@ -71,6 +76,37 @@ async def send_nextkin_email(
         html = f"""
         <p>Hello {nk_name},</p>
         <p>{owner_name} has revoked your access.</p>
+        """
+
+    elif event == NextKinEmailEvent.PASSWORD_UPDATED:
+        subject = "Orderly Affairs – Your Login Password Was Updated"
+        html = f"""
+        <p>Hello {nk_name},</p>
+        <p>{owner_name} has updated your <strong>Orderly Affairs</strong> login password.</p>
+
+        <p><b>Updated login details:</b></p>
+        <ul>
+          <li>Email: {nextkin["email"]}</li>
+          {f"<li>Password: {plain_password}</li>" if plain_password else ""}
+        </ul>
+
+        <p>
+          <a href="{nextkin_login_url()}"
+             style="
+               display: inline-block;
+               padding: 10px 18px;
+               background: #2563eb;
+               color: #ffffff;
+               text-decoration: none;
+               border-radius: 6px;
+               font-weight: bold;">
+            Log in to Orderly Affairs
+          </a>
+        </p>
+
+        <p style="color: #666; font-size: 14px;">
+          If you did not expect this change, please contact {owner_name} directly.
+        </p>
         """
 
     elif event == NextKinEmailEvent.DELETED:
