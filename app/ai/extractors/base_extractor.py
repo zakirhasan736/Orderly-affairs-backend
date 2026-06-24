@@ -1,13 +1,16 @@
 # app/ai/extractors/base_extractor.py
 
 import asyncio
-import json
+import logging
 from pathlib import Path
 
 from google.genai import types
 
-from app.ai.gemini_client import get_gemini_client, get_gemini_model
+from app.ai.field_catalog import format_field_catalog_prompt
+from app.ai.gemini_generate import generate_gemini_content
+from app.ai.json_utils import parse_gemini_json
 
+logger = logging.getLogger(__name__)
 
 SUPPORTED_MIME_TYPES = {
     "application/pdf",
@@ -60,35 +63,26 @@ def _extract_sync(
     if len(file_bytes) > MAX_INLINE_FILE_SIZE:
         raise ValueError("File too large for AI extraction")
 
-    client = get_gemini_client()
-    model = get_gemini_model()
-
     final_prompt = f"""
 {prompt}
 
 {GLOBAL_PRIVACY_EXTRACTION_RULES}
 """
 
-    response = client.models.generate_content(
-        model=model,
+    response = generate_gemini_content(
         contents=[
-            types.Part.from_bytes(
-                data=file_bytes,
-                mime_type=mime_type,
-            ),
+            types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
             final_prompt,
         ],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_json_schema=response_schema,
-            temperature=0,
-            max_output_tokens=8192,
-        ),
+        response_mime_type="application/json",
+        response_json_schema=response_schema,
+        temperature=0,
+        max_output_tokens=2048,
     )
 
     try:
-        return json.loads(response.text or "{}")
-    except Exception:
+        return parse_gemini_json(response.text)
+    except RuntimeError:
         raise RuntimeError("Gemini returned invalid JSON")
 
 
@@ -98,11 +92,14 @@ async def extract_structured_from_document(
     mime_type: str,
     prompt: str,
     response_schema: dict,
+    field_catalog: list[dict] | None = None,
 ):
+    catalog_prompt = format_field_catalog_prompt(field_catalog)
+
     return await asyncio.to_thread(
         _extract_sync,
         document_url=document_url,
         mime_type=mime_type,
-        prompt=prompt,
+        prompt=f"{prompt}{catalog_prompt}",
         response_schema=response_schema,
     )

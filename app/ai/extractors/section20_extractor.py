@@ -116,6 +116,7 @@ async def extract_section20_from_document(
     document_url: str,
     subsection: str | None = None,
     mime_type: str = "application/pdf",
+    field_catalog: list[dict] | None = None,
 ):
     if subsection and subsection not in VALID_SECTION20_SUBSECTIONS:
         raise ValueError(f"Invalid Section 20 subsection: {subsection}")
@@ -194,5 +195,6 @@ If no information is found for the requested subsection:
         document_url=document_url,
         mime_type=mime_type,
         prompt=prompt,
+        field_catalog=field_catalog,
         response_schema=SECTION20_FULL_SCHEMA,
     )

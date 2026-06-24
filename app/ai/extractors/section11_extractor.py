@@ -91,6 +91,7 @@ async def extract_section11_from_document(
     document_url: str,
     subsection: str | None = None,
     mime_type: str = "application/pdf",
+    field_catalog: list[dict] | None = None,
 ):
     if subsection and subsection not in VALID_SECTION11_SUBSECTIONS:
         raise ValueError(f"Invalid Section 11 subsection: {subsection}")
@@ -138,5 +139,6 @@ If no military service information is found:
         document_url=document_url,
         mime_type=mime_type,
         prompt=prompt,
+        field_catalog=field_catalog,
         response_schema=SECTION11_FULL_SCHEMA,
     )

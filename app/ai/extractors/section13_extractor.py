@@ -79,6 +79,7 @@ async def extract_section13_from_document(
     document_url: str,
     subsection: str | None = None,
     mime_type: str = "application/pdf",
+    field_catalog: list[dict] | None = None,
 ):
     if subsection and subsection not in VALID_SECTION13_SUBSECTIONS:
         raise ValueError(f"Invalid Section 13 subsection: {subsection}")
@@ -125,5 +126,6 @@ If no online account information is found:
         document_url=document_url,
         mime_type=mime_type,
         prompt=prompt,
+        field_catalog=field_catalog,
         response_schema=SECTION13_FULL_SCHEMA,
     )

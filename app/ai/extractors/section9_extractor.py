@@ -89,6 +89,7 @@ async def extract_section9_from_document(
     document_url: str,
     subsection: str | None = None,
     mime_type: str = "application/pdf",
+    field_catalog: list[dict] | None = None,
 ):
     if subsection and subsection not in VALID_SECTION9_SUBSECTIONS:
         raise ValueError(f"Invalid Section 9 subsection: {subsection}")
@@ -135,5 +136,6 @@ If no charitable giving information is found:
         document_url=document_url,
         mime_type=mime_type,
         prompt=prompt,
+        field_catalog=field_catalog,
         response_schema=SECTION9_FULL_SCHEMA,
     )

@@ -158,6 +158,7 @@ async def extract_section18_from_document(
     document_url: str,
     subsection: str | None = None,
     mime_type: str = "application/pdf",
+    field_catalog: list[dict] | None = None,
 ):
     if subsection and subsection not in VALID_SECTION18_SUBSECTIONS:
         raise ValueError(f"Invalid Section 18 subsection: {subsection}")
@@ -265,5 +266,6 @@ If no information is found for the requested subsection:
         document_url=document_url,
         mime_type=mime_type,
         prompt=prompt,
+        field_catalog=field_catalog,
         response_schema=SECTION18_FULL_SCHEMA,
     )

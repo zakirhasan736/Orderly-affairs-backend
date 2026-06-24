@@ -60,6 +60,7 @@ async def extract_section5_from_document(
     document_url: str,
     subsection: str | None = None,
     mime_type: str = "application/pdf",
+    field_catalog: list[dict] | None = None,
 ):
     if subsection and subsection not in VALID_SECTION5_SUBSECTIONS:
         raise ValueError(f"Invalid Section 5 subsection: {subsection}")
@@ -108,5 +109,6 @@ If no vehicle information is found:
         document_url=document_url,
         mime_type=mime_type,
         prompt=prompt,
+        field_catalog=field_catalog,
         response_schema=SECTION5_FULL_SCHEMA,
     )

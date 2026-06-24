@@ -78,6 +78,7 @@ async def extract_section7_from_document(
     document_url: str,
     subsection: str | None = None,
     mime_type: str = "application/pdf",
+    field_catalog: list[dict] | None = None,
 ):
     if subsection and subsection not in VALID_SECTION7_SUBSECTIONS:
         raise ValueError(f"Invalid Section 7 subsection: {subsection}")
@@ -123,5 +124,6 @@ If no insurance policy information is found:
         document_url=document_url,
         mime_type=mime_type,
         prompt=prompt,
+        field_catalog=field_catalog,
         response_schema=SECTION7_FULL_SCHEMA,
     )
