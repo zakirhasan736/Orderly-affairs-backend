@@ -20,6 +20,7 @@ from app.security.message_crypto import load_message, prepare_message_for_storag
 from app.security.nextkin_profile_crypto import load_nextkin_profile, prepare_nextkin_profile_for_storage
 from app.security.nok_letter_crypto import load_nok_letter, prepare_nok_letter_for_storage
 from app.security.section_crypto import decrypt_section_data, encrypt_section_data
+from app.security.totp_migration import run_totp_encryption_migration
 
 nok_letters_collection = db["nok_letters"]
 letters_collection = db["letters"]
@@ -274,6 +275,12 @@ async def run_encryption_migration() -> dict[str, int]:
         "kit_sections": await _run_step("kit_sections", migrate_kit_sections),
         "nextkin_profiles": await _run_step("nextkin_profiles", migrate_nextkin_profiles),
         "vault_sections": await _run_step("vault_sections", rebind_section_encryption),
+        "totp_secrets": await _run_step("totp_secrets", _migrate_totp_secrets),
     }
     print("Encryption-at-rest migration complete:", results)
     return results
+
+
+async def _migrate_totp_secrets() -> int:
+    result = await run_totp_encryption_migration()
+    return result.get("users", 0) + result.get("pending_signups", 0)

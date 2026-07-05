@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
 
-from app.auth.service import mark_owner_deceased
 from app.database import kits_collection, users_collection
 
 # Checklist item IDs that imply the trusted Next-of-Kin is handling a passing.
@@ -95,12 +94,13 @@ async def count_death_signals_for_nextkin(
     return len(checked)
 
 
-async def maybe_detect_owner_deceased_from_checklist(
+async def evaluate_death_signals_from_checklist(
     *,
     owner_id: str,
     nextkin_id: str,
     items: dict,
 ) -> dict | None:
+    """Return signal counts when thresholds are met — does NOT mark owner deceased."""
     try:
         owner_object_id = ObjectId(owner_id)
         nextkin_object_id = ObjectId(nextkin_id)
@@ -130,8 +130,36 @@ async def maybe_detect_owner_deceased_from_checklist(
     if death_signal_count < MIN_DEATH_SIGNAL_CHECKS:
         return None
 
-    return await mark_owner_deceased(
+    now = datetime.utcnow()
+    await users_collection.update_one(
+        {"_id": owner_object_id},
+        {
+            "$set": {
+                "death_signals_pending_confirmation": True,
+                "death_signal_count": death_signal_count,
+                "death_signals_reported_by": nextkin_id,
+                "death_signals_updated_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+
+    return {
+        "death_signals_ready": True,
+        "death_signal_count": death_signal_count,
+        "owner_status": owner.get("owner_status") or "alive",
+    }
+
+
+# Backwards-compatible alias — callers must not expect auto-deceased behavior.
+async def maybe_detect_owner_deceased_from_checklist(
+    *,
+    owner_id: str,
+    nextkin_id: str,
+    items: dict,
+) -> dict | None:
+    return await evaluate_death_signals_from_checklist(
         owner_id=owner_id,
-        reported_by_nextkin_id=nextkin_id,
-        source="checklist_death_signal",
+        nextkin_id=nextkin_id,
+        items=items,
     )

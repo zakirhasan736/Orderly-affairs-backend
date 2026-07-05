@@ -1,28 +1,24 @@
-from fastapi import APIRouter, UploadFile, File, Header, HTTPException
-from app.security.jwt_handler import verify_token
-from app.security.cloudinary_service import upload_file, delete_file
+from fastapi import APIRouter, UploadFile, File, Header, HTTPException, Request
+from app.security.token_resolver import decode_access_token
+from app.security.section_file_cleanup import delete_owned_file
+from app.security.cloudinary_service import upload_file
 from cloudinary.exceptions import Error as CloudinaryError
-from app.security.file_validation import validate_upload 
+from app.security.file_validation import validate_upload
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
 
 @router.post("")
 async def upload_asset(
+    request: Request,
     file: UploadFile = File(...),
-    authorization: str = Header(...),
+    authorization: str | None = Header(default=None),
 ):
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
+    decoded = decode_access_token(request, authorization)
 
-    if not decoded:
-        raise HTTPException(status_code=401)
-
-    # STEP 1: FILE VALIDATION (size + mime)
     try:
         validate_upload(file)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # STEP 2: CLOUDINARY UPLOAD (virus scan happens here)
     try:
         result = upload_file(
             file.file,
@@ -34,7 +30,6 @@ async def upload_asset(
             detail="File failed security scan and was rejected",
         )
 
-    # STEP 3: RETURN CLEAN FILE INFO
     return {
         "name": file.filename,
         "url": result["secure_url"],
@@ -46,9 +41,12 @@ async def upload_asset(
     }
 
 @router.post("/delete")
-async def delete_upload(data: dict, authorization: str = Header(...)):
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
+async def delete_upload(
+    data: dict,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
 
     if decoded["role"] != "owner":
         raise HTTPException(status_code=403)
@@ -57,5 +55,9 @@ async def delete_upload(data: dict, authorization: str = Header(...)):
     if not public_id:
         raise HTTPException(status_code=400)
 
-    delete_file(public_id)
+    owner_prefix = f"orderly_affairs/{decoded['sub']}/"
+    if not str(public_id).startswith(owner_prefix):
+        raise HTTPException(status_code=403, detail="Not authorized to delete this file")
+
+    delete_owned_file(public_id, decoded["sub"])
     return {"status": "deleted"}

@@ -11,6 +11,15 @@ class Settings(BaseSettings):
     # === JWT ===
     JWT_ALGORITHM: str = "RS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # Target interval for RS256 key rotation (calendar/process; see app/security/KEY_ROTATION.md).
+    JWT_KEY_ROTATION_DAYS: int = 90
+    # Target interval for AES-256-GCM at-rest key rotation (annual or per policy).
+    AES_KEY_ROTATION_DAYS: int = 365
+
+    # === Auth rate limiting ===
+    AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 10
+    AUTH_RATE_LIMIT_WINDOW_MINUTES: int = 15
 
     # Load keys from either .env or /keys folder
     JWT_PRIVATE_KEY: str | None = None

@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Header, HTTPException
+from app.security.token_resolver import decode_access_token, decode_owner_or_nok_token
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from typing import Literal, Optional
@@ -7,7 +8,6 @@ from datetime import datetime, timedelta
 import stripe
 from app.notifications.billing_emails import send_billing_email, BillingEmailEvent
 from app.database import users_collection
-from app.security.jwt_handler import verify_token
 from app.config import settings
 
 class ApplyCouponRequest(BaseModel):
@@ -36,9 +36,8 @@ billing_router = APIRouter(prefix="/billing", tags=["billing"])
 # AUTH HELPER
 # ============================================================
 
-async def get_owner_from_token(authorization: str):
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
+async def get_owner_from_token(request: Request, authorization: str | None = None):
+    decoded = decode_access_token(request, authorization)
 
     if not decoded or decoded.get("role") != "owner":
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -73,8 +72,8 @@ class PauseRequest(BaseModel):
 # ============================================================
 
 @billing_router.post("/create-customer")
-async def create_customer(authorization: str = Header(...)):
-    user = await get_owner_from_token(authorization)
+async def create_customer(request: Request, authorization: str | None = Header(default=None)):
+    user = await get_owner_from_token(request, authorization)
 
     if user["billing"].get("customer_id"):
         return {"customer_id": user["billing"]["customer_id"]}
@@ -98,8 +97,8 @@ async def create_customer(authorization: str = Header(...)):
 # ============================================================
 
 @billing_router.post("/setup-intent")
-async def setup_intent(authorization: str = Header(...)):
-    user = await get_owner_from_token(authorization)
+async def setup_intent(request: Request, authorization: str | None = Header(default=None)):
+    user = await get_owner_from_token(request, authorization)
 
     customer_id = user["billing"].get("customer_id")
     if not customer_id:
@@ -120,9 +119,9 @@ async def setup_intent(authorization: str = Header(...)):
 @billing_router.post("/confirm-card")
 async def confirm_card(
     payload: ConfirmCardRequest,
-    authorization: str = Header(...)
+    request: Request, authorization: str | None = Header(default=None)
 ):
-    user = await get_owner_from_token(authorization)
+    user = await get_owner_from_token(request, authorization)
 
     customer_id = user["billing"].get("customer_id")
     if not customer_id:
@@ -157,9 +156,9 @@ async def confirm_card(
 @billing_router.post("/start-subscription")
 async def start_subscription(
     payload: StartSubscriptionRequest,
-    authorization: str = Header(...)
+    request: Request, authorization: str | None = Header(default=None)
 ):
-    user = await get_owner_from_token(authorization)
+    user = await get_owner_from_token(request, authorization)
     billing = user["billing"]
 
     if not billing.get("payment_method_attached") and not payload.is_trial:
@@ -230,9 +229,9 @@ async def start_subscription(
 # @billing_router.post("/change-plan")
 # async def change_plan(
 #     payload: ChangePlanRequest,
-#     authorization: str = Header(...)
+#     request: Request, authorization: str | None = Header(default=None)
 # ):
-#     user = await get_owner_from_token(authorization)
+#     user = await get_owner_from_token(request, authorization)
 #     billing = user["billing"]
 
 #     if not billing.get("subscription_id"):
@@ -292,9 +291,9 @@ async def start_subscription(
 @billing_router.post("/change-plan")
 async def change_plan(
     payload: ChangePlanRequest,
-    authorization: str = Header(...)
+    request: Request, authorization: str | None = Header(default=None)
 ):
-    user = await get_owner_from_token(authorization)
+    user = await get_owner_from_token(request, authorization)
     billing = user["billing"]
 
     if not billing.get("subscription_id"):
@@ -362,8 +361,8 @@ async def change_plan(
 # All hosted by Stripe.
 
 @billing_router.post("/portal")
-async def billing_portal(authorization: str = Header(...)):
-    user = await get_owner_from_token(authorization)
+async def billing_portal(request: Request, authorization: str | None = Header(default=None)):
+    user = await get_owner_from_token(request, authorization)
 
     customer_id = user["billing"].get("customer_id")
     if not customer_id:
@@ -380,8 +379,8 @@ async def billing_portal(authorization: str = Header(...)):
 
 # Expose Stripe invoices inside your app.
 @billing_router.get("/invoices")
-async def list_invoices(authorization: str = Header(...)):
-    user = await get_owner_from_token(authorization)
+async def list_invoices(request: Request, authorization: str | None = Header(default=None)):
+    user = await get_owner_from_token(request, authorization)
     customer_id = user["billing"].get("customer_id")
 
     if not customer_id:
@@ -416,9 +415,9 @@ async def list_invoices(authorization: str = Header(...)):
 @billing_router.post("/apply-coupon")
 async def apply_coupon(
     payload: ApplyCouponRequest,
-    authorization: str = Header(...)
+    request: Request, authorization: str | None = Header(default=None)
 ):
-    user = await get_owner_from_token(authorization)
+    user = await get_owner_from_token(request, authorization)
     sub_id = user["billing"].get("subscription_id")
 
     if not sub_id:
@@ -433,10 +432,11 @@ async def apply_coupon(
 
 @billing_router.post("/pause")
 async def pause_subscription(
+    request: Request,
+    authorization: str | None = Header(default=None),
     payload: PauseRequest | None = None,
-    authorization: str = Header(...)
 ):
-    user = await get_owner_from_token(authorization)
+    user = await get_owner_from_token(request, authorization)
     sub_id = user["billing"].get("subscription_id")
 
     stripe.Subscription.modify(
@@ -460,8 +460,8 @@ async def pause_subscription(
 
 
 @billing_router.post("/resume")
-async def resume_subscription(authorization: str = Header(...)):
-    user = await get_owner_from_token(authorization)
+async def resume_subscription(request: Request, authorization: str | None = Header(default=None)):
+    user = await get_owner_from_token(request, authorization)
     sub_id = user["billing"].get("subscription_id")
 
     stripe.Subscription.modify(
@@ -479,29 +479,10 @@ async def resume_subscription(authorization: str = Header(...)):
 
     return {"status": "active"}
 
-@billing_router.get("/mrr")
-async def mrr():
-    invoices = stripe.Invoice.list(
-        status="paid",
-        limit=100
-    )
-
-    mrr = {}
-
-    for inv in invoices.data:
-        month = datetime.utcfromtimestamp(inv.created).strftime("%Y-%m")
-        mrr.setdefault(month, 0)
-        mrr[month] += inv.amount_paid / 100
-
-    return sorted(
-        [{"month": k, "revenue": v} for k, v in mrr.items()],
-        key=lambda x: x["month"]
-    )
-
 
 @billing_router.get("/status")
-async def billing_status(authorization: str = Header(...)):
-    user = await get_owner_from_token(authorization)
+async def billing_status(request: Request, authorization: str | None = Header(default=None)):
+    user = await get_owner_from_token(request, authorization)
     billing = user.get("billing", {})
 
     return {

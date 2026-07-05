@@ -1,5 +1,5 @@
 # app/nok_letter/routes.py
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from bson import ObjectId
@@ -7,7 +7,8 @@ from bson import ObjectId
 from app.database import db, kits_collection
 from app.security.nok_letter_crypto import load_nok_letter, prepare_nok_letter_for_storage
 from app.security.nextkin_profile_crypto import load_nextkin_profile
-from .core import require_owner
+from app.security.token_resolver import decode_owner_or_nok_token
+from .core import require_owner, require_nok
 from .models import NOKLetterIn, NOKLetterOut
 
 router = APIRouter(prefix="/nok-letter", tags=["nok-letter"])
@@ -308,14 +309,7 @@ async def apply_autofill(owner_id: str, payload: NOKLetterIn, nok_id: Optional[s
     return data
 
 
-@router.get("", response_model=NOKLetterOut)
-async def get_my_nok_letter(
-    authorization: str = Header(None),
-    nok_id: Optional[str] = Query(None, description="Target NOK user _id")
-):
-    owner = await require_owner(authorization)
-    owner_id = str(owner["_id"])
-
+async def _get_owner_nok_letter(owner_id: str, nok_id: Optional[str]) -> NOKLetterOut:
     # Try to find a doc for (owner, nok) first; fall back to legacy one-per-owner
     match: Dict[str, Any] = {"owner_id": owner_id}
     if nok_id:
@@ -353,13 +347,42 @@ async def get_my_nok_letter(
     return to_out(load_nok_letter(new_doc))
 
 
+@router.get("", response_model=NOKLetterOut)
+async def get_my_nok_letter(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    nok_id: Optional[str] = Query(None, description="Target NOK user _id"),
+):
+    if nok_id:
+        owner = await require_owner(request, authorization)
+        return await _get_owner_nok_letter(str(owner["_id"]), nok_id)
+
+    decoded = decode_owner_or_nok_token(request, authorization)
+    if decoded.get("role") == "nextkin":
+        nk, ctx = await require_nok(request, authorization)
+        owner_id = str(ctx["owner_id"])
+        nok_user_id = str(nk["_id"])
+        doc = await nok_letters_collection.find_one({
+            "owner_id": owner_id,
+            "nok_user_id": nok_user_id,
+        })
+        if not doc:
+            raise HTTPException(status_code=404, detail="NOK letter not found")
+        doc = await sync_letter_delivery(doc)
+        return to_out(load_nok_letter(doc))
+
+    owner = await require_owner(request, authorization)
+    return await _get_owner_nok_letter(str(owner["_id"]), None)
+
+
 @router.post("", response_model=NOKLetterOut)
 async def create_or_replace_my_nok_letter(
     payload: NOKLetterIn,
-    authorization: str = Header(None),
-    nok_id: Optional[str] = Query(None)
+    request: Request,
+    authorization: str | None = Header(default=None),
+    nok_id: Optional[str] = Query(None),
 ):
-    owner = await require_owner(authorization)
+    owner = await require_owner(request, authorization)
     owner_id = str(owner["_id"])
     merged = await apply_autofill(owner_id, payload, nok_id)
 
@@ -394,10 +417,11 @@ async def create_or_replace_my_nok_letter(
 @router.put("", response_model=NOKLetterOut)
 async def update_my_nok_letter(
     payload: NOKLetterIn,
-    authorization: str = Header(None),
-    nok_id: Optional[str] = Query(None)
+    request: Request,
+    authorization: str | None = Header(default=None),
+    nok_id: Optional[str] = Query(None),
 ):
-    owner = await require_owner(authorization)
+    owner = await require_owner(request, authorization)
     owner_id = str(owner["_id"])
 
     # Compute merge (ensures text matches the chosen NOK if any)

@@ -107,7 +107,7 @@ async def grant_upon_death_access(owner_ref: str) -> int:
             )
             granted += 1
         except Exception as e:
-            print(f"⚠️ Upon-death access email failed for {nk.get('email')}: {e}")
+            print(f"⚠️ Upon-death access email failed for next-of-kin {nk.get('_id')}: {e}")
 
     return granted
 

@@ -7,6 +7,12 @@ client = Client(
     settings.TWILIO_AUTH_TOKEN,
 )
 
+
+def _dev_log(*args) -> None:
+    if settings.APP_ENV == "development":
+        print(*args)
+
+
 def send_verification_code(to: str):
     if not to or not to.startswith("+"):
         raise ValueError("Phone must be in E.164 format")
@@ -19,22 +25,15 @@ def send_verification_code(to: str):
             channel="sms",
         )
 
-        print("✅ Twilio Verify sent")
-        print("SID:", verification.sid)
-        print("TO:", verification.to)
-        print("STATUS:", verification.status)
-
+        _dev_log("Twilio Verify sent", verification.status)
         return verification
 
     except TwilioRestException as e:
-        print("❌ Twilio Verify send failed")
-        print("Status:", e.status)
-        print("Code:", e.code)
-        print("Message:", e.msg)
-        raise RuntimeError(f"OTP delivery failed: {e.msg}")
+        _dev_log("Twilio Verify send failed", e.code, e.status)
+        raise RuntimeError("OTP delivery failed")
 
-    except Exception as e:
-        print(f"❌ Verify send failed: {str(e)}")
+    except Exception:
+        _dev_log("Twilio Verify send failed (unknown)")
         raise RuntimeError("OTP delivery failed")
 
 
@@ -50,19 +49,13 @@ def check_verification_code(to: str, code: str):
             code=str(code),
         )
 
-        print("✅ Twilio Verify checked")
-        print("TO:", result.to)
-        print("STATUS:", result.status)
-
+        _dev_log("Twilio Verify checked", result.status)
         return result
 
     except TwilioRestException as e:
-        print("❌ Twilio Verify check failed")
-        print("Status:", e.status)
-        print("Code:", e.code)
-        print("Message:", e.msg)
-        raise RuntimeError(f"OTP verification failed: {e.msg}")
+        _dev_log("Twilio Verify check failed", e.code, e.status)
+        raise RuntimeError("OTP verification failed")
 
-    except Exception as e:
-        print(f"❌ Verify check failed: {str(e)}")
+    except Exception:
+        _dev_log("Twilio Verify check failed (unknown)")
         raise RuntimeError("OTP verification failed")

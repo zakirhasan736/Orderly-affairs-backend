@@ -1,13 +1,13 @@
 from dotenv import load_dotenv
 load_dotenv()
 import asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.uploads.routes import router as upload_router
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth.routes import router as auth_router
 
-
-# from app.routes.nextkin_routes import router as nextkin_router
 from app.auth.inactivity_scheduler import start_owner_inactivity_scheduler
 from app.billing.trial_scheduler import start_trial_scheduler
 from app.kits.routes_core import router as kit_router
@@ -58,13 +58,35 @@ from app.ai.ai_upload_routes import router as ai_upload_router
 from app.ai.ai_autofill_routes import router as ai_autofill_router
 from app.security.encrypt_at_rest_migration import run_encryption_migration
 from app.security.security_audit import run_security_audit
+from app.config import settings
+from app.security.https_redirect import HTTPSRedirectMiddleware
+from app.security.security_headers import SecurityHeadersMiddleware
+from app.security.api_rate_limit import VaultApiRateLimitMiddleware
+from app.security.error_handlers import (
+    http_exception_handler,
+    starlette_http_exception_handler,
+    validation_exception_handler,
+    unhandled_exception_handler,
+)
 
-app = FastAPI(title="Orderly Affairs Backend API")
+app = FastAPI(
+    title="Orderly Affairs Backend API",
+    docs_url="/docs" if settings.APP_ENV == "development" else None,
+    redoc_url="/redoc" if settings.APP_ENV == "development" else None,
+    openapi_url="/openapi.json" if settings.APP_ENV == "development" else None,
+)
 
-origins = [
-   "https://portal.orderly-affairs.com",
-    "http://localhost:3000",  # keep for dev
-]
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(StarletteHTTPException, starlette_http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(VaultApiRateLimitMiddleware)
+
+origins = [settings.FRONTEND_URL]
+if settings.APP_ENV == "development" and "http://localhost:3000" not in origins:
+    origins.append("http://localhost:3000")
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,6 +95,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(HTTPSRedirectMiddleware)
 @app.on_event("startup")
 async def startup():
     # 1️⃣ Start APScheduler-based NOK LETTERS
@@ -90,7 +114,8 @@ async def startup():
             try:
                 await check_scheduled_letters()
             except Exception as e:
-                print("NOK message scheduler error:", e)
+                if settings.APP_ENV == "development":
+                    print("NOK message scheduler error:", e)
 
             await asyncio.sleep(60)
 
@@ -101,11 +126,13 @@ async def startup():
             await run_encryption_migration()
             await run_security_audit()
         except Exception as exc:
-            print("Encryption-at-rest migration error:", exc)
+            if settings.APP_ENV == "development":
+                print("Encryption-at-rest migration error:", exc)
 
     asyncio.create_task(encryption_migration_loop())
 
-    print("Both letter & message schedulers started")
+    if settings.APP_ENV == "development":
+        print("Both letter & message schedulers started")
 
 app.include_router(upload_router)
 app.include_router(auth_router)
@@ -113,7 +140,6 @@ app.include_router(billing_router)
 app.include_router(webhook_router)
 app.include_router(admin_billing_router)
 
-# app.include_router(nextkin_router)
 app.include_router(kit_router)
 app.include_router(letters_router)
 app.include_router(section1_router)
@@ -142,6 +168,4 @@ app.include_router(ai_autofill_router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Orderly Affairs backend is running."}
-for route in app.routes:
-    print(route.path)
+    return {"status": "ok"}

@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Header, HTTPException
+from app.security.token_resolver import decode_access_token
+from app.security.cookie_auth import NOK_ACCESS_COOKIE
+from fastapi import APIRouter, Header, HTTPException, Request
 from bson import ObjectId
 from typing import Any, Dict, List
 from datetime import datetime
 from app.database import db, kits_collection, users_collection, section_data_collection, messageofnextkin_collection
-from app.security.jwt_handler import verify_token
 from app.security.checklist_crypto import load_checklist_items, prepare_checklist_for_storage
 from app.security.kit_data_crypto import (
     prepare_kit_section_for_storage,
@@ -22,22 +23,22 @@ router = APIRouter(prefix="/kit", tags=["kit-core"])
 
 # 1) OWNER — get full kit
 @router.get("")
-async def get_kit(authorization: str = Header(None)):
-    owner = await require_owner(authorization)
+async def get_kit(request: Request, authorization: str | None = Header(default=None)):
+    owner = await require_owner(request, authorization)
     kit = await get_or_init_kit(str(owner["_id"]))
     return kit
 
 # 2) NOK — get filtered kit (respect access list/full)
 @router.get("/for-nok")
-async def get_kit_for_nok(authorization: str = Header(None)):
-    nk, ctx = await require_nok(authorization)
+async def get_kit_for_nok(request: Request, authorization: str | None = Header(default=None)):
+    nk, ctx = await require_nok(request, authorization)
     kit = await get_or_init_kit(ctx["owner_id"])
     return filter_sections_for_nok(kit, nk)
 
 # 3) OWNER — upsert a whole section data (e.g., "12")
 @router.put("/section/{section_id}")
-async def upsert_section(section_id: str, payload: SectionInput, authorization: str = Header(None)):
-    owner = await require_owner(authorization)
+async def upsert_section(section_id: str, payload: SectionInput, request: Request, authorization: str | None = Header(default=None)):
+    owner = await require_owner(request, authorization)
     kit = await get_or_init_kit(str(owner["_id"]))
     ensure_section_struct(kit, section_id)
     owner_id = str(owner["_id"])
@@ -59,8 +60,8 @@ async def upsert_section(section_id: str, payload: SectionInput, authorization: 
 
 # 4) OWNER — upsert a subsection (e.g., section "3", subsection "3A")
 @router.put("/section/{section_id}/subsection/{sub_id}")
-async def upsert_subsection(section_id: str, sub_id: str, payload: SubsectionInput, authorization: str = Header(None)):
-    owner = await require_owner(authorization)
+async def upsert_subsection(section_id: str, sub_id: str, payload: SubsectionInput, request: Request, authorization: str | None = Header(default=None)):
+    owner = await require_owner(request, authorization)
     kit = await get_or_init_kit(str(owner["_id"]))
     ensure_subsection_struct(kit, section_id, sub_id)
     owner_id = str(owner["_id"])
@@ -83,8 +84,8 @@ async def upsert_subsection(section_id: str, sub_id: str, payload: SubsectionInp
 
 # 5) OWNER — toggles (disabled sections/subsections)
 @router.put("/toggles")
-async def update_toggles(payload: TogglesInput, authorization: str = Header(None)):
-    owner = await require_owner(authorization)
+async def update_toggles(payload: TogglesInput, request: Request, authorization: str | None = Header(default=None)):
+    owner = await require_owner(request, authorization)
     res = await kits_collection.update_one(
         {"owner_id": str(owner["_id"])},
         {
@@ -100,7 +101,7 @@ async def update_toggles(payload: TogglesInput, authorization: str = Header(None
 
 # 6) OWNER — one-off migration from old formData shape
 @router.post("/migrate-from-forms")
-async def migrate_from_forms(payload: Dict[str, Any], authorization: str = Header(None)):
+async def migrate_from_forms(payload: Dict[str, Any], request: Request, authorization: str | None = Header(default=None)):
     """
     payload example (from your localStorage dump):
     {
@@ -109,7 +110,7 @@ async def migrate_from_forms(payload: Dict[str, Any], authorization: str = Heade
       "disabledSubsections": {...}
     }
     """
-    owner = await require_owner(authorization)
+    owner = await require_owner(request, authorization)
     owner_id = str(owner["_id"])
     old = payload or {}
     form = old.get("formData") or {}
@@ -163,15 +164,8 @@ async def migrate_from_forms(payload: Dict[str, Any], authorization: str = Heade
     return {"message": "Migration completed", "sections": len(kit["sections"])}
 
 @router.get("/nok")
-async def get_kit_for_nextkin(authorization: str = Header(None)):
-    # -------------------------
-    # 0️⃣ Auth
-    # -------------------------
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
+async def get_kit_for_nextkin(request: Request, authorization: str | None = Header(default=None)):
+    decoded = decode_access_token(request, authorization, access_cookie=NOK_ACCESS_COOKIE)
 
     if not decoded or decoded.get("role") != "nextkin":
         raise HTTPException(status_code=403, detail="Only Next-of-Kin allowed")
@@ -297,15 +291,14 @@ async def get_kit_for_nextkin(authorization: str = Header(None)):
 @router.post("/deliver/{message_id}")
 async def deliver_message(
     message_id: str,
-    authorization: str = Header(...)
+    request: Request, authorization: str | None = Header(default=None)
 ):
-    token = authorization.split(" ")[1]
-    user = verify_token(token)
+    decoded = decode_access_token(request, authorization, access_cookie=NOK_ACCESS_COOKIE)
 
-    if user.get("role") != "nextkin":
+    if decoded.get("role") != "nextkin":
         raise HTTPException(status_code=403, detail="Only NOK can deliver messages")
 
-    owner_id = user.get("owner_id")
+    owner_id = decoded.get("owner_id")
     if not owner_id:
         raise HTTPException(status_code=400, detail="Owner ID missing")
 
@@ -322,6 +315,16 @@ async def deliver_message(
             status_code=404,
             detail="Message not found, already sent, or unauthorized"
         )
+
+    if msg.get("delivery_trigger") == "death":
+        owner = await users_collection.find_one(
+            {"_id": ObjectId(owner_id), "role": "owner"}
+        )
+        if not owner or owner.get("owner_status") != "deceased":
+            raise HTTPException(
+                status_code=403,
+                detail="This message can only be delivered after the owner has been marked deceased",
+            )
 
     # 2️⃣ Decrypt payload
     msg = load_message(msg)
@@ -344,16 +347,15 @@ async def deliver_message(
 @router.post("/checklist")
 async def save_checklist_progress(
     payload: ChecklistUpdate,
-    authorization: str = Header(...)
+    request: Request, authorization: str | None = Header(default=None)
 ):
-    token = authorization.split(" ")[1]
-    user = verify_token(token)
+    decoded = decode_access_token(request, authorization, access_cookie=NOK_ACCESS_COOKIE)
 
-    if user.get("role") != "nextkin":
+    if decoded.get("role") != "nextkin":
         raise HTTPException(status_code=403, detail="Only NOK allowed")
 
-    nextkin_id = user["sub"]
-    owner_id = user.get("owner_id")
+    nextkin_id = decoded["sub"]
+    owner_id = decoded.get("owner_id")
 
     if not owner_id:
         raise HTTPException(status_code=400, detail="Owner ID missing")
@@ -391,6 +393,7 @@ async def save_checklist_progress(
 
     return {
         "status": "saved",
-        "owner_deceased_triggered": bool(detection and detection.get("triggered")),
-        "owner_status": detection.get("status") if detection else None,
+        "death_signals_ready": bool(detection and detection.get("death_signals_ready")),
+        "death_signal_count": detection.get("death_signal_count") if detection else 0,
+        "owner_status": detection.get("owner_status") if detection else None,
     }

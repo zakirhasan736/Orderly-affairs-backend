@@ -15,8 +15,10 @@ def verify_captcha_token(token: str | None, remote_ip: str | None = None) -> boo
 
     secret = settings.TURNSTILE_SECRET_KEY
     if not secret:
-        # Allow local development when captcha is enabled but secret is missing.
-        return settings.APP_ENV == "development"
+        if settings.APP_ENV == "development":
+            return True
+        print("⚠️ TURNSTILE_SECRET_KEY missing in production — rejecting CAPTCHA")
+        return False
 
     if not token or not token.strip():
         return False

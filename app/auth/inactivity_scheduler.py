@@ -8,7 +8,6 @@ from app.auth.death_detection import (
     _as_utc,
     _owner_last_activity,
 )
-from app.auth.service import mark_owner_deceased
 from app.database import users_collection
 from app.notifications.owner_inactivity_emails import send_owner_inactivity_check_email
 
@@ -51,9 +50,9 @@ async def process_owner_inactivity() -> None:
                         }
                     },
                 )
-                print(f"Sent inactivity check email to owner {owner.get('email')}")
+                print(f"Sent inactivity check email to owner {owner_id}")
             except Exception as e:
-                print(f"⚠️ Inactivity email failed for {owner.get('email')}: {e}")
+                print(f"⚠️ Inactivity email failed for owner {owner_id}: {e}")
             continue
 
         if warning_sent_at > followup_cutoff:
@@ -70,16 +69,28 @@ async def process_owner_inactivity() -> None:
             )
             continue
 
-        result = await mark_owner_deceased(
-            owner_id=owner_id,
-            reported_by_nextkin_id=None,
-            source="owner_inactivity_no_reply",
+        if owner.get("inactivity_escalated_at"):
+            continue
+
+        try:
+            await send_owner_inactivity_check_email(owner=owner)
+        except Exception as e:
+            print(f"⚠️ Final inactivity escalation email failed for owner {owner_id}: {e}")
+
+        await users_collection.update_one(
+            {"_id": owner["_id"]},
+            {
+                "$set": {
+                    "inactivity_escalated_at": datetime.utcnow(),
+                    "inactivity_requires_manual_review": True,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
         )
-        if result.get("triggered"):
-            print(
-                f"Marked owner {owner.get('email')} deceased after "
-                f"{OWNER_INACTIVE_DAYS}+{OWNER_FOLLOWUP_DAYS} day inactivity"
-            )
+        print(
+            f"Owner {owner_id} flagged for manual death review after "
+            f"{OWNER_INACTIVE_DAYS}+{OWNER_FOLLOWUP_DAYS} days inactivity"
+        )
 
 
 def start_owner_inactivity_scheduler() -> None:

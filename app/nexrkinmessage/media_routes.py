@@ -1,22 +1,23 @@
-from fastapi import APIRouter, UploadFile, File, Header, HTTPException
-from app.security.jwt_handler import verify_token
+from fastapi import APIRouter, UploadFile, File, Header, HTTPException, Request
+from app.security.token_resolver import decode_access_token
 from app.security.cloudinary_service import upload_file, delete_file
 
 router = APIRouter(prefix="/message/media", tags=["Message Media"])
 
 @router.post("")
 async def upload_letter_media(
+    request: Request,
     file: UploadFile = File(...),
-    authorization: str = Header(...)
+    authorization: str | None = Header(default=None),
 ):
-    token = authorization.split(" ")[1]
-    verify_token(token)
+    decoded = decode_access_token(request, authorization)
 
-    # ✅ allow only audio/video
-    if not file.content_type.startswith(("video/", "audio/")):
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only owners can upload message media")
+
+    if not file.content_type or not file.content_type.startswith(("video/", "audio/")):
         raise HTTPException(400, "Only audio/video allowed")
 
-    # upload to cloudinary
     uploaded = upload_file(
         file.file,
         folder="letters/media"

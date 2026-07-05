@@ -1,28 +1,23 @@
-from fastapi import Header, HTTPException
+from fastapi import HTTPException, Request
 from typing import Dict, Any, Tuple
 from datetime import datetime
-from app.security.jwt_handler import verify_token
+from app.security.cookie_auth import NOK_ACCESS_COOKIE
+from app.security.token_resolver import decode_access_token
 from app.database import users_collection, kits_collection
 from app.security.kit_data_crypto import load_kit_document
 
-async def require_owner(authorization: str | None):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded or decoded.get("role") != "owner":
+async def require_owner(request: Request, authorization: str | None = None):
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
         raise HTTPException(status_code=403, detail="Owner token required")
     owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
     if not owner:
         raise HTTPException(status_code=404, detail="Owner not found")
     return owner
 
-async def require_nok(authorization: str | None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded or decoded.get("role") != "nextkin":
+async def require_nok(request: Request, authorization: str | None = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    decoded = decode_access_token(request, authorization, access_cookie=NOK_ACCESS_COOKIE)
+    if decoded.get("role") != "nextkin":
         raise HTTPException(status_code=403, detail="Next-of-Kin token required")
 
     nk = await users_collection.find_one({"email": decoded["email"], "role": "nextkin"})

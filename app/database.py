@@ -2,6 +2,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import certifi
 from app.config import settings
 
+from app.config import settings
+
 # Secure certificate bundle
 ca = certifi.where()
 
@@ -29,5 +31,8 @@ section_data_collection = db["sections"]
 messageofnextkin_collection = db["nexrkinmessage"] 
 onboarding_progress = db["onboarding_progress"]
 ai_documents_collection = db["ai_documents"]
+refresh_tokens_collection = db["refresh_tokens"]
+auth_rate_limits_collection = db["auth_rate_limits"]
 
-print("MongoDB connected successfully")
+if settings.APP_ENV == "development":
+    print("MongoDB connected successfully")

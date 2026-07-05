@@ -1,10 +1,8 @@
-from fastapi import Header, Query
-from fastapi import APIRouter, Depends, HTTPException,  UploadFile, File
+from app.security.token_resolver import decode_access_token
+from fastapi import APIRouter, HTTPException, UploadFile, File, Header, Query, Request
 from datetime import datetime
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import Request
-from app.security.jwt_handler import verify_token
 from app.security.message_crypto import load_message, prepare_message_for_storage
 from app.database import messageofnextkin_collection
 from .models import LetterCreate, LetterUpdate, MediaDeleteRequest
@@ -45,15 +43,8 @@ def parse_message_id(letter_id: str) -> ObjectId:
         raise HTTPException(status_code=400, detail="Invalid message id")
 
 
-def get_authenticated_user(authorization: str):
-    if not authorization or " " not in authorization:
-        raise HTTPException(status_code=401, detail="Invalid authorization header")
-
-    user = verify_token(authorization.split(" ", 1)[1])
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    return user
+def get_authenticated_user(request: Request, authorization: str | None = None):
+    return decode_access_token(request, authorization)
 
 
 def delete_media_file(media: dict | None) -> bool:
@@ -73,10 +64,9 @@ def delete_media_file(media: dict | None) -> bool:
 @router.post("")
 async def create_letter(
     payload: LetterCreate,
-    authorization: str = Header(...)
+    request: Request, authorization: str | None = Header(default=None)
 ):
-    token = authorization.split(" ")[1]
-    user = verify_token(token)
+    user = decode_access_token(request, authorization)
     owner_id = user.get("owner_id") or user.get("sub")
 
     doc = prepare_message_for_storage({
@@ -102,8 +92,8 @@ async def create_letter(
 
 
 @router.get("")
-async def get_letters(authorization: str = Header(...)):
-    user = verify_token(authorization.split(" ")[1])
+async def get_letters(request: Request, authorization: str | None = Header(default=None)):
+    user = decode_access_token(request, authorization)
     owner_id = user.get("owner_id") or user.get("sub")
    
     letters = await messageofnextkin_collection.find({
@@ -135,8 +125,8 @@ async def get_letters(authorization: str = Header(...)):
     return result
 
 @router.delete("")
-async def delete_all_letters(authorization: str = Header(...)):
-    user = verify_token(authorization.split(" ")[1])
+async def delete_all_letters(request: Request, authorization: str | None = Header(default=None)):
+    user = decode_access_token(request, authorization)
     owner_id = user.get("owner_id") or user.get("sub")
 
     letters = await messageofnextkin_collection.find({
@@ -165,9 +155,9 @@ async def delete_all_letters(authorization: str = Header(...)):
 async def update_letter(
     letter_id: str,
     payload: LetterUpdate,
-    authorization: str = Header(...)
+    request: Request, authorization: str | None = Header(default=None)
 ):
-    user = get_authenticated_user(authorization)
+    user = get_authenticated_user(request, authorization)
     owner_id = user.get("owner_id") or user.get("sub")
     letter_oid = parse_message_id(letter_id)
 
@@ -222,8 +212,8 @@ async def update_letter(
     return {"status": "updated"}
 
 @router.delete("/{letter_id}")
-async def delete_letter(letter_id: str, authorization: str = Header(...)):
-    user = get_authenticated_user(authorization)
+async def delete_letter(letter_id: str, request: Request, authorization: str | None = Header(default=None)):
+    user = get_authenticated_user(request, authorization)
     owner_id = user.get("owner_id") or user.get("sub")
     letter_oid = parse_message_id(letter_id)
 
@@ -252,8 +242,8 @@ async def delete_letter(letter_id: str, authorization: str = Header(...)):
     return {"status": "deleted", "media_removed": True}
 
 @router.delete("/{letter_id}/media")
-async def delete_letter_media(letter_id: str, authorization: str = Header(...)):
-    user = get_authenticated_user(authorization)
+async def delete_letter_media(letter_id: str, request: Request, authorization: str | None = Header(default=None)):
+    user = get_authenticated_user(request, authorization)
     owner_id = user.get("owner_id") or user.get("sub")
     letter_oid = parse_message_id(letter_id)
 
@@ -277,11 +267,11 @@ async def delete_letter_media(letter_id: str, authorization: str = Header(...)):
 
 @router.get("/media/signature")
 async def get_message_media_upload_signature(
-    authorization: str = Header(...),
+    request: Request, authorization: str | None = Header(default=None),
     file_size: int = Query(..., ge=1),
     resource_type: str = Query("video"),
 ):
-    verify_token(authorization.split(" ")[1])
+    decode_access_token(request, authorization)
 
     try:
         validate_message_media_size(file_size)
@@ -294,11 +284,11 @@ async def get_message_media_upload_signature(
 
 @router.post("/media")
 async def upload_message_media(
+    request: Request,
     file: UploadFile = File(...),
-    authorization: str = Header(...)
+    authorization: str | None = Header(default=None),
 ):
-    token = authorization.split(" ")[1]
-    verify_token(token)
+    decode_access_token(request, authorization)
 
     if not is_allowed_message_media(file):
         raise HTTPException(
@@ -331,16 +321,32 @@ async def upload_message_media(
 @router.post("/media/delete")
 async def delete_uploaded_message_media(
     payload: MediaDeleteRequest,
-    authorization: str = Header(...)
+    request: Request, authorization: str | None = Header(default=None)
 ):
-    token = authorization.split(" ")[1]
-    verify_token(token)
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Owner only")
 
     if not payload.public_id.startswith(MESSAGE_MEDIA_FOLDER):
         raise HTTPException(
             status_code=400,
             detail="Only message media can be deleted from this endpoint",
         )
+
+    owner_id = decoded.get("owner_id") or decoded.get("sub")
+    if decoded.get("role") == "owner":
+        from app.database import users_collection
+        owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
+        if owner:
+            owner_id = str(owner["_id"])
+
+    owned = await messageofnextkin_collection.find_one({
+        "owner_id": str(owner_id),
+        "media.public_id": payload.public_id,
+        "is_deleted": False,
+    })
+    if not owned:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this file")
 
     delete_file(payload.public_id, payload.resource_type)
 

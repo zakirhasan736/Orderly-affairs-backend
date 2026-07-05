@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, HTTPException, Header, Depends 
+from fastapi import APIRouter, Request, HTTPException, Header, Depends, Response
 from typing import List, Union
 
 from pydantic import BaseModel, EmailStr
@@ -23,9 +23,20 @@ from app.auth.otp_security import (
     record_verify_attempt,
     ensure_email_verify_not_locked,
     record_email_verify_attempt,
+    get_client_ip,
 )
 
-from app.database import users_collection, otp_collection, sms_mfa_attempts_collection, pending_signup_collection
+from app.security.otp_storage import hash_otp_value, otp_storage_fields, verify_stored_otp
+from app.security.otp_verify_lock import (
+    ensure_otp_verify_not_locked,
+    record_otp_verify_attempt,
+)
+from app.database import (
+    users_collection,
+    otp_collection,
+    sms_mfa_attempts_collection,
+    pending_signup_collection,
+)
 from app.security.billing_guard import enforce_billing
 from app.security.password_handler import hash_password, verify_password
 from app.security.nextkin_profile_crypto import (
@@ -37,6 +48,32 @@ from app.security.jwt_handler import (
     verify_token,
     create_mfa_challenge_token,
     verify_mfa_challenge_token,
+    verify_step_up_token,
+    create_step_up_token,
+)
+from app.security.cookie_auth import (
+    OWNER_ACCESS_COOKIE,
+    NOK_ACCESS_COOKIE,
+    extract_access_token,
+)
+from app.security.token_resolver import decode_access_token
+from app.security.device_fingerprint import log_device_fingerprint
+from app.security.totp_crypto import (
+    encrypt_totp_value,
+    read_pending_totp_secret,
+    read_user_provisioned_secret,
+    read_user_totp_secret,
+)
+from app.security.auth_rate_limit import (
+    enforce_auth_rate_limit,
+    reset_auth_rate_limit,
+)
+from app.auth.session_manager import (
+    issue_owner_session,
+    issue_nok_session,
+    logout_owner_session,
+    logout_nok_session,
+    refresh_session_from_cookie,
 )
 from app.config import settings
 from datetime import datetime
@@ -53,6 +90,15 @@ import string, random
 from sendgrid import SendGridAPIClient
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+MFA_GENERIC_ERROR = "Unable to complete verification. Please try again."
+PENDING_SIGNUP_GENERIC = (
+    "If a signup is in progress for that email, you may continue setup."
+)
+NOK_LOGIN_GENERIC = (
+    "Unable to sign in. Contact the kit owner for assistance."
+)
+PASSWORD_RESET_GENERIC_ERROR = "Unable to reset password. Please try again."
 # pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # ============================================================
 # MODELS
@@ -69,33 +115,41 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    captcha_token: str | None = None
+    otp_session_id: str | None = None
 
 class VerifyTOTPRequest(BaseModel):
     email: EmailStr
     code: str
+    mfa_challenge_token: str | None = None
 
 class EmailRequest(BaseModel):
     email: EmailStr
     captcha_token: str | None = None
     otp_session_id: str | None = None
+    mfa_challenge_token: str | None = None
 
 class VerifyEmailRequest(BaseModel):
     email: EmailStr
     code: int
     otp_session_id: str | None = None
+    mfa_challenge_token: str | None = None
 
 class LinkAuthenticatorRequest(BaseModel):
     email: EmailStr
     code: str
-    secret: str
+    secret: str | None = None
 
 class OwnerResetRequest(BaseModel):
     email: EmailStr
+    captcha_token: str | None = None
+    otp_session_id: str | None = None
 
 class OwnerResetPassword(BaseModel):
     email: EmailStr
     otp: int
     new_password: str
+    captcha_token: str | None = None
 
 
 class StartSMSMFARequest(BaseModel):
@@ -117,6 +171,7 @@ class VerifySMSOTPRequest(BaseModel):
     email: EmailStr
     code: str
     otp_session_id: str | None = None
+    mfa_challenge_token: str | None = None
 
 
 class ResendSignupSMSRequest(BaseModel):
@@ -129,6 +184,19 @@ class PhoneRequest(BaseModel):
 
 class MFAMethodRequest(BaseModel):
     method: str
+    password: str | None = None
+    mfa_challenge_token: str | None = None
+    step_up_token: str | None = None
+
+
+class ReportOwnerDeceasedRequest(BaseModel):
+    master_password: str
+    confirm: bool = False
+
+class MFAResetRequest(BaseModel):
+    password: str | None = None
+    mfa_challenge_token: str | None = None
+    step_up_token: str | None = None
 
 # ---- Next-of-Kin ----
 class NextKinCreateRequest(BaseModel):
@@ -210,12 +278,10 @@ def mfa_login_response(user: dict, billing: dict) -> dict:
 
 async def _store_login_email_otp(email: str, otp: int, expiry: datetime) -> None:
     await otp_collection.delete_many({"email": email})
-    await otp_collection.insert_one({
-        "email": email,
-        "otp": otp,
-        "expires": expiry,
-        "created_at": datetime.utcnow(),
-    })
+    doc = otp_storage_fields(email, otp, "login_email")
+    doc["expires"] = expiry
+    doc["created_at"] = datetime.utcnow()
+    await otp_collection.insert_one(doc)
 
 
 async def _trigger_login_mfa_otp(
@@ -267,12 +333,14 @@ async def _trigger_login_mfa_otp(
 async def get_authorized_owner_for_email(
     email: str,
     authorization: str | None,
+    request: Request | None = None,
 ) -> dict | None:
-    if not authorization or not authorization.startswith("Bearer "):
+    if request is None:
         return None
 
-    decoded = verify_token(authorization.split(" ")[1])
-    if not decoded:
+    try:
+        decoded = decode_access_token(request, authorization)
+    except HTTPException:
         return None
 
     owner = await users_collection.find_one({
@@ -283,6 +351,58 @@ async def get_authorized_owner_for_email(
         return None
 
     return owner
+
+
+async def require_login_mfa_proof(
+    *,
+    email: str,
+    mfa_challenge_token: str | None,
+    authorization: str | None,
+    request: Request,
+    pending: dict | None,
+) -> None:
+    """Signup and settings flows are exempt; login MFA must prove password step."""
+    if pending:
+        return
+
+    authorized_owner = await get_authorized_owner_for_email(
+        email,
+        authorization,
+        request=request,
+    )
+    if authorized_owner:
+        return
+
+    if not verify_mfa_challenge_token(mfa_challenge_token, email):
+        raise HTTPException(
+            status_code=403,
+            detail="Password verification required before MFA completion",
+        )
+
+
+def require_step_up_auth(
+    *,
+    user: dict,
+    password: str | None,
+    mfa_challenge_token: str | None = None,
+    step_up_token: str | None = None,
+) -> None:
+    """Sensitive actions require recent password proof or a short-lived step-up token."""
+    email = user["email"]
+
+    if password and verify_password(password, user.get("password", "")):
+        return
+
+    if verify_mfa_challenge_token(mfa_challenge_token, email):
+        return
+
+    if verify_step_up_token(step_up_token, email):
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail="Password verification required for this action",
+    )
 
 def build_owner_user_document(
     *,
@@ -484,10 +604,26 @@ async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
 async def signup(user: SignupRequest, request: Request):
     email = user.email.lower().strip()
 
+    if not user.mfa_method or user.mfa_method not in MFA_METHODS:
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is required. Choose authenticator, email, or sms.",
+        )
+
+    await enforce_auth_rate_limit(request, key=f"signup:{email}")
+
+    from app.auth.captcha import verify_captcha_token
+
+    if not verify_captcha_token(user.captcha_token, get_client_ip(request)):
+        raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
+
     # real user already exists
     existing_user = await users_collection.find_one({"email": email})
     if existing_user:
-        raise HTTPException(status_code=400, detail="User already exists")
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to create account. If you already have an account, try signing in.",
+        )
 
     # remove expired pending signups first
     await delete_expired_pending_signup(email)
@@ -558,7 +694,7 @@ async def signup(user: SignupRequest, request: Request):
 
     # Email signup
     if user.mfa_method == "email":
-        pending_doc["email_otp"] = None
+        pending_doc["email_otp_hash"] = None
         pending_doc["email_otp_expires"] = None
 
         await pending_signup_collection.insert_one(pending_doc)
@@ -574,7 +710,9 @@ async def signup(user: SignupRequest, request: Request):
                 {"email": email},
                 {
                     "$set": {
-                        "email_otp": email_result["otp"],
+                        "email_otp_hash": hash_otp_value(
+                            email, email_result["otp"], "signup"
+                        ),
                         "email_otp_expires": email_result["expiry"],
                     }
                 },
@@ -598,7 +736,7 @@ async def signup(user: SignupRequest, request: Request):
     # Authenticator signup
     if user.mfa_method == "authenticator":
         secret = pyotp.random_base32()
-        pending_doc["provisioned_secret"] = secret
+        pending_doc["provisioned_secret"] = encrypt_totp_value(email, secret, pending=True)
 
         await pending_signup_collection.insert_one(pending_doc)
 
@@ -617,25 +755,13 @@ async def signup(user: SignupRequest, request: Request):
             "method": "authenticator",
             "email": email,
             "qrCodeUrl": f"data:image/png;base64,{img_base64}",
-            "secret": secret,
             "flow": "signup"
         }
 
-    # no MFA
-    new_user = build_owner_user_document(
-        email=email,
-        hashed_password=hashed_pw,
-        full_name=user.full_name,
-        phone=phone,
-        mfa_method=None,
+    raise HTTPException(
+        status_code=400,
+        detail="MFA is required. Choose authenticator, email, or sms.",
     )
-
-    await users_collection.insert_one(new_user)
-
-    return {
-        "message": "Owner account created successfully.",
-        "otp_required": False,
-    }
 
 # ============================================================
 # 2️⃣ OWNER LOGIN
@@ -766,8 +892,15 @@ async def signup(user: SignupRequest, request: Request):
 #         "requires_billing": billing.get("status") in ["pending", "blocked"]
 #     }
 @router.post("/login")
-async def owner_login(data: LoginRequest, request: Request):
+async def owner_login(data: LoginRequest, request: Request, response: Response):
     email = data.email.lower().strip()
+
+    from app.auth.captcha import verify_captcha_token
+
+    if not verify_captcha_token(data.captcha_token, get_client_ip(request)):
+        raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
+
+    await enforce_auth_rate_limit(request, key=f"login:{email}")
 
     # do not let pending signup pretend to be a real user
     pending = await pending_signup_collection.find_one({
@@ -785,11 +918,10 @@ async def owner_login(data: LoginRequest, request: Request):
         "role": "owner"
     })
 
-    if not user:
-        raise HTTPException(status_code=404, detail="Owner not found")
+    if not user or not verify_password(data.password, user.get("password", "")):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    if not verify_password(data.password, user["password"]):
-        raise HTTPException(status_code=400, detail="Invalid credentials")
+    await reset_auth_rate_limit(request, key=f"login:{email}")
 
     billing = user.get("billing", {})
 
@@ -815,6 +947,7 @@ async def owner_login(data: LoginRequest, request: Request):
             response = mfa_login_response(user, billing)
             preferred = response.get("method")
             response["mfa_challenge_token"] = create_mfa_challenge_token(email)
+            response["step_up_token"] = create_step_up_token(email)
 
             otp_sent, cooldown_seconds, otp_error = await _trigger_login_mfa_otp(
                 request=request,
@@ -830,70 +963,54 @@ async def owner_login(data: LoginRequest, request: Request):
 
             return response
 
-    token = create_access_token(user)
     await record_owner_last_login(email)
-
-    return {
-        "message": "Login successful",
-        "access_token": token,
-        "email": email,
-        "role": "owner",
-        "mfa_required": False,
-        "billing_status": billing.get("status", "pending"),
-        "requires_billing": billing.get("status") in ["pending", "blocked"]
-    }
+    log_device_fingerprint(request, "login_success", subject=email)
+    session = await issue_owner_session(response, user)
+    session["email"] = email
+    return session
 
 # ============================================================
 # 3️⃣ NEXT-OF-KIN LOGIN
 # ============================================================
 @router.post("/nextkin-login")
-async def nextkin_login(request: Request):
+async def nextkin_login(request: Request, response: Response):
     data = await request.json()
     email = data.get("email", "").lower().strip()
     master_password = data.get("master_password")
+    captcha_token = data.get("captcha_token")
 
     if not email or not master_password:
         raise HTTPException(status_code=400, detail="Email and master_password required")
 
-    user = await users_collection.find_one({"email": email, "role": "nextkin"})
-    if not user:
-        raise HTTPException(status_code=404, detail="Next-of-Kin not found")
+    from app.auth.captcha import verify_captcha_token
 
-    if not verify_password(master_password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid password")
-    
-    if not user.get("immediate_access", False):
-        raise HTTPException(
-            status_code=403,
-            detail="Access not approved by the Kit Owner"
-        )
-    
-    token = create_access_token(
-        user_data=user,   # ✅ FULL DOCUMENT
-        expires_delta=timedelta(days=7),
-    )
-    
+    if not verify_captcha_token(captcha_token, get_client_ip(request)):
+        raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
+
+    await enforce_auth_rate_limit(request, key=f"nok-login:{email}")
+
+    user = await users_collection.find_one({"email": email, "role": "nextkin"})
+    if not user or not verify_password(master_password, user.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    await reset_auth_rate_limit(request, key=f"nok-login:{email}")
+
+    if user.get("access_revoked") or not user.get("immediate_access", False):
+        raise HTTPException(status_code=403, detail=NOK_LOGIN_GENERIC)
+
     owner = await users_collection.find_one(
         {"_id": ObjectId(user["owner_id"]), "role": "owner"}
     )
 
     if owner and owner.get("billing", {}).get("status") == "blocked":
-        raise HTTPException(
-            status_code=403,
-            detail="Owner account is inactive due to billing"
-        )
+        raise HTTPException(status_code=403, detail=NOK_LOGIN_GENERIC)
 
     if owner:
         await notify_owner_nextkin_login(owner=owner, nextkin=user)
 
     await record_nextkin_last_login(str(user["_id"]))
 
-    return {
-        "access_token": token,
-        "role": "nextkin",
-        "owner_id": str(user["owner_id"]),
-        "message": "Next-of-Kin login successful",
-    }
+    return await issue_nok_session(response, user)
 
 # ============================================================
 # 4️⃣ OWNER CREATES NEXT-OF-KIN ACCOUNT (FINAL VERSION)
@@ -907,18 +1024,14 @@ def generate_temp_password(length: int = 12) -> str:
 @router.post("/create-nextkin")
 async def create_nextkin(
     payload: Union[NextKinCreateRequest, list[NextKinCreateRequest]],
-    authorization: str = Header(None)
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
     """Create one or many Next-of-Kin users. Same endpoint handles single or list payloads."""
 
-    # 1️⃣ Auth check
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only owners can create Next-of-Kin")
 
     owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
     if not owner:
@@ -1104,12 +1217,12 @@ async def create_nextkin(
 # 5️⃣ GET ALL NEXT-OF-KIN FOR LOGGED-IN OWNER
 # ============================================================
 @router.get("/my-nextkin")
-async def get_my_nextkin(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded or decoded.get("role") != "owner":
+async def get_my_nextkin(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
         raise HTTPException(status_code=403, detail="Only owners can view next-kin")
     owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
     if not owner:
@@ -1132,7 +1245,9 @@ async def get_my_nextkin(authorization: str = Header(None)):
             "nok_letter_received": nk.get("nok_letter_received", False),
 
             "password_card_generated": nk.get("password_card_generated"),
-            "master_password": nk.get("master_password"),
+            "has_master_password": bool(
+                nk.get("password_hash") or nk.get("master_password")
+            ),
             "card_storage_location": nk.get("card_storage_location"),
             "key_bag_location": nk.get("key_bag_location"),
             "documents_bag_location": nk.get("documents_bag_location"),
@@ -1150,13 +1265,11 @@ async def get_my_nextkin(authorization: str = Header(None)):
 async def update_nextkin(
     nextkin_id: str,
     payload: NextKinUpdateRequest,
-    authorization: str = Header(None)
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded or decoded.get("role") != "owner":
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
         raise HTTPException(status_code=403, detail="Only owners can update Next-of-Kin")
 
     owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
@@ -1239,16 +1352,16 @@ async def update_nextkin(
 # 14️⃣ DELETE NEXT-OF-KIN (Owner only)
 # ============================================================
 @router.delete("/delete-nextkin/{nextkin_id}")
-async def delete_nextkin(nextkin_id: str, authorization: str = Header(None)):
+async def delete_nextkin(
+    nextkin_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
     """
     Allows an owner to delete a Next-of-Kin they created.
     """
-    # 1️⃣ Auth check
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded or decoded.get("role") != "owner":
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
         raise HTTPException(status_code=403, detail="Only owners can delete Next-of-Kin")
 
     # 2️⃣ Find owner
@@ -1296,14 +1409,16 @@ async def delete_nextkin(nextkin_id: str, authorization: str = Header(None)):
 
 
 @router.get("/nextkin-access")
-async def get_nextkin_access(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-
-    if not decoded or decoded.get("role") != "nextkin":
+async def get_nextkin_access(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(
+        request,
+        authorization,
+        access_cookie=NOK_ACCESS_COOKIE,
+    )
+    if decoded.get("role") != "nextkin":
         raise HTTPException(status_code=403, detail="Only next-of-kin can access")
 
     sub = decoded.get("sub")
@@ -1369,14 +1484,11 @@ async def get_nextkin_access(authorization: str = Header(None)):
 @router.post("/approve-nextkin-access/{nextkin_id}")
 async def approve_nextkin_access(
     nextkin_id: str,
-    authorization: str = Header(None),
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded or decoded.get("role") != "owner":
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
         raise HTTPException(status_code=403, detail="Only owners can approve access")
 
     owner = await users_collection.find_one(
@@ -1409,20 +1521,57 @@ async def approve_nextkin_access(
         "immediate_access": True,
     }
 
+
+@router.post("/approve-all-nextkin-access")
+async def approve_all_nextkin_access(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only owners can approve access")
+
+    owner = await users_collection.find_one(
+        {"email": decoded["sub"], "role": "owner"}
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+
+    cursor = users_collection.find(
+        {
+            "role": "nextkin",
+            "owner_id": str(owner["_id"]),
+            "immediate_access": False,
+            "access_revoked": {"$ne": True},
+        }
+    )
+    approved = 0
+    async for nextkin in cursor:
+        nextkin_profile = load_nextkin_profile(dict(nextkin)) or dict(nextkin)
+        await _approve_and_notify_if_needed(
+            nextkin_profile,
+            owner,
+            approved=True,
+            plain_password=nextkin_profile.get("master_password"),
+        )
+        approved += 1
+
+    return {
+        "message": f"Approved access for {approved} Next-of-Kin",
+        "approved_count": approved,
+    }
+
 # ============================================================
 # REVOKE a single Next-of-Kin's access
 # ============================================================
 @router.post("/revoke-nextkin-access/{nextkin_id}")
 async def revoke_nextkin_access(
     nextkin_id: str,
-    authorization: str = Header(None),
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded or decoded.get("role") != "owner":
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
         raise HTTPException(status_code=403, detail="Only owners can manage Next-of-Kin access")
 
     # owner
@@ -1450,14 +1599,11 @@ async def revoke_nextkin_access(
 # ============================================================
 @router.post("/revoke-all-nextkin-access")
 async def revoke_all_nextkin_access(
-    authorization: str = Header(None),
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded or decoded.get("role") != "owner":
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
         raise HTTPException(status_code=403, detail="Only owners can manage Next-of-Kin access")
 
     owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
@@ -1497,13 +1643,30 @@ async def revoke_all_nextkin_access(
 # 6️⃣ VERIFY TOTP
 # ============================================================
 @router.post("/verify-totp")
-async def verify_totp(payload: VerifyTOTPRequest):
-    user = await users_collection.find_one({"email": payload.email.lower()})
+async def verify_totp(
+    payload: VerifyTOTPRequest,
+    request: Request,
+    response: Response,
+    authorization: str | None = Header(default=None),
+):
+    email = payload.email.lower().strip()
+    pending = await get_active_pending_signup(email)
+
+    await require_login_mfa_proof(
+        email=email,
+        mfa_challenge_token=payload.mfa_challenge_token,
+        authorization=authorization,
+        request=request,
+        pending=pending,
+    )
+
+    user = await users_collection.find_one({"email": email})
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if not user.get("totp_secret"):
-        raise HTTPException(status_code=400, detail="Authenticator not set up")
-    totp = pyotp.TOTP(user["totp_secret"])
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
+    totp_secret = read_user_totp_secret(user)
+    if not totp_secret:
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
+    totp = pyotp.TOTP(totp_secret)
     if not totp.verify(payload.code):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
     methods = normalize_mfa_methods(user)
@@ -1523,27 +1686,34 @@ async def verify_totp(payload: VerifyTOTPRequest):
         },
     )
 
-    updated_user = await users_collection.find_one({"email": payload.email.lower()})
-    token = create_access_token(updated_user)
+    updated_user = await users_collection.find_one({"email": email})
     if updated_user.get("role") == "owner":
         await record_owner_last_login(updated_user["email"])
-    return {"access_token": token, "message": "Login successful"}
+    return await issue_owner_session(response, updated_user)
 
 
 # ============================================================
 # 7️⃣ GENERATE MFA QR
 # ============================================================
 @router.post("/generate-mfa")
-async def generate_mfa(payload: EmailRequest, authorization: str | None = Header(default=None)):
+async def generate_mfa(
+    payload: EmailRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
     email = payload.email.lower().strip()
     user = await users_collection.find_one({"email": email})
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
     methods = normalize_mfa_methods(user)
     if user.get("mfa_linked") and methods["authenticator"]:
         raise HTTPException(status_code=400, detail="Authenticator already linked")
 
-    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    authorized_owner = await get_authorized_owner_for_email(
+        email,
+        authorization,
+        request=request,
+    )
     if not authorized_owner:
         raise HTTPException(
             status_code=403,
@@ -1556,8 +1726,11 @@ async def generate_mfa(payload: EmailRequest, authorization: str | None = Header
     buf = BytesIO()
     qr.save(buf, format="PNG")
     img_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    await users_collection.update_one({"email": email}, {"$set": {"provisioned_secret": secret}})
-    return {"qrCodeUrl": f"data:image/png;base64,{img_base64}", "secret": secret}
+    await users_collection.update_one(
+        {"email": email},
+        {"$set": {"provisioned_secret": encrypt_totp_value(email, secret, pending=True)}},
+    )
+    return {"qrCodeUrl": f"data:image/png;base64,{img_base64}"}
 
 
 # ============================================================
@@ -1566,6 +1739,8 @@ async def generate_mfa(payload: EmailRequest, authorization: str | None = Header
 @router.post("/link-authenticator")
 async def link_authenticator(
     payload: LinkAuthenticatorRequest,
+    request: Request,
+    response: Response,
     authorization: str | None = Header(default=None),
 ):
     email = payload.email.lower().strip()
@@ -1578,36 +1753,39 @@ async def link_authenticator(
     })
 
     if pending:
-        secret = pending.get("provisioned_secret")
+        secret = read_pending_totp_secret(pending)
         if not secret:
-            raise HTTPException(status_code=400, detail="Authenticator setup not started")
+            raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
         totp = pyotp.TOTP(secret)
         if not totp.verify(payload.code):
             raise HTTPException(status_code=400, detail="Invalid verification code")
 
-        pending["totp_secret"] = secret
+        pending["totp_secret"] = encrypt_totp_value(email, secret)
         created_user = await create_real_user_from_pending(pending)
-        token = create_access_token(created_user)
-
-        return {
-            "access_token": token,
-            "message": "Authenticator signup completed successfully"
-        }
+        return await issue_owner_session(response, created_user)
 
     # existing real user flow
     user = await users_collection.find_one({"email": email})
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
-    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    authorized_owner = await get_authorized_owner_for_email(
+        email,
+        authorization,
+        request=request,
+    )
     if not authorized_owner:
         raise HTTPException(
             status_code=403,
             detail="Sign in and enable authenticator MFA from Vault Settings."
         )
 
-    totp = pyotp.TOTP(payload.secret)
+    secret = read_user_provisioned_secret(user)
+    if not secret:
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
+
+    totp = pyotp.TOTP(secret)
     if not totp.verify(payload.code):
         raise HTTPException(status_code=400, detail="Invalid verification code")
 
@@ -1615,7 +1793,7 @@ async def link_authenticator(
         {"email": email},
         {
             "$set": {
-                "totp_secret": payload.secret,
+                "totp_secret": encrypt_totp_value(email, secret),
                 "provisioned_secret": None,
                 "mfa_linked": True,
                 "mfa_enabled": True,
@@ -1628,8 +1806,13 @@ async def link_authenticator(
     )
 
     updated_user = await users_collection.find_one({"email": email})
-    token = create_access_token(updated_user)
-    return {"access_token": token, "message": "Authenticator linked successfully"}
+    return {
+        "authenticated": True,
+        "message": "Authenticator linked successfully",
+        "mfa_enabled": True,
+        "primary_mfa": updated_user.get("primary_mfa"),
+        "mfa_methods": normalize_mfa_methods(updated_user),
+    }
 # ============================================================
 # 9️⃣ EMAIL OTP — SEND & VERIFY
 # ============================================================
@@ -1650,14 +1833,25 @@ async def send_email_otp(
     if not pending:
         user = await users_collection.find_one({"email": email, "role": "owner"})
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
         methods = normalize_mfa_methods(user)
-        authorized_owner = await get_authorized_owner_for_email(email, authorization)
+        authorized_owner = await get_authorized_owner_for_email(
+            email, authorization, request=request
+        )
         if not methods["email"] and not authorized_owner:
             raise HTTPException(
                 status_code=403,
                 detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
+            )
+
+        if not authorized_owner:
+            await require_login_mfa_proof(
+                email=email,
+                mfa_challenge_token=payload.mfa_challenge_token,
+                authorization=authorization,
+                request=request,
+                pending=None,
             )
 
     try:
@@ -1683,20 +1877,19 @@ async def send_email_otp(
             {"_id": pending["_id"]},
             {
                 "$set": {
-                    "email_otp": otp,
+                    "email_otp_hash": hash_otp_value(email, otp, "signup"),
                     "email_otp_expires": expiry,
                     "updated_at": datetime.utcnow()
-                }
+                },
+                "$unset": {"email_otp": ""},
             }
         )
     else:
         await otp_collection.delete_many({"email": email})
-        await otp_collection.insert_one({
-            "email": email,
-            "otp": otp,
-            "expires": expiry,
-            "created_at": datetime.utcnow()
-        })
+        doc = otp_storage_fields(email, otp, "login_email")
+        doc["expires"] = expiry
+        doc["created_at"] = datetime.utcnow()
+        await otp_collection.insert_one(doc)
 
     return {
         "message": f"Verification code sent to {email}",
@@ -1708,6 +1901,7 @@ async def send_email_otp(
 async def verify_email_code(
     payload: VerifyEmailRequest,
     request: Request,
+    response: Response,
     authorization: str | None = Header(default=None),
 ):
     email = payload.email.lower().strip()
@@ -1722,16 +1916,25 @@ async def verify_email_code(
     })
 
     if pending:
-        otp = pending.get("email_otp")
+        otp_hash = pending.get("email_otp_hash")
         otp_expires = pending.get("email_otp_expires")
+        legacy_otp = pending.get("email_otp")
 
-        if not otp or not otp_expires:
+        if (not otp_hash and legacy_otp is None) or not otp_expires:
             raise HTTPException(status_code=400, detail="No signup OTP found")
 
         if datetime.utcnow() > otp_expires:
             raise HTTPException(status_code=400, detail="OTP expired")
 
-        if otp != payload.code:
+        otp_ok = (
+            verify_stored_otp(
+                {"email": email, "otp_hash": otp_hash, "type": "signup"},
+                payload.code,
+            )
+            if otp_hash
+            else legacy_otp == payload.code
+        )
+        if not otp_ok:
             await record_email_verify_attempt(
                 request=request,
                 email=email,
@@ -1747,12 +1950,15 @@ async def verify_email_code(
         )
 
         created_user = await create_real_user_from_pending(pending)
-        token = create_access_token(created_user)
+        return await issue_owner_session(response, created_user)
 
-        return {
-            "access_token": token,
-            "message": "Signup email verification successful"
-        }
+    await require_login_mfa_proof(
+        email=email,
+        mfa_challenge_token=payload.mfa_challenge_token,
+        authorization=authorization,
+        request=request,
+        pending=None,
+    )
 
     # otherwise normal login email MFA
     record = await otp_collection.find_one({"email": email})
@@ -1762,7 +1968,7 @@ async def verify_email_code(
     if datetime.utcnow() > record["expires"]:
         raise HTTPException(status_code=400, detail="OTP expired")
 
-    if record["otp"] != payload.code:
+    if not verify_stored_otp(record, payload.code):
         await record_email_verify_attempt(
             request=request,
             email=email,
@@ -1776,10 +1982,14 @@ async def verify_email_code(
     })
 
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
     methods = normalize_mfa_methods(user)
-    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    authorized_owner = await get_authorized_owner_for_email(
+        email,
+        authorization,
+        request=request,
+    )
     if not methods["email"] and not authorized_owner:
         raise HTTPException(
             status_code=403,
@@ -1809,54 +2019,125 @@ async def verify_email_code(
     )
 
     updated_user = await users_collection.find_one({"_id": user["_id"]})
-    token = create_access_token(updated_user)
     if updated_user.get("role") == "owner":
         await record_owner_last_login(updated_user["email"])
-    return {
-        "access_token": token,
-        "message": "Login successful via email MFA",
-    }
+    return await issue_owner_session(response, updated_user)
 # ============================================================
 # 🔟 REFRESH TOKEN
 # ============================================================
 @router.post("/refresh-token")
-async def refresh_token(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    if decoded.get("role") == "nextkin":
-     user = await users_collection.find_one(
-            {"_id": ObjectId(decoded["sub"]), "role": "nextkin"}
-     )
-    else:
-        user = await users_collection.find_one(
-            {"email": decoded["sub"], "role": "owner"}
-        )
+async def refresh_token(request: Request, response: Response):
+    owner_refresh = request.cookies.get("oa_refresh_token")
+    nok_refresh = request.cookies.get("oa_nok_refresh_token")
 
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    new_token = create_access_token(user)
-    return {"access_token": new_token, "message": "Token refreshed"}
+    if owner_refresh:
+        try:
+            return await refresh_session_from_cookie(
+                response,
+                request,
+                role="owner",
+            )
+        except ValueError:
+            pass
+
+    if nok_refresh:
+        try:
+            return await refresh_session_from_cookie(
+                response,
+                request,
+                role="nextkin",
+            )
+        except ValueError:
+            pass
+
+    raise HTTPException(status_code=401, detail="Missing refresh session")
+
+
+@router.get("/session")
+async def get_session(request: Request):
+    """Return auth state without exposing JWT values to JavaScript."""
+
+    for cookie_name, role in (
+        (OWNER_ACCESS_COOKIE, "owner"),
+        (NOK_ACCESS_COOKIE, "nextkin"),
+    ):
+        token = request.cookies.get(cookie_name)
+        if not token:
+            continue
+        decoded = verify_token(token)
+        if not decoded:
+            continue
+
+        if role == "nextkin":
+            user = await users_collection.find_one(
+                {"_id": ObjectId(decoded["sub"]), "role": "nextkin"}
+            )
+        else:
+            user = await users_collection.find_one(
+                {"email": decoded["sub"], "role": "owner"}
+            )
+
+        if not user:
+            continue
+
+        payload = {
+            "authenticated": True,
+            "role": role,
+            "email": user.get("email"),
+            "owner_id": str(user.get("owner_id") or user.get("_id")),
+        }
+        if role == "owner":
+            billing = user.get("billing", {})
+            payload["billing_status"] = billing.get("status", "pending")
+            payload["requires_billing"] = billing.get("status") in [
+                "pending",
+                "blocked",
+            ]
+        return payload
+
+    return {"authenticated": False}
 
 
 # ============================================================
 # 11️⃣ /me (Protected)
 # ============================================================
 @router.get("/me")
-async def get_me(authorization: str = Header(None)):
-    if not authorization:
+async def get_me(request: Request, authorization: str | None = Header(None)):
+    token = extract_access_token(
+        request,
+        authorization,
+        access_cookie=OWNER_ACCESS_COOKIE,
+        required=False,
+    )
+    if not token:
+        token = extract_access_token(
+            request,
+            authorization,
+            access_cookie=NOK_ACCESS_COOKIE,
+            required=False,
+        )
+    if not token:
         raise HTTPException(status_code=401, detail="Missing token")
-    token = authorization.split(" ")[1]
+
     decoded = verify_token(token)
     if not decoded:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    user = await users_collection.find_one({"email": decoded["sub"]})
+
+    role = decoded.get("role", "owner")
+    if role == "nextkin":
+        try:
+            user = await users_collection.find_one(
+                {"_id": ObjectId(decoded["sub"]), "role": "nextkin"}
+            )
+        except InvalidId:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+    else:
+        user = await users_collection.find_one(
+            {"email": decoded["sub"], "role": "owner"}
+        )
 
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
     
     enforce_billing(user)
 
@@ -1870,24 +2151,30 @@ async def get_me(authorization: str = Header(None)):
     }
 
 @router.post("/mfa/disable")
-async def disable_mfa_method(payload: MFAMethodRequest, authorization: str = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization")
-
+async def disable_mfa_method(
+    payload: MFAMethodRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
     method = payload.method
     if method not in MFA_METHODS:
         raise HTTPException(status_code=400, detail="Invalid MFA method")
 
-    decoded = verify_token(authorization.split(" ")[1])
-    if not decoded:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    decoded = decode_access_token(request, authorization)
 
     user = await users_collection.find_one({
         "email": decoded["sub"],
         "role": "owner"
     })
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
+
+    require_step_up_auth(
+        user=user,
+        password=payload.password,
+        mfa_challenge_token=payload.mfa_challenge_token,
+        step_up_token=payload.step_up_token,
+    )
 
     methods = normalize_mfa_methods(user)
     if methods.get(method) and sum(1 for enabled in methods.values() if enabled) <= 1:
@@ -1927,13 +2214,25 @@ async def disable_mfa_method(payload: MFAMethodRequest, authorization: str = Hea
     }
 
 @router.post("/mfa/reset")
-async def reset_mfa(authorization: str = Header(None)):
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
+async def reset_mfa(
+    payload: MFAResetRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
 
     user = await users_collection.find_one({"email": decoded["sub"]})
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
+
+    require_step_up_auth(
+        user=user,
+        password=payload.password,
+        mfa_challenge_token=payload.mfa_challenge_token,
+        step_up_token=payload.step_up_token,
+    )
+
+    log_device_fingerprint(request, "mfa_reset", subject=decoded["sub"])
 
     await users_collection.update_one(
         {"email": user["email"]},
@@ -1959,45 +2258,53 @@ async def reset_mfa(authorization: str = Header(None)):
 
 
 @router.post("/owner-logout")
-async def owner_logout(authorization: str | None = Header(default=None)):
-    if authorization:
-        token = authorization.split(" ")[1]
-        decoded = verify_token(token) or {}
-        if decoded.get("role") and decoded["role"] != "owner":
-            raise HTTPException(status_code=403, detail="Not an owner token")
-    return {"message": "Owner logged out"}
+async def owner_logout(request: Request, response: Response):
+    return await logout_owner_session(response, request)
+
+
+@router.post("/nextkin-logout")
+async def nextkin_logout(request: Request, response: Response):
+    return await logout_nok_session(response, request)
 
 @router.post("/nextkin/report-owner-deceased")
 async def nextkin_report_owner_deceased(
-    authorization: str = Header(None),
+    payload: ReportOwnerDeceasedRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="You must confirm this report to continue",
+        )
 
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-    if not decoded or decoded.get("role") != "nextkin":
+    decoded = decode_access_token(
+        request,
+        authorization,
+        access_cookie=NOK_ACCESS_COOKIE,
+    )
+    if decoded.get("role") != "nextkin":
         raise HTTPException(
             status_code=403,
-            detail="Only authenticated Next-of-Kin can report a passing",
+            detail=NOK_LOGIN_GENERIC,
         )
 
     try:
         nextkin_id = ObjectId(decoded["sub"])
     except (InvalidId, KeyError, TypeError):
-        raise HTTPException(status_code=401, detail="Invalid token payload")
+        raise HTTPException(status_code=401, detail=NOK_LOGIN_GENERIC)
 
     nextkin = await users_collection.find_one(
         {"_id": nextkin_id, "role": "nextkin"}
     )
     if not nextkin:
-        raise HTTPException(status_code=404, detail="Next-of-Kin not found")
+        raise HTTPException(status_code=400, detail=NOK_LOGIN_GENERIC)
 
-    if not nextkin.get("immediate_access", False):
-        raise HTTPException(
-            status_code=403,
-            detail="Your access must be approved before reporting a passing",
-        )
+    if not verify_password(payload.master_password, nextkin.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail=NOK_LOGIN_GENERIC)
+
+    if not nextkin.get("immediate_access", False) or nextkin.get("access_revoked"):
+        raise HTTPException(status_code=403, detail=NOK_LOGIN_GENERIC)
 
     try:
         owner = await users_collection.find_one(
@@ -2007,7 +2314,7 @@ async def nextkin_report_owner_deceased(
         owner = None
 
     if not owner:
-        raise HTTPException(status_code=404, detail="Linked kit owner not found")
+        raise HTTPException(status_code=400, detail=NOK_LOGIN_GENERIC)
 
     result = await mark_owner_deceased(
         owner_id=str(owner["_id"]),
@@ -2034,21 +2341,13 @@ async def nextkin_report_owner_deceased(
     }
 
 
-@router.post("/nextkin-logout")
-async def nextkin_logout(authorization: str | None = Header(default=None)):
-    if authorization:
-        token = authorization.split(" ")[1]
-        decoded = verify_token(token) or {}
-        if decoded.get("role") and decoded["role"] != "nextkin":
-            raise HTTPException(status_code=403, detail="Not a next-of-kin token")
-    return {"message": "Next-of-Kin logged out"}
-
 @router.put("/owner/status")
 async def update_owner_status(
     status: str,
-    authorization: str = Header(...)
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
-    user = verify_token(authorization.split(" ")[1])
+    decoded = decode_access_token(request, authorization)
 
     if status not in ["alive", "deceased"]:
         raise HTTPException(400, "Invalid status")
@@ -2058,21 +2357,30 @@ async def update_owner_status(
     #     {"$set": {"owner_status": status}}
     # )
     await users_collection.update_one(
-    {"email": user["sub"], "role": "owner"},
+    {"email": decoded["sub"], "role": "owner"},
     {"$set": {"owner_status": status}}
 )
 
     # 🔥 TRIGGER DEATH LETTERS
     if status == "deceased":
-        await trigger_death_letters(user["sub"])
+        await trigger_death_letters(decoded["sub"])
 
     return {"status": "updated"}
 
 # ============================================================
 # OWNER REQUEST PASSWORD RESET
 # ============================================================
+PASSWORD_RESET_GENERIC_MESSAGE = (
+    "If an account exists for that email, a password reset code has been sent."
+)
+
+
 @router.post("/request-password-reset")
-async def owner_request_password_reset(payload: OwnerResetRequest):
+async def owner_request_password_reset(payload: OwnerResetRequest, request: Request):
+    from app.auth.captcha import verify_captcha_token
+
+    if not verify_captcha_token(payload.captcha_token, get_client_ip(request)):
+        raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
 
     email = payload.email.lower()
 
@@ -2082,7 +2390,7 @@ async def owner_request_password_reset(payload: OwnerResetRequest):
     })
 
     if not owner:
-        raise HTTPException(status_code=404, detail="Owner not found")
+        return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
     # 🔒 Rate limit: 5 reset attempts per hour
     one_hour_ago = datetime.utcnow() - timedelta(hours=1)
@@ -2103,13 +2411,10 @@ async def owner_request_password_reset(payload: OwnerResetRequest):
 
     expiry = datetime.utcnow() + timedelta(minutes=10)
 
-    await otp_collection.insert_one({
-        "email": email,
-        "otp": otp,
-        "type": "password_reset",
-        "expires": expiry,
-        "created_at": datetime.utcnow()
-    })
+    reset_doc = otp_storage_fields(email, otp, "password_reset")
+    reset_doc["expires"] = expiry
+    reset_doc["created_at"] = datetime.utcnow()
+    await otp_collection.insert_one(reset_doc)
 
     # Send email
     try:
@@ -2134,15 +2439,22 @@ async def owner_request_password_reset(payload: OwnerResetRequest):
     except Exception as e:
         print("SendGrid error:", e)
 
-    return {"message": "Password reset OTP sent"}
+    return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
 # ============================================================
 # OWNER RESET PASSWORD
 # ============================================================
 @router.post("/reset-password")
-async def owner_reset_password(payload: OwnerResetPassword):
+async def owner_reset_password(payload: OwnerResetPassword, request: Request):
+    from app.auth.captcha import verify_captcha_token
+
+    if not verify_captcha_token(payload.captcha_token, get_client_ip(request)):
+        raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
 
     email = payload.email.lower()
+
+    await enforce_auth_rate_limit(request, key=f"reset-password:{email}")
+    await ensure_otp_verify_not_locked("password_reset", email)
 
     owner = await users_collection.find_one({
         "email": email,
@@ -2150,19 +2462,37 @@ async def owner_reset_password(payload: OwnerResetPassword):
     })
 
     if not owner:
-        raise HTTPException(status_code=404, detail="Owner not found")
+        await record_otp_verify_attempt(
+            request=request,
+            scope="password_reset",
+            email=email,
+            success=False,
+            generic_error=PASSWORD_RESET_GENERIC_ERROR,
+        )
 
     record = await otp_collection.find_one({
         "email": email,
-        "otp": payload.otp,
         "type": "password_reset"
     })
 
-    if not record:
-        raise HTTPException(status_code=400, detail="Invalid OTP")
+    if not record or not verify_stored_otp(record, payload.otp):
+        await record_otp_verify_attempt(
+            request=request,
+            scope="password_reset",
+            email=email,
+            success=False,
+            generic_error=PASSWORD_RESET_GENERIC_ERROR,
+        )
 
     if datetime.utcnow() > record["expires"]:
-        raise HTTPException(status_code=400, detail="OTP expired")
+        raise HTTPException(status_code=400, detail=PASSWORD_RESET_GENERIC_ERROR)
+
+    await record_otp_verify_attempt(
+        request=request,
+        scope="password_reset",
+        email=email,
+        success=True,
+    )
 
     # 🔒 Hash new password
     hashed_password = hash_password(payload.new_password)
@@ -2182,6 +2512,8 @@ async def owner_reset_password(payload: OwnerResetPassword):
         "email": email,
         "type": "password_reset"
     })
+
+    log_device_fingerprint(request, "password_change", subject=email)
 
     return {
         "message": "Password reset successful"
@@ -2203,13 +2535,14 @@ async def start_sms_mfa(
     })
 
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
     phone = user.get("phone")
     methods = normalize_mfa_methods(user)
     authorized_owner = await get_authorized_owner_for_email(
         payload.email.lower().strip(),
         authorization,
+        request=request,
     )
 
     if not methods["sms"] and not authorized_owner:
@@ -2280,10 +2613,14 @@ async def start_email_mfa(
 
     user = await users_collection.find_one({"email": email, "role": "owner"})
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
     methods = normalize_mfa_methods(user)
-    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    authorized_owner = await get_authorized_owner_for_email(
+        email,
+        authorization,
+        request=request,
+    )
     if not methods["email"] and not authorized_owner:
         raise HTTPException(
             status_code=403,
@@ -2361,7 +2698,7 @@ async def resend_sms_mfa(payload: ResendSignupSMSRequest, request: Request):
     })
 
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
     methods = normalize_mfa_methods(user)
     if not methods["sms"]:
@@ -2397,6 +2734,7 @@ async def resend_sms_mfa(payload: ResendSignupSMSRequest, request: Request):
 async def verify_sms_otp(
     payload: VerifySMSOTPRequest,
     request: Request,
+    response: Response,
     authorization: str | None = Header(default=None),
 ):
     email = payload.email.lower().strip()
@@ -2448,12 +2786,15 @@ async def verify_sms_otp(
         )
 
         created_user = await create_real_user_from_pending(pending)
-        token = create_access_token(created_user)
+        return await issue_owner_session(response, created_user)
 
-        return {
-            "access_token": token,
-            "message": "Signup SMS verification successful"
-        }
+    await require_login_mfa_proof(
+        email=email,
+        mfa_challenge_token=payload.mfa_challenge_token,
+        authorization=authorization,
+        request=request,
+        pending=None,
+    )
 
     # otherwise normal login MFA
     user = await users_collection.find_one({
@@ -2462,10 +2803,12 @@ async def verify_sms_otp(
     })
 
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
     methods = normalize_mfa_methods(user)
-    authorized_owner = await get_authorized_owner_for_email(email, authorization)
+    authorized_owner = await get_authorized_owner_for_email(
+        email, authorization, request=request
+    )
     if not methods["sms"] and not authorized_owner:
         raise HTTPException(
             status_code=403,
@@ -2522,28 +2865,20 @@ async def verify_sms_otp(
     )
 
     updated_user = await users_collection.find_one({"_id": user["_id"]})
-    token = create_access_token(updated_user)
     if updated_user.get("role") == "owner":
         await record_owner_last_login(updated_user["email"])
-
-    return {
-        "access_token": token,
-        "message": "Login SMS verification successful"
-    }
+    return await issue_owner_session(response, updated_user)
 # ============================================================
 # 5️⃣ LINK PHONE (ENABLE SMS MFA)
 # ============================================================
 
 @router.post("/link-sms")
-async def link_sms(payload: PhoneRequest, authorization: str = Header(...)):
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header")
-
-    token = authorization.split(" ")[1]
-    decoded = verify_token(token)
-
-    if not decoded:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+async def link_sms(
+    payload: PhoneRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
 
     user = await users_collection.find_one({
         "email": decoded["sub"],
@@ -2551,7 +2886,7 @@ async def link_sms(payload: PhoneRequest, authorization: str = Header(...)):
     })
 
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
     try:
         phone = format_phone(payload.phoneNumber)
@@ -2575,8 +2910,15 @@ async def link_sms(payload: PhoneRequest, authorization: str = Header(...)):
 
     
 @router.post("/resume-pending-signup")
-async def resume_pending_signup(payload: EmailRequest):
+async def resume_pending_signup(payload: EmailRequest, request: Request):
+    from app.auth.captcha import verify_captcha_token
+
     email = payload.email.lower().strip()
+
+    if not verify_captcha_token(payload.captcha_token, get_client_ip(request)):
+        raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
+
+    await enforce_auth_rate_limit(request, key=f"resume-signup:{email}")
 
     pending = await pending_signup_collection.find_one({
         "email": email,
@@ -2584,14 +2926,14 @@ async def resume_pending_signup(payload: EmailRequest):
     })
 
     if not pending:
-        raise HTTPException(status_code=404, detail="No pending signup found")
+        return {"pending": False, "message": PENDING_SIGNUP_GENERIC}
 
     method = pending.get("mfa_method")
 
     if method == "authenticator":
-        secret = pending.get("provisioned_secret")
+        secret = read_pending_totp_secret(pending)
         if not secret:
-            raise HTTPException(status_code=400, detail="Authenticator setup not available")
+            raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
         uri = pyotp.totp.TOTP(secret).provisioning_uri(
             name=email,
@@ -2607,7 +2949,6 @@ async def resume_pending_signup(payload: EmailRequest):
             "method": "authenticator",
             "email": email,
             "qrCodeUrl": f"data:image/png;base64,{img_base64}",
-            "secret": secret,
         }
 
     if method == "email":
@@ -2622,7 +2963,6 @@ async def resume_pending_signup(payload: EmailRequest):
             "pending": True,
             "method": "sms",
             "email": email,
-            "phone": pending.get("phone"),
         }
 
-    raise HTTPException(status_code=400, detail="Invalid pending signup state")
+    raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)

@@ -1,30 +1,24 @@
 # app/ai/ai_auth.py
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 from bson import ObjectId
 from bson.errors import InvalidId
 
 from app.database import users_collection
 from app.security.jwt_handler import verify_token
+from app.security.cookie_auth import OWNER_ACCESS_COOKIE, extract_access_token
 
 
-def _extract_bearer_token(authorization: str | None) -> str:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing authorization header")
-
-    if not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header")
-
-    token = authorization.split(" ", 1)[1].strip()
-
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing authorization token")
-
-    return token
-
-
-async def get_current_owner(authorization: str | None = Header(default=None)):
-    token = _extract_bearer_token(authorization)
+async def get_current_owner(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    token = extract_access_token(
+        request,
+        authorization,
+        access_cookie=OWNER_ACCESS_COOKIE,
+        required=True,
+    )
 
     decoded = verify_token(token)
 

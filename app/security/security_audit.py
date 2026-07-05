@@ -5,10 +5,12 @@ import logging
 from app.database import (
     kits_collection,
     messageofnextkin_collection,
+    pending_signup_collection,
     section_data_collection,
     users_collection,
 )
 from app.security.checklist_crypto import load_checklist_items
+from app.security.crypto import is_encrypted_payload
 from app.security.kit_data_crypto import load_kit_document
 from app.security.message_crypto import load_message
 from app.security.nextkin_profile_crypto import load_nextkin_profile
@@ -144,6 +146,40 @@ async def audit_kit_documents() -> dict:
     }
 
 
+async def audit_totp_secrets() -> dict:
+    plain_users = 0
+    plain_pending = 0
+    encrypted_users = 0
+    encrypted_pending = 0
+
+    async for user in users_collection.find({}):
+        for field in ("totp_secret", "provisioned_secret"):
+            value = user.get(field)
+            if not value or not isinstance(value, str):
+                continue
+            if is_encrypted_payload(value):
+                encrypted_users += 1
+            else:
+                plain_users += 1
+
+    async for pending in pending_signup_collection.find({}):
+        for field in ("totp_secret", "provisioned_secret"):
+            value = pending.get(field)
+            if not value or not isinstance(value, str):
+                continue
+            if is_encrypted_payload(value):
+                encrypted_pending += 1
+            else:
+                plain_pending += 1
+
+    return {
+        "plain_users": plain_users,
+        "plain_pending": plain_pending,
+        "encrypted_users": encrypted_users,
+        "encrypted_pending": encrypted_pending,
+    }
+
+
 async def run_security_audit() -> dict:
     results = {
         "vault_sections": await _audit_collection("vault_sections", audit_vault_sections),
@@ -152,6 +188,7 @@ async def run_security_audit() -> dict:
         "nextkin_profiles": await _audit_collection("nextkin_profiles", audit_nextkin_profiles),
         "checklists": await _audit_collection("checklists", audit_checklists),
         "kit_documents": await _audit_collection("kit_documents", audit_kit_documents),
+        "totp_secrets": await _audit_collection("totp_secrets", audit_totp_secrets),
     }
     logger.info("Security audit finished: %s", results)
     return results

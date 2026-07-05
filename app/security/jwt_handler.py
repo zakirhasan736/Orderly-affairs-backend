@@ -86,3 +86,28 @@ def verify_mfa_challenge_token(token: str | None, email: str) -> bool:
         return False
 
     return payload.get("sub", "").lower() == email.lower().strip()
+
+
+def create_step_up_token(email: str, expires_minutes: int = 10) -> str:
+    expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
+    payload = {
+        "sub": email.lower().strip(),
+        "purpose": "step_up",
+        "exp": expire,
+    }
+    private_key = settings.JWT_PRIVATE_KEY.replace("\\n", "\n")
+    return jwt.encode(payload, private_key, algorithm=settings.JWT_ALGORITHM)
+
+
+def verify_step_up_token(token: str | None, email: str) -> bool:
+    if not token or not token.strip():
+        return False
+
+    payload = verify_token(token.strip())
+    if not payload:
+        return False
+
+    if payload.get("purpose") != "step_up":
+        return False
+
+    return payload.get("sub", "").lower() == email.lower().strip()
