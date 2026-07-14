@@ -23,7 +23,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Content-Security-Policy"] = (
             "default-src 'none'; frame-ancestors 'none'"
         )
-        response.headers.pop("server", None)
+        # MutableHeaders has no pop(); delete safely if present
+        if "server" in response.headers:
+            del response.headers["server"]
 
         if settings.APP_ENV != "development":
             response.headers["Strict-Transport-Security"] = (
