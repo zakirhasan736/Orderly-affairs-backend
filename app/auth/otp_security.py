@@ -19,6 +19,11 @@ OTP_VERIFY_STATUS = ("verified", "failed", "blocked")
 
 
 def get_client_ip(request: Request) -> str:
+    # Prefer Cloudflare's real-client header when present
+    cf_ip = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if cf_ip:
+        return cf_ip
+
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()

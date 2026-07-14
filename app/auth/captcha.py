@@ -7,6 +7,15 @@ from app.config import settings
 
 
 def verify_captcha_token(token: str | None, remote_ip: str | None = None) -> bool:
+    """Verify a Cloudflare Turnstile token.
+
+    ``remote_ip`` is accepted for call-site compatibility but is intentionally
+    not sent to siteverify. Behind Cloudflare/nginx the app often sees a proxy
+    IP, and a mismatched ``remoteip`` makes Cloudflare reject valid tokens
+    (seen as HTTP 400 CAPTCHA failures on password-reset / OTP).
+    """
+    del remote_ip  # unused on purpose — see docstring
+
     if not settings.OTP_CAPTCHA_ENABLED:
         return True
 
@@ -27,7 +36,6 @@ def verify_captcha_token(token: str | None, remote_ip: str | None = None) -> boo
         {
             "secret": secret,
             "response": token.strip(),
-            **({"remoteip": remote_ip} if remote_ip else {}),
         }
     ).encode()
 
@@ -41,6 +49,11 @@ def verify_captcha_token(token: str | None, remote_ip: str | None = None) -> boo
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             body = json.loads(response.read().decode("utf-8"))
+            if not body.get("success"):
+                print(
+                    "⚠️ CAPTCHA siteverify rejected:",
+                    body.get("error-codes") or body,
+                )
             return bool(body.get("success"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         print(f"⚠️ CAPTCHA verification failed: {exc}")
