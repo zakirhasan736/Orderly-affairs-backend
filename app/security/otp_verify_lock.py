@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, Request
 
 from app.auth.otp_security import get_client_ip, get_session_id, get_user_agent, log_otp_event
+from app.config import settings
+from app.database import otp_verify_locks_collection
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _as_naive_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 def verify_lock_key(scope: str, email: str) -> str:
@@ -19,9 +33,10 @@ async def ensure_otp_verify_not_locked(scope: str, email: str) -> None:
     if not lock:
         return
 
-    locked_until = lock.get("lockedUntil")
-    if locked_until and locked_until > datetime.utcnow():
-        remaining = int((locked_until - datetime.utcnow()).total_seconds())
+    locked_until = _as_naive_utc(lock.get("lockedUntil"))
+    now = _utc_now()
+    if locked_until and locked_until > now:
+        remaining = int((locked_until - now).total_seconds())
         raise HTTPException(
             status_code=429,
             detail=(
@@ -31,7 +46,7 @@ async def ensure_otp_verify_not_locked(scope: str, email: str) -> None:
             headers={"Retry-After": str(max(remaining, 1))},
         )
 
-    if locked_until and locked_until <= datetime.utcnow():
+    if locked_until and locked_until <= now:
         await otp_verify_locks_collection.delete_one({"key": key})
 
 
@@ -69,7 +84,7 @@ async def record_otp_verify_attempt(
     failed_attempts = int((lock or {}).get("failedAttempts", 0)) + 1
 
     if failed_attempts >= settings.OTP_VERIFY_MAX_ATTEMPTS:
-        locked_until = datetime.utcnow() + timedelta(
+        locked_until = _utc_now() + timedelta(
             minutes=settings.OTP_VERIFY_LOCK_MINUTES
         )
         await otp_verify_locks_collection.update_one(
@@ -79,7 +94,7 @@ async def record_otp_verify_attempt(
                     "email": normalized,
                     "failedAttempts": failed_attempts,
                     "lockedUntil": locked_until,
-                    "updatedAt": datetime.utcnow(),
+                    "updatedAt": _utc_now(),
                 }
             },
             upsert=True,
@@ -99,7 +114,7 @@ async def record_otp_verify_attempt(
                 "email": normalized,
                 "failedAttempts": failed_attempts,
                 "lockedUntil": None,
-                "updatedAt": datetime.utcnow(),
+                "updatedAt": _utc_now(),
             }
         },
         upsert=True,

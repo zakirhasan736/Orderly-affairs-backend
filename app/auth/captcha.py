@@ -19,7 +19,7 @@ def verify_captcha_token(token: str | None, remote_ip: str | None = None) -> boo
     if not settings.OTP_CAPTCHA_ENABLED:
         return True
 
-    if settings.APP_ENV == "development" and token == "dev-bypass":
+    if settings.APP_ENV == "development" and token in ("dev-bypass", "captcha-disabled"):
         return True
 
     secret = settings.TURNSTILE_SECRET_KEY
@@ -29,7 +29,9 @@ def verify_captcha_token(token: str | None, remote_ip: str | None = None) -> boo
         print("⚠️ TURNSTILE_SECRET_KEY missing in production — rejecting CAPTCHA")
         return False
 
-    if not token or not token.strip():
+    if not token or not token.strip() or token.strip() == "captcha-disabled":
+        # Real Turnstile tokens required when OTP_CAPTCHA_ENABLED=true
+        print("⚠️ CAPTCHA token missing or disabled-placeholder while captcha enabled")
         return False
 
     payload = urllib.parse.urlencode(

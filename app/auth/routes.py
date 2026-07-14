@@ -2465,7 +2465,7 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
     if not verify_captcha_token(payload.captcha_token, get_client_ip(request)):
         raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
 
-    email = payload.email.lower()
+    email = payload.email.lower().strip()
 
     await enforce_auth_rate_limit(request, key=f"reset-password:{email}")
     await ensure_otp_verify_not_locked("password_reset", email)
@@ -2498,7 +2498,10 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
             generic_error=PASSWORD_RESET_GENERIC_ERROR,
         )
 
-    if datetime.utcnow() > record["expires"]:
+    expires = record.get("expires")
+    if expires is not None and getattr(expires, "tzinfo", None) is not None:
+        expires = expires.replace(tzinfo=None)
+    if expires is None or datetime.utcnow() > expires:
         raise HTTPException(status_code=400, detail=PASSWORD_RESET_GENERIC_ERROR)
 
     await record_otp_verify_attempt(
@@ -2512,7 +2515,7 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
     hashed_password = hash_password(payload.new_password)
 
     await users_collection.update_one(
-        {"email": email},
+        {"email": email, "role": "owner"},
         {
             "$set": {
                 "password": hashed_password,

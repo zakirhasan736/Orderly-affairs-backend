@@ -21,6 +21,17 @@ Turnstile protects OTP send/verify flows from bots. You need **two** keys — on
 
 In development, Turnstile can be left empty: the frontend bypasses the widget and the backend can skip verification when no secret is configured.
 
+### Emergency: Turnstile broken (forgot password / signup return 400)
+
+If the portal shows `/cdn-cgi/challenge-platform` 404s and auth CAPTCHA calls return 400, temporarily disable captcha on **both** sides, redeploy, then re-enable after fixing Cloudflare Turnstile keys/hostnames:
+
+| Variable | Backend | Frontend (rebuild required) |
+|----------|---------|-------------------------------|
+| `OTP_CAPTCHA_ENABLED=false` | `.env` then `pm2 restart` | — |
+| `NEXT_PUBLIC_OTP_CAPTCHA_ENABLED=false` | — | `.env` then rebuild/redeploy portal |
+
+Re-enable both to `true` once Turnstile siteverify succeeds.
+
 ---
 
 ## `APP_ENV=production` and HTTPS
