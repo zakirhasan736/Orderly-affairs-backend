@@ -1,16 +1,5 @@
-# from passlib.context import CryptContext
-
-# pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# def hash_password(password: str) -> str:
-#     # bcrypt only supports up to 72 bytes
-#     password = password.encode("utf-8")[:72].decode("utf-8")
-#     return pwd_context.hash(password)
-
-# def verify_password(plain_password: str, hashed_password: str) -> bool:
-#     plain_password = plain_password.encode("utf-8")[:72].decode("utf-8")
-#     return pwd_context.verify(plain_password, hashed_password)
 import hashlib
+
 from passlib.context import CryptContext
 
 pwd_context = CryptContext(
@@ -20,10 +9,35 @@ pwd_context = CryptContext(
 
 
 def _normalize_password(password: str) -> bytes:
+    """Pre-hash so long passwords work under bcrypt's 72-byte limit."""
     return hashlib.sha256(password.encode("utf-8")).digest()
+
+
+def _legacy_plain_password(password: str) -> str:
+    """Pre-migration hashes used truncated plain-text passwords."""
+    return password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(_normalize_password(password))
 
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(_normalize_password(plain_password), hashed_password)
+    if not hashed_password:
+        return False
+
+    # Current: argon2/bcrypt of SHA-256 digest
+    try:
+        if pwd_context.verify(_normalize_password(plain_password), hashed_password):
+            return True
+    except (ValueError, TypeError):
+        pass
+
+    # Legacy: argon2/bcrypt of plain (truncated) password string
+    try:
+        return pwd_context.verify(
+            _legacy_plain_password(plain_password),
+            hashed_password,
+        )
+    except (ValueError, TypeError):
+        return False
