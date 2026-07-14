@@ -918,7 +918,21 @@ async def owner_login(data: LoginRequest, request: Request, response: Response):
         "role": "owner"
     })
 
-    if not user or not verify_password(data.password, user.get("password", "")):
+    stored_password = ""
+    if user:
+        stored_password = user.get("password") or user.get("password_hash") or ""
+
+    if not user or not verify_password(data.password, stored_password):
+        # Ops-only diagnostics (never returned to the client)
+        if not user:
+            print(f"login 401: no owner account for {email}")
+        elif not stored_password:
+            print(f"login 401: owner {email} has empty password hash")
+        else:
+            print(
+                f"login 401: bad password for {email} "
+                f"(hash_prefix={stored_password[:20]!r})"
+            )
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     await reset_auth_rate_limit(request, key=f"login:{email}")
