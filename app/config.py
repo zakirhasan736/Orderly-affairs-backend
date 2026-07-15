@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     AES_KEY_ROTATION_DAYS: int = 365
 
     # === Auth rate limiting ===
-    AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 10
+    # Slightly more forgiving for MFA / reset flows behind Turnstile
+    AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 20
     AUTH_RATE_LIMIT_WINDOW_MINUTES: int = 15
 
     # Load keys from either .env or /keys folder

@@ -1911,6 +1911,32 @@ async def send_email_otp(
     }
 
 
+def _naive_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if getattr(value, "tzinfo", None) is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
+def _pending_email_otp_matches(email: str, otp_hash: str, code: int) -> bool:
+    """Accept current signup hashes and older type scopes if present."""
+    for otp_type in ("signup", "login_email", ""):
+        if verify_stored_otp(
+            {"email": email, "otp_hash": otp_hash, "type": otp_type},
+            code,
+        ):
+            return True
+    # Also try string form (some clients historically posted digit strings)
+    for otp_type in ("signup", "login_email", ""):
+        if verify_stored_otp(
+            {"email": email, "otp_hash": otp_hash, "type": otp_type},
+            str(code),
+        ):
+            return True
+    return False
+
+
 @router.post("/verify-email")
 async def verify_email_code(
     payload: VerifyEmailRequest,
@@ -1919,36 +1945,46 @@ async def verify_email_code(
     authorization: str | None = Header(default=None),
 ):
     email = payload.email.lower().strip()
+    now = datetime.utcnow()
 
     await ensure_email_verify_not_locked(email)
 
-    # first check pending signup email flow
+    # Pending signup — load by email first (avoid tz mismatches on Mongo $gt)
     pending = await pending_signup_collection.find_one({
         "email": email,
         "mfa_method": "email",
-        "expires_at": {"$gt": datetime.utcnow()}
     })
+    if pending:
+        pending_expires = _naive_utc(pending.get("expires_at"))
+        if pending_expires is not None and now > pending_expires:
+            pending = None
 
     if pending:
         otp_hash = pending.get("email_otp_hash")
-        otp_expires = pending.get("email_otp_expires")
+        otp_expires = _naive_utc(pending.get("email_otp_expires"))
         legacy_otp = pending.get("email_otp")
 
         if (not otp_hash and legacy_otp is None) or not otp_expires:
-            raise HTTPException(status_code=400, detail="No signup OTP found")
+            print(f"verify-email 400: no signup OTP for {email}")
+            raise HTTPException(
+                status_code=400,
+                detail="No verification code found. Request a new code.",
+            )
 
-        if datetime.utcnow() > otp_expires:
-            raise HTTPException(status_code=400, detail="OTP expired")
+        if now > otp_expires:
+            print(f"verify-email 400: signup OTP expired for {email}")
+            raise HTTPException(
+                status_code=400,
+                detail="Code expired. Request a new code.",
+            )
 
         otp_ok = (
-            verify_stored_otp(
-                {"email": email, "otp_hash": otp_hash, "type": "signup"},
-                payload.code,
-            )
+            _pending_email_otp_matches(email, otp_hash, payload.code)
             if otp_hash
-            else legacy_otp == payload.code
+            else str(legacy_otp) == str(payload.code)
         )
         if not otp_ok:
+            print(f"verify-email 400: bad signup OTP for {email}")
             await record_email_verify_attempt(
                 request=request,
                 email=email,
@@ -1974,15 +2010,28 @@ async def verify_email_code(
         pending=None,
     )
 
-    # otherwise normal login email MFA
-    record = await otp_collection.find_one({"email": email})
+    # otherwise normal login email MFA — prefer newest OTP
+    record = await otp_collection.find_one(
+        {"email": email},
+        sort=[("created_at", -1), ("expires", -1)],
+    )
     if not record:
-        raise HTTPException(status_code=400, detail="No OTP found")
+        print(f"verify-email 400: no login OTP for {email}")
+        raise HTTPException(
+            status_code=400,
+            detail="No verification code found. Request a new code.",
+        )
 
-    if datetime.utcnow() > record["expires"]:
-        raise HTTPException(status_code=400, detail="OTP expired")
+    record_expires = _naive_utc(record.get("expires"))
+    if record_expires is None or now > record_expires:
+        print(f"verify-email 400: login OTP expired for {email}")
+        raise HTTPException(
+            status_code=400,
+            detail="Code expired. Request a new code.",
+        )
 
     if not verify_stored_otp(record, payload.code):
+        print(f"verify-email 400: bad login OTP for {email}")
         await record_email_verify_attempt(
             request=request,
             email=email,

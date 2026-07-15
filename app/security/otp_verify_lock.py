@@ -99,12 +99,14 @@ async def record_otp_verify_attempt(
             },
             upsert=True,
         )
+        lock_seconds = max(settings.OTP_VERIFY_LOCK_MINUTES * 60, 1)
         raise HTTPException(
             status_code=429,
             detail=(
-                f"Too many incorrect attempts. Locked for "
-                f"{settings.OTP_VERIFY_LOCK_MINUTES} minutes."
+                f"Too many incorrect attempts. Please try again in "
+                f"{lock_seconds} seconds."
             ),
+            headers={"Retry-After": str(lock_seconds)},
         )
 
     await otp_verify_locks_collection.update_one(

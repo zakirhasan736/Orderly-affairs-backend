@@ -530,7 +530,13 @@ async def _seconds_since_last_email_send(email: str) -> int | None:
     if not recent:
         return None
 
-    elapsed = (datetime.utcnow() - recent["createdAt"]).total_seconds()
+    created = recent.get("createdAt")
+    if created is None:
+        return None
+    if getattr(created, "tzinfo", None) is not None:
+        created = created.replace(tzinfo=None)
+
+    elapsed = (datetime.utcnow() - created).total_seconds()
     remaining = settings.OTP_EMAIL_COOLDOWN_SECONDS - int(elapsed)
     return remaining if remaining > 0 else None
 

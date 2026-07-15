@@ -84,10 +84,17 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(VaultApiRateLimitMiddleware)
 
-origins = [settings.FRONTEND_URL]
-if settings.APP_ENV == "development" and "http://localhost:3000" not in origins:
-    origins.append("http://localhost:3000")
+# Trailing slash mismatch breaks exact-origin CORS checks
+_frontend = (settings.FRONTEND_URL or "").rstrip("/")
+origins = [o for o in {_frontend, "https://portal.orderly-affairs.com"} if o]
+if settings.APP_ENV == "development":
+    for local in ("http://localhost:3000", "http://127.0.0.1:3000"):
+        if local not in origins:
+            origins.append(local)
 
+# CORS must be outermost so even error/redirect responses get ACAO headers.
+# (Starlette: last add_middleware = first to handle the request.)
+app.add_middleware(HTTPSRedirectMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -95,8 +102,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.add_middleware(HTTPSRedirectMiddleware)
 @app.on_event("startup")
 async def startup():
     # 1️⃣ Start APScheduler-based NOK LETTERS

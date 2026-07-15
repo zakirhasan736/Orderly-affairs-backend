@@ -9,12 +9,23 @@ from app.database import auth_rate_limits_collection
 
 
 def _client_ip(request: Request) -> str:
+    cf_ip = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if cf_ip:
+        return cf_ip
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
     if request.client:
         return request.client.host
     return "unknown"
+
+
+def _as_naive_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
 
 
 async def enforce_auth_rate_limit(
@@ -45,16 +56,22 @@ async def enforce_auth_rate_limit(
         )
         return
 
-    attempts = [
-        attempt
-        for attempt in record.get("attempts", [])
-        if attempt.get("at", now) >= window_start
-    ]
+    attempts = []
+    for attempt in record.get("attempts", []):
+        at = _as_naive_utc(attempt.get("at"))
+        if at is not None and at >= window_start:
+            attempts.append({"at": at})
 
     if len(attempts) >= limit:
+        oldest = min((a["at"] for a in attempts), default=now)
+        retry_after = int((oldest + timedelta(minutes=window) - now).total_seconds())
+        retry_after = max(retry_after, 1)
         raise HTTPException(
             status_code=429,
-            detail="Too many attempts. Please try again later.",
+            detail=(
+                f"Too many attempts. Please try again in {retry_after} seconds."
+            ),
+            headers={"Retry-After": str(retry_after)},
         )
 
     attempts.append({"at": now})
