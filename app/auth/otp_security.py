@@ -116,9 +116,11 @@ def _as_naive_utc(value: datetime | None) -> datetime | None:
     return value
 
 
-def _raise_otp_rate_limit(*, detail: str, retry_after: int) -> None:
+def _raise_otp_rate_limit(*, detail: str, retry_after: int, max_wait: int | None = None) -> None:
     """429 with a parseable message and Retry-After for the portal countdown."""
     wait = max(int(retry_after), 1)
+    if max_wait is not None:
+        wait = min(wait, max_wait)
     raise HTTPException(
         status_code=429,
         detail=f"{detail} Try again in {wait} seconds.",
@@ -134,11 +136,12 @@ async def _seconds_until_oldest_send_slot(
     window_seconds: int,
     channel: str | None = None,
 ) -> int:
+    now = datetime.utcnow()
     query: dict[str, Any] = {
         field: value,
         "action": "send",
         "status": "sent",
-        "createdAt": {"$gte": since},
+        "createdAt": {"$gte": since, "$lte": now},
     }
     if channel == "sms":
         query["channel"] = {"$in": ["sms", None]}
@@ -150,15 +153,16 @@ async def _seconds_until_oldest_send_slot(
         sort=[("createdAt", 1)],
     )
     if not oldest:
-        return max(window_seconds, 1)
+        return min(max(window_seconds, 1), window_seconds)
 
     created = _as_naive_utc(oldest.get("createdAt"))
-    if created is None:
-        return max(window_seconds, 1)
+    if created is None or created > now:
+        # Corrupt / future timestamps must not produce multi-day waits
+        return min(max(window_seconds, 1), 600)
 
     expires_at = created + timedelta(seconds=window_seconds)
-    remaining = int((expires_at - datetime.utcnow()).total_seconds())
-    return max(remaining, 1)
+    remaining = int((expires_at - now).total_seconds())
+    return min(max(remaining, 1), window_seconds)
 
 
 async def _count_recent_sends(

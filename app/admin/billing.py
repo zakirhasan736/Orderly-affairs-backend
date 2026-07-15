@@ -42,6 +42,12 @@ class RevokeCompRequest(BaseModel):
     note: Optional[str] = None
 
 
+class ClearRateLimitsRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    clear_auth_limits: bool = True
+    clear_otp_logs: bool = False
+
+
 @admin_billing_router.get("/overview")
 async def billing_overview(
     request: Request,
@@ -209,6 +215,48 @@ async def revoke_complimentary(
         "message": "Complimentary access revoked",
         "email": email,
         "status": new_status,
+    }
+
+
+@admin_billing_router.post("/clear-rate-limits")
+async def clear_rate_limits(
+    payload: ClearRateLimitsRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Unstick a user blocked by inflated rate-limit timers.
+    Clears auth_rate_limits docs (and optionally recent OTP send logs).
+    """
+    require_admin(request, authorization)
+    from app.database import auth_rate_limits_collection, otp_fraud_logs_collection
+
+    deleted_auth = 0
+    deleted_otp = 0
+
+    if payload.clear_auth_limits:
+        if payload.email:
+            email = payload.email.lower().strip()
+            # keys look like "login:user@x.com:1.2.3.4"
+            result = await auth_rate_limits_collection.delete_many(
+                {"key": {"$regex": email.replace(".", "\\.")}}
+            )
+            deleted_auth = result.deleted_count or 0
+        else:
+            result = await auth_rate_limits_collection.delete_many({})
+            deleted_auth = result.deleted_count or 0
+
+    if payload.clear_otp_logs and payload.email:
+        email = payload.email.lower().strip()
+        result = await otp_fraud_logs_collection.delete_many(
+            {"email": email, "action": "send"}
+        )
+        deleted_otp = result.deleted_count or 0
+
+    return {
+        "message": "Rate limits cleared",
+        "deleted_auth_limit_docs": deleted_auth,
+        "deleted_otp_send_logs": deleted_otp,
     }
 
 

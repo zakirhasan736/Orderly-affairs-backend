@@ -42,6 +42,7 @@ async def enforce_auth_rate_limit(
     window = window_minutes or settings.AUTH_RATE_LIMIT_WINDOW_MINUTES
     now = datetime.utcnow()
     window_start = now - timedelta(minutes=window)
+    window_seconds = window * 60
     ip = _client_ip(request)
     doc_key = f"{key}:{ip}"
 
@@ -59,13 +60,14 @@ async def enforce_auth_rate_limit(
     attempts = []
     for attempt in record.get("attempts", []):
         at = _as_naive_utc(attempt.get("at"))
-        if at is not None and at >= window_start:
+        # Ignore future timestamps (clock skew) — they inflate Retry-After wildly
+        if at is not None and window_start <= at <= now:
             attempts.append({"at": at})
 
     if len(attempts) >= limit:
         oldest = min((a["at"] for a in attempts), default=now)
         retry_after = int((oldest + timedelta(minutes=window) - now).total_seconds())
-        retry_after = max(retry_after, 1)
+        retry_after = min(max(retry_after, 1), window_seconds)
         raise HTTPException(
             status_code=429,
             detail=(
