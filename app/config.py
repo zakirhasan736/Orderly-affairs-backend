@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     AES_KEY_ROTATION_DAYS: int = 365
 
     # === Auth rate limiting ===
-    # Slightly more forgiving for MFA / reset flows behind Turnstile
-    AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 20
-    AUTH_RATE_LIMIT_WINDOW_MINUTES: int = 15
+    # Generous limits so Turnstile retries / MFA don't lock users out quickly
+    AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 40
+    AUTH_RATE_LIMIT_WINDOW_MINUTES: int = 10
 
     # Load keys from either .env or /keys folder
     JWT_PRIVATE_KEY: str | None = None
@@ -56,17 +56,17 @@ class Settings(BaseSettings):
     OTP_CAPTCHA_ENABLED: bool = True
     TURNSTILE_SECRET_KEY: str | None = None
     OTP_ALLOWED_COUNTRIES: str = "*"
-    OTP_PHONE_COOLDOWN_SECONDS: int = 60
-    OTP_PHONE_MAX_PER_HOUR: int = 5
-    OTP_PHONE_MAX_PER_DAY: int = 10
-    OTP_EMAIL_COOLDOWN_SECONDS: int = 60
-    OTP_EMAIL_MAX_PER_HOUR: int = 5
-    OTP_EMAIL_MAX_PER_DAY: int = 10
-    OTP_IP_MAX_PER_HOUR: int = 10
-    OTP_IP_MAX_PER_DAY: int = 30
-    OTP_SESSION_MAX_PER_HOUR: int = 5
-    OTP_VERIFY_MAX_ATTEMPTS: int = 5
-    OTP_VERIFY_LOCK_MINUTES: int = 30
+    OTP_PHONE_COOLDOWN_SECONDS: int = 45
+    OTP_PHONE_MAX_PER_HOUR: int = 12
+    OTP_PHONE_MAX_PER_DAY: int = 30
+    OTP_EMAIL_COOLDOWN_SECONDS: int = 45
+    OTP_EMAIL_MAX_PER_HOUR: int = 12
+    OTP_EMAIL_MAX_PER_DAY: int = 30
+    OTP_IP_MAX_PER_HOUR: int = 40
+    OTP_IP_MAX_PER_DAY: int = 120
+    OTP_SESSION_MAX_PER_HOUR: int = 15
+    OTP_VERIFY_MAX_ATTEMPTS: int = 8
+    OTP_VERIFY_LOCK_MINUTES: int = 15
 
     STRIPE_WEBHOOK_SECRET: str
     # === Base url Info ===
