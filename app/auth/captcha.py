@@ -52,10 +52,16 @@ def verify_captcha_token(token: str | None, remote_ip: str | None = None) -> boo
         with urllib.request.urlopen(request, timeout=10) as response:
             body = json.loads(response.read().decode("utf-8"))
             if not body.get("success"):
-                print(
-                    "⚠️ CAPTCHA siteverify rejected:",
-                    body.get("error-codes") or body,
-                )
+                codes = body.get("error-codes") or []
+                print("⚠️ CAPTCHA siteverify rejected:", codes or body)
+                # Common: timeout-or-duplicate = token already used once in this request chain
+                if "timeout-or-duplicate" in codes:
+                    print(
+                        "⚠️ CAPTCHA tip: Turnstile tokens are single-use. "
+                        "Do not call siteverify twice with the same token."
+                    )
+                if "invalid-input-secret" in codes or "missing-input-secret" in codes:
+                    print("⚠️ CAPTCHA tip: TURNSTILE_SECRET_KEY does not match the site key")
             return bool(body.get("success"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         print(f"⚠️ CAPTCHA verification failed: {exc}")

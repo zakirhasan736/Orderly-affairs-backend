@@ -696,6 +696,8 @@ async def signup(user: SignupRequest, request: Request):
                 email=email,
                 captcha_token=user.captcha_token,
                 session_id=user.otp_session_id,
+                # Captcha already verified above — Turnstile tokens are single-use
+                skip_captcha=True,
             )
         except HTTPException:
             await pending_signup_collection.delete_one({"email": email})
@@ -745,6 +747,8 @@ async def signup(user: SignupRequest, request: Request):
                 email=email,
                 captcha_token=user.captcha_token,
                 session_id=user.otp_session_id,
+                # Captcha already verified above — Turnstile tokens are single-use
+                skip_captcha=True,
                 store_otp=_store_signup_email_otp,
                 rollback_otp=_rollback_signup_email_otp,
             )
