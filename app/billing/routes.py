@@ -59,13 +59,16 @@ async def get_owner_from_token(request: Request, authorization: str | None = Non
 class StartSubscriptionRequest(BaseModel):
     plan: Literal["monthly", "yearly"]
     is_trial: bool = False
+    # cardless = no card now; card_on_file = verify card now, charge after trial
+    trial_mode: Literal["cardless", "card_on_file"] | None = None
+
+
+class AutoRenewRequest(BaseModel):
+    enabled: bool
 
 
 class ConfirmCardRequest(BaseModel):
     payment_method_id: str
-
-class PauseRequest(BaseModel):
-    resume_at: datetime
 
 # ============================================================
 # 1️⃣ CREATE STRIPE CUSTOMER
@@ -161,12 +164,23 @@ async def start_subscription(
     user = await get_owner_from_token(request, authorization)
     billing = user["billing"]
 
-    if not billing.get("payment_method_attached") and not payload.is_trial:
+    trial_mode = payload.trial_mode
+    if payload.is_trial:
+        trial_mode = trial_mode or "cardless"
+        if trial_mode == "card_on_file" and not billing.get("payment_method_attached"):
+            raise HTTPException(
+                403,
+                "Add and verify a card to avoid interruption after the trial. "
+                "No charge today — billing starts when the trial ends.",
+            )
+    elif not billing.get("payment_method_attached"):
         raise HTTPException(403, "Payment method required")
-
 
     if billing.get("subscription_id"):
         raise HTTPException(400, "Subscription already exists")
+
+    if not billing.get("customer_id"):
+        raise HTTPException(400, "Create a Stripe customer first")
 
     price_id = (
         settings.STRIPE_PRICE_MONTHLY
@@ -179,6 +193,8 @@ async def start_subscription(
         items=[{"price": price_id}],
         trial_period_days=settings.TRIAL_DAYS if payload.is_trial else None,
         payment_settings={"save_default_payment_method": "on_subscription"},
+        # Auto-renew on by default; user can turn off from settings later
+        cancel_at_period_end=False,
     )
     await send_billing_email(
             user=user,
@@ -206,11 +222,18 @@ async def start_subscription(
         "billing.plan": payload.plan,
         "billing.is_trial": payload.is_trial,
         "billing.status": "trialing" if payload.is_trial else "active",
+        "billing.auto_renew": True,
+        "billing.lock_reason": None,
+        "billing.locked_at": None,
+        "billing.payment_fail_reminders_sent": [],
     }
 
     if payload.is_trial:
         update["billing.trial_start"] = now
         update["billing.trial_end"] = now + timedelta(days=settings.TRIAL_DAYS)
+        update["billing.trial_mode"] = trial_mode
+    else:
+        update["billing.trial_mode"] = None
 
     await users_collection.update_one(
         {"_id": user["_id"]},
@@ -221,6 +244,8 @@ async def start_subscription(
         "subscription_id": subscription.id,
         "status": update["billing.status"],
         "trial_end": update.get("billing.trial_end"),
+        "trial_mode": update.get("billing.trial_mode"),
+        "auto_renew": True,
     }
 
 # Upgrade / Downgrade Plans
@@ -327,6 +352,10 @@ async def change_plan(
             "billing.status": "active",
             "billing.trial_end": None,
             "billing.resume_at": None,
+            "billing.lock_reason": None,
+            "billing.locked_at": None,
+            "billing.payment_fail_reminders_sent": [],
+            "billing.auto_renew": True,
             "updated_at": datetime.utcnow(),
         }}
     )
@@ -482,14 +511,103 @@ async def resume_subscription(request: Request, authorization: str | None = Head
 
 @billing_router.get("/status")
 async def billing_status(request: Request, authorization: str | None = Header(default=None)):
+    from app.billing.access import billing_session_flags
+
     user = await get_owner_from_token(request, authorization)
     billing = user.get("billing", {})
+    flags = billing_session_flags(billing)
 
     return {
         "status": billing.get("status"),
         "plan": billing.get("plan"),
         "is_trial": billing.get("is_trial"),
         "trial_end": billing.get("trial_end"),
+        "trial_mode": billing.get("trial_mode"),
         "has_payment_method": billing.get("payment_method_attached"),
+        "auto_renew": billing.get("auto_renew", True),
+        "billing_only": flags["billing_only"],
+        "requires_billing": flags["requires_billing"],
+        "lock_message": flags["lock_message"],
+        "is_complimentary": flags["is_complimentary"],
+        "comp_ends_at": flags["comp_ends_at"],
+    }
+
+
+@billing_router.post("/auto-renew")
+async def set_auto_renew(
+    payload: AutoRenewRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Toggle Stripe cancel_at_period_end.
+    Offline = avoid auto-charge at trial end / next renewal.
+    Online = allow automatic charge.
+    """
+    user = await get_owner_from_token(request, authorization)
+    billing = user.get("billing", {})
+    sub_id = billing.get("subscription_id")
+    if not sub_id:
+        raise HTTPException(400, "No active subscription")
+
+    try:
+        stripe.Subscription.modify(
+            sub_id,
+            cancel_at_period_end=not payload.enabled,
+        )
+    except Exception as exc:
+        raise HTTPException(400, f"Could not update auto-renew: {exc}") from exc
+
+    await users_collection.update_one(
+        {"_id": user["_id"]},
+        {
+            "$set": {
+                "billing.auto_renew": payload.enabled,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+
+    return {
+        "auto_renew": payload.enabled,
+        "message": (
+            "Auto-renew is on. Your card will be charged when the current period ends."
+            if payload.enabled
+            else "Auto-renew is off. You will not be charged automatically; "
+            "access may pause when the current period ends unless you pay."
+        ),
+    }
+
+
+@billing_router.post("/attach-card-during-trial")
+async def attach_card_during_trial(
+    payload: ConfirmCardRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Cardless trial users can add a card mid-trial to avoid interruption."""
+    user = await get_owner_from_token(request, authorization)
+    billing = user.get("billing", {})
+    customer_id = billing.get("customer_id")
+    if not customer_id:
+        raise HTTPException(400, "No billing customer")
+
+    stripe.PaymentMethod.attach(payload.payment_method_id, customer=customer_id)
+    stripe.Customer.modify(
+        customer_id,
+        invoice_settings={"default_payment_method": payload.payment_method_id},
+    )
+
+    update: dict = {
+        "billing.payment_method_attached": True,
+        "billing.trial_mode": "card_on_file",
+        "updated_at": datetime.utcnow(),
+    }
+    await users_collection.update_one({"_id": user["_id"]}, {"$set": update})
+
+    return {
+        "message": "Card saved. No charge today — it will be used when the trial ends if auto-renew is on.",
+        "trial_mode": "card_on_file",
+        "has_payment_method": True,
     }
 

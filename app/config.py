@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     OTP_PHONE_MAX_PER_HOUR: int = 12
     OTP_PHONE_MAX_PER_DAY: int = 30
     OTP_EMAIL_COOLDOWN_SECONDS: int = 45
+    # Primary burst window for OTP sends (matches auth rate-limit window)
+    OTP_BURST_WINDOW_MINUTES: int = 10
+    OTP_EMAIL_MAX_PER_BURST: int = 8
     OTP_EMAIL_MAX_PER_HOUR: int = 12
     OTP_EMAIL_MAX_PER_DAY: int = 30
     OTP_IP_MAX_PER_HOUR: int = 40

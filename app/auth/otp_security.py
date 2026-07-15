@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from random import randint
 from typing import Any
@@ -13,6 +14,10 @@ from app.auth.captcha import verify_captcha_token
 from app.auth.twilio_verify import send_verification_code
 from app.config import settings
 from app.database import otp_fraud_logs_collection, otp_verify_locks_collection
+
+# Persist OTP before delivery; rollback if the email fails to send.
+EmailOtpStore = Callable[[str, int, datetime], Awaitable[None]]
+EmailOtpRollback = Callable[[str], Awaitable[None]]
 
 OTP_SEND_STATUS = ("sent", "blocked", "failed")
 OTP_VERIFY_STATUS = ("verified", "failed", "blocked")
@@ -103,6 +108,59 @@ async def log_otp_event(
     )
 
 
+def _as_naive_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
+def _raise_otp_rate_limit(*, detail: str, retry_after: int) -> None:
+    """429 with a parseable message and Retry-After for the portal countdown."""
+    wait = max(int(retry_after), 1)
+    raise HTTPException(
+        status_code=429,
+        detail=f"{detail} Try again in {wait} seconds.",
+        headers={"Retry-After": str(wait)},
+    )
+
+
+async def _seconds_until_oldest_send_slot(
+    *,
+    field: str,
+    value: str,
+    since: datetime,
+    window_seconds: int,
+    channel: str | None = None,
+) -> int:
+    query: dict[str, Any] = {
+        field: value,
+        "action": "send",
+        "status": "sent",
+        "createdAt": {"$gte": since},
+    }
+    if channel == "sms":
+        query["channel"] = {"$in": ["sms", None]}
+    elif channel:
+        query["channel"] = channel
+
+    oldest = await otp_fraud_logs_collection.find_one(
+        query,
+        sort=[("createdAt", 1)],
+    )
+    if not oldest:
+        return max(window_seconds, 1)
+
+    created = _as_naive_utc(oldest.get("createdAt"))
+    if created is None:
+        return max(window_seconds, 1)
+
+    expires_at = created + timedelta(seconds=window_seconds)
+    remaining = int((expires_at - datetime.utcnow()).total_seconds())
+    return max(remaining, 1)
+
+
 async def _count_recent_sends(
     *,
     field: str,
@@ -189,7 +247,7 @@ async def enforce_otp_send_limits(
         )
         raise HTTPException(
             status_code=429,
-            detail=f"Please wait {cooldown_remaining}s before requesting another OTP",
+            detail=f"Please try again in {cooldown_remaining} seconds.",
             headers={"Retry-After": str(cooldown_remaining)},
         )
 
@@ -362,19 +420,23 @@ async def send_otp_sms_secure(
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    await log_otp_event(
-        channel="sms",
-        phone=phone,
-        country=context["country"],
-        ip=context["ip"],
-        user_agent=context["user_agent"],
-        session_id=context["session_id"],
-        email=email,
-        captcha_passed=context["captcha_passed"],
-        status="sent",
-        action="send",
-        twilio_sid=twilio_sid,
-    )
+    try:
+        await log_otp_event(
+            channel="sms",
+            phone=phone,
+            country=context["country"],
+            ip=context["ip"],
+            user_agent=context["user_agent"],
+            session_id=context["session_id"],
+            email=email,
+            captcha_passed=context["captcha_passed"],
+            status="sent",
+            action="send",
+            twilio_sid=twilio_sid,
+        )
+    except Exception as log_exc:
+        # SMS already delivered — do not fail the API after a successful send
+        print(f"SMS OTP fraud log failed for {phone}: {log_exc}")
 
     return {
         "phone": phone,
@@ -584,15 +646,50 @@ async def enforce_email_otp_send_limits(
         )
         raise HTTPException(
             status_code=429,
-            detail=f"Please wait {cooldown_remaining}s before requesting another OTP",
+            detail=f"Please try again in {cooldown_remaining} seconds.",
             headers={"Retry-After": str(cooldown_remaining)},
         )
 
     now = datetime.utcnow()
+    burst_minutes = settings.OTP_BURST_WINDOW_MINUTES
+    burst_since = now - timedelta(minutes=burst_minutes)
+    burst_window_seconds = burst_minutes * 60
+
+    email_burst = await _count_recent_sends(
+        field="email",
+        value=normalized,
+        since=burst_since,
+        channel="email",
+    )
+    if email_burst >= settings.OTP_EMAIL_MAX_PER_BURST:
+        await log_otp_event(
+            channel="email",
+            email=normalized,
+            ip=ip,
+            user_agent=user_agent,
+            session_id=resolved_session,
+            captcha_passed=True,
+            status="blocked",
+            action="send",
+            detail="email_burst_limit",
+        )
+        retry = await _seconds_until_oldest_send_slot(
+            field="email",
+            value=normalized,
+            since=burst_since,
+            window_seconds=burst_window_seconds,
+            channel="email",
+        )
+        _raise_otp_rate_limit(
+            detail="Too many code requests for this email.",
+            retry_after=retry,
+        )
+
+    hour_since = now - timedelta(hours=1)
     email_hour = await _count_recent_sends(
         field="email",
         value=normalized,
-        since=now - timedelta(hours=1),
+        since=hour_since,
         channel="email",
     )
     if email_hour >= settings.OTP_EMAIL_MAX_PER_HOUR:
@@ -607,15 +704,23 @@ async def enforce_email_otp_send_limits(
             action="send",
             detail="email_hourly_limit",
         )
-        raise HTTPException(
-            status_code=429,
-            detail="Too many OTP requests for this email address. Try again later.",
+        retry = await _seconds_until_oldest_send_slot(
+            field="email",
+            value=normalized,
+            since=hour_since,
+            window_seconds=3600,
+            channel="email",
+        )
+        _raise_otp_rate_limit(
+            detail="Too many code requests for this email.",
+            retry_after=retry,
         )
 
+    day_since = now - timedelta(days=1)
     email_day = await _count_recent_sends(
         field="email",
         value=normalized,
-        since=now - timedelta(days=1),
+        since=day_since,
         channel="email",
     )
     if email_day >= settings.OTP_EMAIL_MAX_PER_DAY:
@@ -630,15 +735,22 @@ async def enforce_email_otp_send_limits(
             action="send",
             detail="email_daily_limit",
         )
-        raise HTTPException(
-            status_code=429,
-            detail="Daily OTP limit reached for this email address.",
+        retry = await _seconds_until_oldest_send_slot(
+            field="email",
+            value=normalized,
+            since=day_since,
+            window_seconds=86400,
+            channel="email",
+        )
+        _raise_otp_rate_limit(
+            detail="Daily code limit reached for this email.",
+            retry_after=retry,
         )
 
     ip_hour = await _count_recent_sends(
         field="ip",
         value=ip,
-        since=now - timedelta(hours=1),
+        since=hour_since,
     )
     if ip_hour >= settings.OTP_IP_MAX_PER_HOUR:
         await log_otp_event(
@@ -652,15 +764,21 @@ async def enforce_email_otp_send_limits(
             action="send",
             detail="ip_hourly_limit",
         )
-        raise HTTPException(
-            status_code=429,
-            detail="Too many OTP requests from this network. Try again later.",
+        retry = await _seconds_until_oldest_send_slot(
+            field="ip",
+            value=ip,
+            since=hour_since,
+            window_seconds=3600,
+        )
+        _raise_otp_rate_limit(
+            detail="Too many code requests from this network.",
+            retry_after=retry,
         )
 
     ip_day = await _count_recent_sends(
         field="ip",
         value=ip,
-        since=now - timedelta(days=1),
+        since=day_since,
     )
     if ip_day >= settings.OTP_IP_MAX_PER_DAY:
         await log_otp_event(
@@ -674,16 +792,22 @@ async def enforce_email_otp_send_limits(
             action="send",
             detail="ip_daily_limit",
         )
-        raise HTTPException(
-            status_code=429,
-            detail="Daily OTP limit reached from this network.",
+        retry = await _seconds_until_oldest_send_slot(
+            field="ip",
+            value=ip,
+            since=day_since,
+            window_seconds=86400,
+        )
+        _raise_otp_rate_limit(
+            detail="Daily code limit reached from this network.",
+            retry_after=retry,
         )
 
     if resolved_session != "anonymous":
         session_hour = await _count_recent_sends(
             field="sessionId",
             value=resolved_session,
-            since=now - timedelta(hours=1),
+            since=hour_since,
         )
         if session_hour >= settings.OTP_SESSION_MAX_PER_HOUR:
             await log_otp_event(
@@ -697,9 +821,15 @@ async def enforce_email_otp_send_limits(
                 action="send",
                 detail="session_hourly_limit",
             )
-            raise HTTPException(
-                status_code=429,
-                detail="Too many OTP requests from this device. Try again later.",
+            retry = await _seconds_until_oldest_send_slot(
+                field="sessionId",
+                value=resolved_session,
+                since=hour_since,
+                window_seconds=3600,
+            )
+            _raise_otp_rate_limit(
+                detail="Too many code requests from this device.",
+                retry_after=retry,
             )
 
     return {
@@ -718,7 +848,15 @@ async def send_email_otp_secure(
     captcha_token: str | None,
     session_id: str | None,
     skip_captcha: bool = False,
+    store_otp: EmailOtpStore | None = None,
+    rollback_otp: EmailOtpRollback | None = None,
 ) -> dict[str, Any]:
+    """
+    Rate-limit → generate → persist (optional) → send.
+
+    The email is delivered only after store_otp succeeds. If SendGrid fails,
+    rollback_otp runs and the client gets an error (no success response).
+    """
     context = await enforce_email_otp_send_limits(
         request=request,
         email=email,
@@ -730,9 +868,20 @@ async def send_email_otp_secure(
     otp = randint(100000, 999999)
     expiry = datetime.utcnow() + timedelta(minutes=10)
 
+    # Persist before send so a failed DB write never leaves an emailed code
+    # that the API reported as failed — and so send never happens if store fails.
+    if store_otp is not None:
+        await store_otp(normalized, otp, expiry)
+
     try:
         deliver_email_otp(normalized, otp)
     except Exception as exc:
+        if rollback_otp is not None:
+            try:
+                await rollback_otp(normalized)
+            except Exception as rollback_exc:
+                print(f"email OTP rollback failed for {normalized}: {rollback_exc}")
+
         await log_otp_event(
             channel="email",
             email=normalized,
@@ -749,16 +898,20 @@ async def send_email_otp_secure(
             detail=f"Failed to send verification email: {exc}",
         ) from exc
 
-    await log_otp_event(
-        channel="email",
-        email=normalized,
-        ip=context["ip"],
-        user_agent=context["user_agent"],
-        session_id=context["session_id"],
-        captcha_passed=context["captcha_passed"],
-        status="sent",
-        action="send",
-    )
+    try:
+        await log_otp_event(
+            channel="email",
+            email=normalized,
+            ip=context["ip"],
+            user_agent=context["user_agent"],
+            session_id=context["session_id"],
+            captcha_passed=context["captcha_passed"],
+            status="sent",
+            action="send",
+        )
+    except Exception as log_exc:
+        # Email already delivered — do not fail the API after a successful send
+        print(f"email OTP fraud log failed for {normalized}: {log_exc}")
 
     return {
         "email": normalized,

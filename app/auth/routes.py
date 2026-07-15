@@ -257,11 +257,14 @@ def first_enabled_mfa_method(methods: dict[str, bool]) -> str | None:
 
 
 def mfa_login_response(user: dict, billing: dict) -> dict:
+    from app.billing.access import billing_session_flags
+
     methods = normalize_mfa_methods(user)
     preferred = user.get("primary_mfa")
     if preferred not in methods or not methods.get(preferred):
         preferred = first_enabled_mfa_method(methods)
 
+    flags = billing_session_flags(billing)
     return {
         "message": "Password verified",
         "mfa_required": True,
@@ -270,8 +273,9 @@ def mfa_login_response(user: dict, billing: dict) -> dict:
         "mfa_methods": methods,
         "email": user["email"],
         "phone": user.get("phone"),
-        "billing_status": billing.get("status", "pending"),
-        "requires_billing": billing.get("status") in ["pending", "blocked"],
+        "billing_status": flags["billing_status"],
+        "requires_billing": flags["requires_billing"],
+        "is_complimentary": flags["is_complimentary"],
         "otp_sent": False,
     }
 
@@ -282,6 +286,10 @@ async def _store_login_email_otp(email: str, otp: int, expiry: datetime) -> None
     doc["expires"] = expiry
     doc["created_at"] = datetime.utcnow()
     await otp_collection.insert_one(doc)
+
+
+async def _rollback_login_email_otp(email: str) -> None:
+    await otp_collection.delete_many({"email": email, "type": "login_email"})
 
 
 async def _trigger_login_mfa_otp(
@@ -299,8 +307,9 @@ async def _trigger_login_mfa_otp(
                 captcha_token=None,
                 session_id=None,
                 skip_captcha=True,
+                store_otp=_store_login_email_otp,
+                rollback_otp=_rollback_login_email_otp,
             )
-            await _store_login_email_otp(email, result["otp"], result["expiry"])
             return True, result["cooldown_seconds"], None
         except HTTPException as exc:
             return False, None, str(exc.detail)
@@ -440,7 +449,20 @@ def build_owner_user_document(
             "is_trial": False,
             "trial_start": None,
             "trial_end": None,
+            "trial_mode": None,
             "payment_method_attached": False,
+            "auto_renew": True,
+            "payment_fail_reminders_sent": [],
+            "comp": {
+                "enabled": False,
+                "kind": None,
+                "starts_at": None,
+                "ends_at": None,
+                "granted_by": None,
+                "granted_at": None,
+                "note": None,
+                "reminders_sent": [],
+            },
         },
         "enterprise": False,
         "enterprise_limits": {
@@ -699,23 +721,32 @@ async def signup(user: SignupRequest, request: Request):
 
         await pending_signup_collection.insert_one(pending_doc)
 
+        async def _store_signup_email_otp(
+            target_email: str, otp: int, expiry: datetime
+        ) -> None:
+            await pending_signup_collection.update_one(
+                {"email": target_email},
+                {
+                    "$set": {
+                        "email_otp_hash": hash_otp_value(
+                            target_email, otp, "signup"
+                        ),
+                        "email_otp_expires": expiry,
+                    }
+                },
+            )
+
+        async def _rollback_signup_email_otp(target_email: str) -> None:
+            await pending_signup_collection.delete_one({"email": target_email})
+
         try:
             email_result = await send_email_otp_secure(
                 request=request,
                 email=email,
                 captcha_token=user.captcha_token,
                 session_id=user.otp_session_id,
-            )
-            await pending_signup_collection.update_one(
-                {"email": email},
-                {
-                    "$set": {
-                        "email_otp_hash": hash_otp_value(
-                            email, email_result["otp"], "signup"
-                        ),
-                        "email_otp_expires": email_result["expiry"],
-                    }
-                },
+                store_otp=_store_signup_email_otp,
+                rollback_otp=_rollback_signup_email_otp,
             )
         except HTTPException:
             await pending_signup_collection.delete_one({"email": email})
@@ -1868,12 +1899,52 @@ async def send_email_otp(
                 pending=None,
             )
 
+    pending_id = pending["_id"] if pending else None
+
+    async def _store_send_email_otp(
+        target_email: str, otp: int, expiry: datetime
+    ) -> None:
+        if pending_id is not None:
+            await pending_signup_collection.update_one(
+                {"_id": pending_id},
+                {
+                    "$set": {
+                        "email_otp_hash": hash_otp_value(
+                            target_email, otp, "signup"
+                        ),
+                        "email_otp_expires": expiry,
+                        "updated_at": datetime.utcnow(),
+                    },
+                    "$unset": {"email_otp": ""},
+                },
+            )
+        else:
+            await _store_login_email_otp(target_email, otp, expiry)
+
+    async def _rollback_send_email_otp(target_email: str) -> None:
+        if pending_id is not None:
+            await pending_signup_collection.update_one(
+                {"_id": pending_id},
+                {
+                    "$set": {
+                        "email_otp_hash": None,
+                        "email_otp_expires": None,
+                        "updated_at": datetime.utcnow(),
+                    },
+                    "$unset": {"email_otp": ""},
+                },
+            )
+        else:
+            await _rollback_login_email_otp(target_email)
+
     try:
         email_result = await send_email_otp_secure(
             request=request,
             email=email,
             captcha_token=payload.captcha_token,
             session_id=payload.otp_session_id,
+            store_otp=_store_send_email_otp,
+            rollback_otp=_rollback_send_email_otp,
         )
     except HTTPException:
         raise
@@ -1882,28 +1953,6 @@ async def send_email_otp(
             status_code=400,
             detail=f"Failed to send verification email: {str(e)}",
         )
-
-    otp = email_result["otp"]
-    expiry = email_result["expiry"]
-
-    if pending:
-        await pending_signup_collection.update_one(
-            {"_id": pending["_id"]},
-            {
-                "$set": {
-                    "email_otp_hash": hash_otp_value(email, otp, "signup"),
-                    "email_otp_expires": expiry,
-                    "updated_at": datetime.utcnow()
-                },
-                "$unset": {"email_otp": ""},
-            }
-        )
-    else:
-        await otp_collection.delete_many({"email": email})
-        doc = otp_storage_fields(email, otp, "login_email")
-        doc["expires"] = expiry
-        doc["created_at"] = datetime.utcnow()
-        await otp_collection.insert_one(doc)
 
     return {
         "message": f"Verification code sent to {email}",
@@ -2150,12 +2199,17 @@ async def get_session(request: Request):
             "owner_id": str(user.get("owner_id") or user.get("_id")),
         }
         if role == "owner":
+            from app.billing.access import billing_session_flags
+
             billing = user.get("billing", {})
-            payload["billing_status"] = billing.get("status", "pending")
-            payload["requires_billing"] = billing.get("status") in [
-                "pending",
-                "blocked",
-            ]
+            flags = billing_session_flags(billing)
+            payload["billing_status"] = flags["billing_status"]
+            payload["requires_billing"] = flags["requires_billing"]
+            payload["billing_only"] = flags["billing_only"]
+            payload["is_complimentary"] = flags["is_complimentary"]
+            payload["auto_renew"] = flags["auto_renew"]
+            payload["trial_mode"] = flags["trial_mode"]
+            payload["lock_message"] = flags["lock_message"]
         return payload
 
     return {"authenticated": False}
@@ -2455,23 +2509,44 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
     if not owner:
         return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
-    # 🔒 Rate limit: 5 reset attempts per hour
-    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+    window_minutes = settings.AUTH_RATE_LIMIT_WINDOW_MINUTES
+    window_start = datetime.utcnow() - timedelta(minutes=window_minutes)
 
     attempts = await otp_collection.count_documents({
         "email": email,
         "type": "password_reset",
-        "created_at": {"$gte": one_hour_ago}
+        "created_at": {"$gte": window_start},
     })
 
     if attempts >= 5:
+        oldest = await otp_collection.find_one(
+            {
+                "email": email,
+                "type": "password_reset",
+                "created_at": {"$gte": window_start},
+            },
+            sort=[("created_at", 1)],
+        )
+        retry_after = window_minutes * 60
+        if oldest and oldest.get("created_at"):
+            created = oldest["created_at"]
+            if getattr(created, "tzinfo", None) is not None:
+                created = created.replace(tzinfo=None)
+            expires_at = created + timedelta(minutes=window_minutes)
+            retry_after = max(
+                int((expires_at - datetime.utcnow()).total_seconds()),
+                1,
+            )
         raise HTTPException(
             status_code=429,
-            detail="Maximum password reset attempts reached. Try again later."
+            detail=(
+                f"Too many password reset requests. "
+                f"Try again in {retry_after} seconds."
+            ),
+            headers={"Retry-After": str(retry_after)},
         )
 
     otp = randint(100000, 999999)
-
     expiry = datetime.utcnow() + timedelta(minutes=10)
 
     # Only one active reset OTP per email (avoid find_one matching a stale code)
@@ -2485,10 +2560,10 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
     reset_doc["created_at"] = datetime.utcnow()
     await otp_collection.insert_one(reset_doc)
 
-    # Send email
+    # Persist first, then send. On send failure: remove OTP and error out —
+    # never return success after failing to deliver the code.
     try:
         sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-
         message = Mail(
             from_email=settings.EMAIL_SENDER,
             to_emails=email,
@@ -2502,11 +2577,17 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
             </div>
             """
         )
-
         sg.send(message)
-
     except Exception as e:
         print("SendGrid error:", e)
+        await otp_collection.delete_many({
+            "email": email,
+            "type": "password_reset",
+        })
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to send password reset code. Please try again.",
+        ) from e
 
     return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
@@ -2586,6 +2667,8 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
     })
 
     log_device_fingerprint(request, "password_change", subject=email)
+
+    await reset_auth_rate_limit(request, key=f"reset-password:{email}")
 
     return {
         "message": "Password reset successful"
@@ -2708,6 +2791,8 @@ async def start_email_mfa(
             captcha_token=payload.captcha_token,
             session_id=payload.otp_session_id,
             skip_captcha=skip_captcha,
+            store_otp=_store_login_email_otp,
+            rollback_otp=_rollback_login_email_otp,
         )
     except HTTPException:
         raise
@@ -2716,8 +2801,6 @@ async def start_email_mfa(
             status_code=400,
             detail=f"Failed to send verification email: {str(e)}",
         )
-
-    await _store_login_email_otp(email, result["otp"], result["expiry"])
 
     return {
         "message": f"Verification code sent to {email}",

@@ -1,11 +1,19 @@
 from fastapi import HTTPException
 
-def enforce_billing(user: dict):
-    billing = user.get("billing", {})
-    status = billing.get("status")
+from app.billing.access import PAYMENT_LOCK_MESSAGE, is_billing_only
 
-    if status in ["blocked", "past_due"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Billing issue. Please update payment method."
-        )
+
+def enforce_billing(user: dict):
+    """
+    Soft check for /me-style endpoints: do not raise.
+    Prefer billing_session_flags + frontend billing_only gate.
+    Kept for backwards compatibility — use enforce_vault_access for vault APIs.
+    """
+    _ = user
+    return
+
+
+def enforce_billing_hard(user: dict):
+    from app.billing.access import enforce_vault_access
+
+    enforce_vault_access(user)

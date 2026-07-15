@@ -48,14 +48,22 @@ async def issue_owner_session(response: Response, user: dict) -> dict:
         max_age_seconds=_refresh_max_age(),
     )
 
-    billing = user.get("billing", {})
+    from app.billing.access import billing_session_flags
+
+    flags = billing_session_flags(user.get("billing", {}))
     return {
         "authenticated": True,
         "role": "owner",
         "email": user["email"],
         "mfa_required": False,
-        "billing_status": billing.get("status", "pending"),
-        "requires_billing": billing.get("status") in ["pending", "blocked"],
+        "billing_status": flags["billing_status"],
+        "requires_billing": flags["requires_billing"],
+        "billing_only": flags["billing_only"],
+        "is_complimentary": flags["is_complimentary"],
+        "comp_ends_at": flags["comp_ends_at"],
+        "auto_renew": flags["auto_renew"],
+        "trial_mode": flags["trial_mode"],
+        "lock_message": flags["lock_message"],
         "message": "Login successful",
     }
 

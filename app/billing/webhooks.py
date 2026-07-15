@@ -41,40 +41,64 @@ async def stripe_webhook(request: Request):
         "invoice.payment_failed",
         "customer.subscription.payment_failed",
     ]:
+        sub_id = data.get("subscription") or data.get("id")
+        now = datetime.utcnow()
         await users_collection.update_one(
-            {"billing.subscription_id": data["subscription"]},
+            {"billing.subscription_id": sub_id},
             {
                 "$set": {
                     "billing.status": "past_due",
-                    "updated_at": datetime.utcnow(),
+                    "billing.lock_reason": "payment_failed",
+                    "billing.locked_at": now,
+                    "billing.is_trial": False,
+                    "updated_at": now,
                 }
             },
         )
+        try:
+            from app.notifications.payment_lock_emails import send_payment_lock_email
+
+            user = await users_collection.find_one({"billing.subscription_id": sub_id})
+            if user:
+                await send_payment_lock_email(user=user, reason="payment_failed")
+        except Exception as exc:
+            print(f"payment_failed lock email error: {exc}")
 
     # ========================================================
     # PAYMENT SUCCESS → ACTIVE
     # ========================================================
     elif event_type == "invoice.payment_succeeded":
+        sub_id = data.get("subscription")
         user = await users_collection.find_one(
-        {"billing.subscription_id": data["subscription"]}
+            {"billing.subscription_id": sub_id}
         )
-        if user and user["billing"].get("is_trial"):
-            plan = user["billing"]["plan"]
+        # Never overwrite owner-granted complimentary access
+        if user and (user.get("billing") or {}).get("status") == "complimentary":
+            return {"status": "ok"}
 
-        await send_billing_email(
-            user=user,
-            event=BillingEmailEvent.PLAN_MONTHLY
-            if plan == "monthly"
-            else BillingEmailEvent.PLAN_YEARLY
-        )
+        plan = (user or {}).get("billing", {}).get("plan") or "monthly"
+        if user:
+            try:
+                await send_billing_email(
+                    user=user,
+                    event=BillingEmailEvent.PLAN_MONTHLY
+                    if plan == "monthly"
+                    else BillingEmailEvent.PLAN_YEARLY,
+                )
+            except Exception as exc:
+                print(f"invoice.payment_succeeded email error: {exc}")
 
         await users_collection.update_one(
-             {"billing.subscription_id": data["subscription"]},
-            {"$set": {
-                "billing.status": "active",
-                "billing.is_trial": False,
-                "updated_at": datetime.utcnow(),
-            }}
+            {"billing.subscription_id": sub_id},
+            {
+                "$set": {
+                    "billing.status": "active",
+                    "billing.is_trial": False,
+                    "billing.lock_reason": None,
+                    "billing.locked_at": None,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
         )
 
 
@@ -97,13 +121,22 @@ async def stripe_webhook(request: Request):
     # ---------------------------------------------------
     elif event_type == "customer.subscription.updated":
         pause = data.get("pause_collection")
+        # Do not clobber complimentary / past_due / blocked from Stripe "updated"
+        user = await users_collection.find_one(
+            {"billing.subscription_id": data["id"]}
+        )
+        current = (user or {}).get("billing", {}).get("status")
+        if current in ("complimentary", "past_due", "blocked"):
+            return {"status": "ok"}
 
         await users_collection.update_one(
             {"billing.subscription_id": data["id"]},
-            {"$set": {
-                "billing.status": "paused" if pause else "active",
-                "updated_at": datetime.utcnow()
-            }}
+            {
+                "$set": {
+                    "billing.status": "paused" if pause else "active",
+                    "updated_at": datetime.utcnow(),
+                }
+            },
         )
 
     # ========================================================
