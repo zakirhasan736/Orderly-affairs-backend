@@ -2425,6 +2425,12 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
 
     expiry = datetime.utcnow() + timedelta(minutes=10)
 
+    # Only one active reset OTP per email (avoid find_one matching a stale code)
+    await otp_collection.delete_many({
+        "email": email,
+        "type": "password_reset",
+    })
+
     reset_doc = otp_storage_fields(email, otp, "password_reset")
     reset_doc["expires"] = expiry
     reset_doc["created_at"] = datetime.utcnow()
@@ -2460,11 +2466,9 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
 # ============================================================
 @router.post("/reset-password")
 async def owner_reset_password(payload: OwnerResetPassword, request: Request):
-    from app.auth.captcha import verify_captcha_token
-
-    if not verify_captcha_token(payload.captcha_token, get_client_ip(request)):
-        raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
-
+    # Captcha is required on /request-password-reset only. Turnstile tokens are
+    # single-use, so requiring captcha again here caused systematic 400s after a
+    # successful code send. The emailed OTP is the second factor for this step.
     email = payload.email.lower().strip()
 
     await enforce_auth_rate_limit(request, key=f"reset-password:{email}")
@@ -2484,12 +2488,13 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
             generic_error=PASSWORD_RESET_GENERIC_ERROR,
         )
 
-    record = await otp_collection.find_one({
-        "email": email,
-        "type": "password_reset"
-    })
+    record = await otp_collection.find_one(
+        {"email": email, "type": "password_reset"},
+        sort=[("created_at", -1)],
+    )
 
     if not record or not verify_stored_otp(record, payload.otp):
+        print(f"reset-password 400: invalid otp for {email}")
         await record_otp_verify_attempt(
             request=request,
             scope="password_reset",
@@ -2502,6 +2507,7 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
     if expires is not None and getattr(expires, "tzinfo", None) is not None:
         expires = expires.replace(tzinfo=None)
     if expires is None or datetime.utcnow() > expires:
+        print(f"reset-password 400: expired otp for {email}")
         raise HTTPException(status_code=400, detail=PASSWORD_RESET_GENERIC_ERROR)
 
     await record_otp_verify_attempt(
