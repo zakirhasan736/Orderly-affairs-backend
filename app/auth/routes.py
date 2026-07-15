@@ -1959,8 +1959,13 @@ async def send_email_otp(
         )
 
     return {
-        "message": f"Verification code sent to {email}",
+        "message": (
+            f"Verification code already sent to {email}"
+            if email_result.get("already_sent")
+            else f"Verification code sent to {email}"
+        ),
         "cooldown_seconds": email_result["cooldown_seconds"],
+        "already_sent": bool(email_result.get("already_sent")),
     }
 
 
@@ -2745,7 +2750,7 @@ async def start_sms_mfa(
     )
 
     try:
-        await send_otp_sms_secure(
+        sms_result = await send_otp_sms_secure(
             request=request,
             phone=phone,
             email=payload.email.lower().strip(),
@@ -2761,8 +2766,15 @@ async def start_sms_mfa(
     return {
         "requires_phone": False,
         "phone": phone,
-        "message": "OTP sent",
-        "cooldown_seconds": settings.OTP_PHONE_COOLDOWN_SECONDS,
+        "message": (
+            "OTP already sent"
+            if sms_result.get("already_sent")
+            else "OTP sent"
+        ),
+        "cooldown_seconds": sms_result.get(
+            "cooldown_seconds", settings.OTP_PHONE_COOLDOWN_SECONDS
+        ),
+        "already_sent": bool(sms_result.get("already_sent")),
     }
 # ============================================================
 # START EMAIL MFA (login or Vault Settings)
@@ -2813,8 +2825,13 @@ async def start_email_mfa(
         )
 
     return {
-        "message": f"Verification code sent to {email}",
+        "message": (
+            f"Verification code already sent to {email}"
+            if result.get("already_sent")
+            else f"Verification code sent to {email}"
+        ),
         "cooldown_seconds": result["cooldown_seconds"],
+        "already_sent": bool(result.get("already_sent")),
     }
 
 # ============================================================
@@ -2838,7 +2855,7 @@ async def resend_sms_mfa(payload: ResendSignupSMSRequest, request: Request):
             raise HTTPException(status_code=400, detail="Phone number not configured")
 
         try:
-            await send_otp_sms_secure(
+            sms_result = await send_otp_sms_secure(
                 request=request,
                 phone=phone,
                 email=email,
@@ -2851,9 +2868,16 @@ async def resend_sms_mfa(payload: ResendSignupSMSRequest, request: Request):
             raise HTTPException(status_code=400, detail=str(e))
 
         return {
-            "message": "Signup OTP resent successfully",
+            "message": (
+                "Signup OTP already sent"
+                if sms_result.get("already_sent")
+                else "Signup OTP resent successfully"
+            ),
             "phone": phone,
-            "cooldown_seconds": settings.OTP_PHONE_COOLDOWN_SECONDS,
+            "cooldown_seconds": sms_result.get(
+                "cooldown_seconds", settings.OTP_PHONE_COOLDOWN_SECONDS
+            ),
+            "already_sent": bool(sms_result.get("already_sent")),
         }
 
     # real user login flow
@@ -2874,7 +2898,7 @@ async def resend_sms_mfa(payload: ResendSignupSMSRequest, request: Request):
         raise HTTPException(status_code=400, detail="Phone number not configured")
 
     try:
-        await send_otp_sms_secure(
+        sms_result = await send_otp_sms_secure(
             request=request,
             phone=phone,
             email=email,
@@ -2887,9 +2911,16 @@ async def resend_sms_mfa(payload: ResendSignupSMSRequest, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
     return {
-        "message": "OTP resent successfully",
+        "message": (
+            "OTP already sent"
+            if sms_result.get("already_sent")
+            else "OTP resent successfully"
+        ),
         "phone": phone,
-        "cooldown_seconds": settings.OTP_PHONE_COOLDOWN_SECONDS,
+        "cooldown_seconds": sms_result.get(
+            "cooldown_seconds", settings.OTP_PHONE_COOLDOWN_SECONDS
+        ),
+        "already_sent": bool(sms_result.get("already_sent")),
     }
 # ============================================================
 # 4️⃣ VERIFY OTP (FINAL LOGIN STEP)

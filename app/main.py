@@ -104,6 +104,10 @@ app.add_middleware(
 )
 @app.on_event("startup")
 async def startup():
+    from app.auth.otp_security import ensure_otp_send_lock_index
+
+    await ensure_otp_send_lock_index()
+
     # 1️⃣ Start APScheduler-based NOK LETTERS
     start_nok_letter_scheduler()
 

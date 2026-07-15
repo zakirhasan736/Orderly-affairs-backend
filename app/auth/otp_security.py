@@ -10,10 +10,16 @@ from fastapi import HTTPException, Request
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
+from pymongo.errors import DuplicateKeyError
+
 from app.auth.captcha import verify_captcha_token
 from app.auth.twilio_verify import send_verification_code
 from app.config import settings
-from app.database import otp_fraud_logs_collection, otp_verify_locks_collection
+from app.database import (
+    otp_fraud_logs_collection,
+    otp_send_locks_collection,
+    otp_verify_locks_collection,
+)
 
 # Persist OTP before delivery; rollback if the email fails to send.
 EmailOtpStore = Callable[[str, int, datetime], Awaitable[None]]
@@ -72,6 +78,100 @@ def ensure_country_allowed(phone_e164: str) -> str:
             detail=f"SMS verification is not available for phone numbers in {country}.",
         )
     return country
+
+
+def _otp_send_lock_key(channel: str, destination: str) -> str:
+    return f"{channel}:{(destination or '').lower().strip()}"
+
+
+async def ensure_otp_send_lock_index() -> None:
+    try:
+        await otp_send_locks_collection.create_index("key", unique=True)
+    except Exception as exc:
+        print(f"otp_send_locks index ensure failed: {exc}")
+
+
+_otp_send_lock_index_ready = False
+
+
+async def claim_otp_send_slot(
+    *,
+    channel: str,
+    destination: str,
+    cooldown_seconds: int,
+) -> tuple[bool, int]:
+    """
+    Atomically claim one OTP delivery for this destination.
+
+    Prevents concurrent requests from both passing cooldown checks and
+    delivering the same code twice (Twilio Verify reuses the pending code).
+
+    Returns (claimed, cooldown_remaining_seconds).
+    """
+    global _otp_send_lock_index_ready
+    if not _otp_send_lock_index_ready:
+        await ensure_otp_send_lock_index()
+        _otp_send_lock_index_ready = True
+
+    now = datetime.utcnow()
+    key = _otp_send_lock_key(channel, destination)
+    hold_for = max(int(cooldown_seconds), 1)
+    new_until = now + timedelta(seconds=hold_for)
+
+    updated = await otp_send_locks_collection.update_one(
+        {"key": key, "lockedUntil": {"$lte": now}},
+        {
+            "$set": {
+                "lockedUntil": new_until,
+                "updatedAt": now,
+                "channel": channel,
+                "destination": destination,
+            }
+        },
+    )
+    if updated.matched_count:
+        return True, hold_for
+
+    try:
+        await otp_send_locks_collection.insert_one(
+            {
+                "key": key,
+                "channel": channel,
+                "destination": destination,
+                "lockedUntil": new_until,
+                "createdAt": now,
+                "updatedAt": now,
+            }
+        )
+        return True, hold_for
+    except DuplicateKeyError:
+        existing = await otp_send_locks_collection.find_one({"key": key})
+        locked_until = existing.get("lockedUntil") if existing else None
+        if locked_until and locked_until > now:
+            remaining = max(int((locked_until - now).total_seconds()), 1)
+            return False, remaining
+
+        updated = await otp_send_locks_collection.update_one(
+            {"key": key, "lockedUntil": {"$lte": now}},
+            {
+                "$set": {
+                    "lockedUntil": new_until,
+                    "updatedAt": now,
+                    "channel": channel,
+                    "destination": destination,
+                }
+            },
+        )
+        if updated.matched_count:
+            return True, hold_for
+        return False, hold_for
+
+
+async def release_otp_send_slot(*, channel: str, destination: str) -> None:
+    """Release a send claim after a failed delivery so the user can retry."""
+    await otp_send_locks_collection.delete_one(
+        {"key": _otp_send_lock_key(channel, destination)}
+    )
 
 
 async def log_otp_event(
@@ -413,10 +513,25 @@ async def send_otp_sms_secure(
         skip_captcha=skip_captcha,
     )
 
+    claimed, remaining = await claim_otp_send_slot(
+        channel="sms",
+        destination=phone,
+        cooldown_seconds=settings.OTP_PHONE_COOLDOWN_SECONDS,
+    )
+    if not claimed:
+        # Idempotent success — do not send another Twilio SMS (same code)
+        return {
+            "phone": phone,
+            "cooldown_seconds": remaining,
+            "already_sent": True,
+            "twilio_sid": None,
+        }
+
     try:
         verification = send_verification_code(phone)
         twilio_sid = getattr(verification, "sid", None)
     except Exception as exc:
+        await release_otp_send_slot(channel="sms", destination=phone)
         await log_otp_event(
             channel="sms",
             phone=phone,
@@ -453,6 +568,7 @@ async def send_otp_sms_secure(
     return {
         "phone": phone,
         "cooldown_seconds": settings.OTP_PHONE_COOLDOWN_SECONDS,
+        "already_sent": False,
         "twilio_sid": twilio_sid,
     }
 
@@ -846,17 +962,38 @@ async def send_email_otp_secure(
         skip_captcha=skip_captcha,
     )
     normalized = context["email"]
+
+    claimed, remaining = await claim_otp_send_slot(
+        channel="email",
+        destination=normalized,
+        cooldown_seconds=settings.OTP_EMAIL_COOLDOWN_SECONDS,
+    )
+    if not claimed:
+        # Idempotent success — do not generate/send another email with a new code
+        return {
+            "email": normalized,
+            "otp": None,
+            "expiry": None,
+            "cooldown_seconds": remaining,
+            "already_sent": True,
+        }
+
     otp = randint(100000, 999999)
     expiry = datetime.utcnow() + timedelta(minutes=10)
 
     # Persist before send so a failed DB write never leaves an emailed code
     # that the API reported as failed — and so send never happens if store fails.
     if store_otp is not None:
-        await store_otp(normalized, otp, expiry)
+        try:
+            await store_otp(normalized, otp, expiry)
+        except Exception:
+            await release_otp_send_slot(channel="email", destination=normalized)
+            raise
 
     try:
         deliver_email_otp(normalized, otp)
     except Exception as exc:
+        await release_otp_send_slot(channel="email", destination=normalized)
         if rollback_otp is not None:
             try:
                 await rollback_otp(normalized)
@@ -899,6 +1036,7 @@ async def send_email_otp_secure(
         "otp": otp,
         "expiry": expiry,
         "cooldown_seconds": settings.OTP_EMAIL_COOLDOWN_SECONDS,
+        "already_sent": False,
     }
 
 
