@@ -1,6 +1,7 @@
 """HttpOnly cookie helpers and token extraction (cookie-first, Bearer fallback)."""
 
 from fastapi import HTTPException, Request
+from urllib.parse import urlparse
 
 OWNER_ACCESS_COOKIE = "auth_token"
 OWNER_REFRESH_COOKIE = "oa_refresh_token"
@@ -14,6 +15,39 @@ def cookie_secure() -> bool:
     return settings.APP_ENV != "development"
 
 
+def cookie_domain() -> str | None:
+    """Share auth cookies across portal + API subdomains in production.
+
+    Without Domain=, Set-Cookie is host-only on api.* so the Next.js portal
+    middleware never sees auth_token and redirects /dashboard → login after
+    a successful verify-email / login.
+    """
+    from app.config import settings
+
+    explicit = (getattr(settings, "COOKIE_DOMAIN", None) or "").strip()
+    if explicit:
+        return explicit
+
+    if settings.APP_ENV == "development":
+        return None
+
+    try:
+        host = urlparse(settings.FRONTEND_URL).hostname or ""
+    except Exception:
+        host = ""
+
+    # portal.orderly-affairs.com → .orderly-affairs.com
+    parts = host.split(".")
+    if len(parts) >= 2:
+        return "." + ".".join(parts[-2:])
+    return None
+
+
+def cookie_samesite() -> str:
+    # Lax works across portal ↔ api same registrable domain and top-level nav
+    return "lax"
+
+
 def set_auth_cookie(
     response,
     *,
@@ -21,15 +55,19 @@ def set_auth_cookie(
     value: str,
     max_age_seconds: int,
 ) -> None:
-    response.set_cookie(
-        key=name,
-        value=value,
-        max_age=max_age_seconds,
-        httponly=True,
-        secure=cookie_secure(),
-        samesite="strict",
-        path="/",
-    )
+    kwargs: dict = {
+        "key": name,
+        "value": value,
+        "max_age": max_age_seconds,
+        "httponly": True,
+        "secure": cookie_secure(),
+        "samesite": cookie_samesite(),
+        "path": "/",
+    }
+    domain = cookie_domain()
+    if domain:
+        kwargs["domain"] = domain
+    response.set_cookie(**kwargs)
 
 
 def clear_auth_cookies(response, *, owner: bool = True, nok: bool = False) -> None:
@@ -39,7 +77,10 @@ def clear_auth_cookies(response, *, owner: bool = True, nok: bool = False) -> No
     if nok:
         names.extend([NOK_ACCESS_COOKIE, NOK_REFRESH_COOKIE])
 
+    domain = cookie_domain()
     for name in names:
+        if domain:
+            response.delete_cookie(key=name, path="/", domain=domain)
         response.delete_cookie(key=name, path="/")
 
 

@@ -21,7 +21,19 @@ Turnstile protects OTP send/verify flows from bots. You need **two** keys — on
 
 In development, Turnstile can be left empty: the frontend bypasses the widget and the backend can skip verification when no secret is configured.
 
-### Emergency: Turnstile broken (forgot password / signup return 400)
+### Cookie domain (portal + API subdomains)
+
+Auth cookies are set by `api.orderly-affairs.com`. The portal middleware also reads `auth_token`. In production the API automatically sets `Domain=.orderly-affairs.com` (derived from `FRONTEND_URL`) so cookies are shared across subdomains.
+
+Optional override in backend `.env`:
+
+```env
+COOKIE_DOMAIN=.orderly-affairs.com
+FRONTEND_URL=https://portal.orderly-affairs.com
+```
+
+If this is wrong, verify-email / login succeeds but `/dashboard` immediately redirects back to login.
+
 
 If the portal shows `/cdn-cgi/challenge-platform` 404s and auth CAPTCHA calls return 400, temporarily disable captcha on **both** sides, redeploy, then re-enable after fixing Cloudflare Turnstile keys/hostnames:
 

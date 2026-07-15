@@ -69,9 +69,12 @@ class Settings(BaseSettings):
     OTP_VERIFY_LOCK_MINUTES: int = 30
 
     STRIPE_WEBHOOK_SECRET: str
-     # === Base url Info ===
+    # === Base url Info ===
     FRONTEND_URL: str
-    
+    # Optional shared cookie domain, e.g. .orderly-affairs.com
+    # (so portal middleware can read cookies set by api.*)
+    COOKIE_DOMAIN: str | None = None
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # ignore stray lines that caused earlier dotenv errors
