@@ -117,10 +117,17 @@ def _as_naive_utc(value: datetime | None) -> datetime | None:
 
 
 def _raise_otp_rate_limit(*, detail: str, retry_after: int, max_wait: int | None = None) -> None:
-    """429 with a parseable message and Retry-After for the portal countdown."""
+    """429 with a parseable message and Retry-After (hard-capped, never multi-hour)."""
+    ceiling = settings.AUTH_RATE_LIMIT_MAX_LOCK_SECONDS
     wait = max(int(retry_after), 1)
     if max_wait is not None:
         wait = min(wait, max_wait)
+    wait = min(wait, ceiling)
+    # After a too-many trip, never ask for less than the short resend cooldown
+    # when the computed remaining somehow collapses oddly.
+    first = settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS
+    if wait > first:
+        wait = min(wait, ceiling)
     raise HTTPException(
         status_code=429,
         detail=f"{detail} Try again in {wait} seconds.",
@@ -137,6 +144,8 @@ async def _seconds_until_oldest_send_slot(
     channel: str | None = None,
 ) -> int:
     now = datetime.utcnow()
+    # Never make the user wait longer than the configured hard ceiling
+    cap = min(window_seconds, settings.AUTH_RATE_LIMIT_MAX_LOCK_SECONDS)
     query: dict[str, Any] = {
         field: value,
         "action": "send",
@@ -153,16 +162,15 @@ async def _seconds_until_oldest_send_slot(
         sort=[("createdAt", 1)],
     )
     if not oldest:
-        return min(max(window_seconds, 1), window_seconds)
+        return min(settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS, cap)
 
     created = _as_naive_utc(oldest.get("createdAt"))
     if created is None or created > now:
-        # Corrupt / future timestamps must not produce multi-day waits
-        return min(max(window_seconds, 1), 600)
+        return min(settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS, cap)
 
     expires_at = created + timedelta(seconds=window_seconds)
     remaining = int((expires_at - now).total_seconds())
-    return min(max(remaining, 1), window_seconds)
+    return min(max(remaining, 1), cap)
 
 
 async def _count_recent_sends(
@@ -276,9 +284,9 @@ async def enforce_otp_send_limits(
             action="send",
             detail="phone_hourly_limit",
         )
-        raise HTTPException(
-            status_code=429,
-            detail="Too many OTP requests for this phone number. Try again later.",
+        _raise_otp_rate_limit(
+            detail="Too many OTP requests for this phone number.",
+            retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
         )
 
     phone_day = await _count_recent_sends(
@@ -301,9 +309,9 @@ async def enforce_otp_send_limits(
             action="send",
             detail="phone_daily_limit",
         )
-        raise HTTPException(
-            status_code=429,
+        _raise_otp_rate_limit(
             detail="Daily OTP limit reached for this phone number.",
+            retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
         )
 
     ip_hour = await _count_recent_sends(
@@ -325,9 +333,9 @@ async def enforce_otp_send_limits(
             action="send",
             detail="ip_hourly_limit",
         )
-        raise HTTPException(
-            status_code=429,
-            detail="Too many OTP requests from this network. Try again later.",
+        _raise_otp_rate_limit(
+            detail="Too many OTP requests from this network.",
+            retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
         )
 
     ip_day = await _count_recent_sends(
@@ -349,9 +357,9 @@ async def enforce_otp_send_limits(
             action="send",
             detail="ip_daily_limit",
         )
-        raise HTTPException(
-            status_code=429,
+        _raise_otp_rate_limit(
             detail="Daily OTP limit reached from this network.",
+            retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
         )
 
     if resolved_session != "anonymous":
@@ -373,9 +381,9 @@ async def enforce_otp_send_limits(
                 action="send",
                 detail="session_hourly_limit",
             )
-            raise HTTPException(
-                status_code=429,
-                detail="Too many OTP requests from this device. Try again later.",
+            _raise_otp_rate_limit(
+                detail="Too many OTP requests from this device.",
+                retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
             )
 
     return {
@@ -708,16 +716,10 @@ async def enforce_email_otp_send_limits(
             action="send",
             detail="email_hourly_limit",
         )
-        retry = await _seconds_until_oldest_send_slot(
-            field="email",
-            value=normalized,
-            since=hour_since,
-            window_seconds=3600,
-            channel="email",
-        )
         _raise_otp_rate_limit(
             detail="Too many code requests for this email.",
-            retry_after=retry,
+            # Soft pause — never multi-hour; after 45s they may retry
+            retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
         )
 
     day_since = now - timedelta(days=1)
@@ -739,16 +741,9 @@ async def enforce_email_otp_send_limits(
             action="send",
             detail="email_daily_limit",
         )
-        retry = await _seconds_until_oldest_send_slot(
-            field="email",
-            value=normalized,
-            since=day_since,
-            window_seconds=86400,
-            channel="email",
-        )
         _raise_otp_rate_limit(
             detail="Daily code limit reached for this email.",
-            retry_after=retry,
+            retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
         )
 
     ip_hour = await _count_recent_sends(
@@ -768,15 +763,9 @@ async def enforce_email_otp_send_limits(
             action="send",
             detail="ip_hourly_limit",
         )
-        retry = await _seconds_until_oldest_send_slot(
-            field="ip",
-            value=ip,
-            since=hour_since,
-            window_seconds=3600,
-        )
         _raise_otp_rate_limit(
             detail="Too many code requests from this network.",
-            retry_after=retry,
+            retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
         )
 
     ip_day = await _count_recent_sends(
@@ -796,15 +785,9 @@ async def enforce_email_otp_send_limits(
             action="send",
             detail="ip_daily_limit",
         )
-        retry = await _seconds_until_oldest_send_slot(
-            field="ip",
-            value=ip,
-            since=day_since,
-            window_seconds=86400,
-        )
         _raise_otp_rate_limit(
             detail="Daily code limit reached from this network.",
-            retry_after=retry,
+            retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
         )
 
     if resolved_session != "anonymous":
@@ -825,15 +808,9 @@ async def enforce_email_otp_send_limits(
                 action="send",
                 detail="session_hourly_limit",
             )
-            retry = await _seconds_until_oldest_send_slot(
-                field="sessionId",
-                value=resolved_session,
-                since=hour_since,
-                window_seconds=3600,
-            )
             _raise_otp_rate_limit(
                 detail="Too many code requests from this device.",
-                retry_after=retry,
+                retry_after=settings.AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS,
             )
 
     return {

@@ -2527,7 +2527,7 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
             },
             sort=[("created_at", 1)],
         )
-        retry_after = window_minutes * 60
+            retry_after = window_minutes * 60
         if oldest and oldest.get("created_at"):
             created = oldest["created_at"]
             if getattr(created, "tzinfo", None) is not None:
@@ -2537,6 +2537,12 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
                 int((expires_at - datetime.utcnow()).total_seconds()),
                 1,
             )
+        # Never longer than 15–30 minutes; prefer short pause
+        retry_after = min(
+            retry_after,
+            settings.AUTH_RATE_LIMIT_MAX_LOCK_SECONDS,
+            settings.OTP_BURST_WINDOW_MINUTES * 60,
+        )
         raise HTTPException(
             status_code=429,
             detail=(

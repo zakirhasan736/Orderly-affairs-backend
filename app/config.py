@@ -18,9 +18,12 @@ class Settings(BaseSettings):
     AES_KEY_ROTATION_DAYS: int = 365
 
     # === Auth rate limiting ===
-    # Generous limits so Turnstile retries / MFA don't lock users out quickly
+    # Short windows — never multi-hour locks for login / OTP
     AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 40
-    AUTH_RATE_LIMIT_WINDOW_MINUTES: int = 10
+    AUTH_RATE_LIMIT_WINDOW_MINUTES: int = 15
+    # Absolute ceiling for any Retry-After (OTP / auth / verify)
+    AUTH_RATE_LIMIT_MAX_LOCK_SECONDS: int = 1800  # 30 minutes
+    AUTH_RATE_LIMIT_FIRST_LOCK_SECONDS: int = 45
 
     # Load keys from either .env or /keys folder
     JWT_PRIVATE_KEY: str | None = None
@@ -57,17 +60,17 @@ class Settings(BaseSettings):
     TURNSTILE_SECRET_KEY: str | None = None
     OTP_ALLOWED_COUNTRIES: str = "*"
     OTP_PHONE_COOLDOWN_SECONDS: int = 45
-    OTP_PHONE_MAX_PER_HOUR: int = 12
-    OTP_PHONE_MAX_PER_DAY: int = 30
+    OTP_PHONE_MAX_PER_HOUR: int = 20
+    OTP_PHONE_MAX_PER_DAY: int = 60
     OTP_EMAIL_COOLDOWN_SECONDS: int = 45
-    # Primary burst window for OTP sends (matches auth rate-limit window)
-    OTP_BURST_WINDOW_MINUTES: int = 10
-    OTP_EMAIL_MAX_PER_BURST: int = 8
-    OTP_EMAIL_MAX_PER_HOUR: int = 12
-    OTP_EMAIL_MAX_PER_DAY: int = 30
-    OTP_IP_MAX_PER_HOUR: int = 40
-    OTP_IP_MAX_PER_DAY: int = 120
-    OTP_SESSION_MAX_PER_HOUR: int = 15
+    # Burst window: after too many sends, wait at most this window (not hours/days)
+    OTP_BURST_WINDOW_MINUTES: int = 15
+    OTP_EMAIL_MAX_PER_BURST: int = 6
+    OTP_EMAIL_MAX_PER_HOUR: int = 20
+    OTP_EMAIL_MAX_PER_DAY: int = 60
+    OTP_IP_MAX_PER_HOUR: int = 60
+    OTP_IP_MAX_PER_DAY: int = 200
+    OTP_SESSION_MAX_PER_HOUR: int = 30
     OTP_VERIFY_MAX_ATTEMPTS: int = 8
     OTP_VERIFY_LOCK_MINUTES: int = 15
 
