@@ -1,4 +1,4 @@
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, RootModel, model_validator
 from typing import Dict, List, Optional
 
 
@@ -10,8 +10,25 @@ class UploadedFile(BaseModel):
 
 
 class UploadField(BaseModel):
+    text: Optional[str] = None
     files: List[UploadedFile] = []
-    _deleted_files: List[str] = []
+    deleted_files: List[str] = []
+
+    model_config = {"extra": "ignore"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_string_or_object(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return {"text": value, "files": []}
+        if isinstance(value, dict):
+            data = dict(value)
+            if "_deleted_files" in data and "deleted_files" not in data:
+                data["deleted_files"] = data.pop("_deleted_files")
+            return data
+        return value
 
 
 class Section6AData(BaseModel):
@@ -28,6 +45,9 @@ class Section6AData(BaseModel):
 
     mortgage_lienholder_landlord: Optional[UploadField] = None
     payment_methods: Optional[str] = None
+    mortgage_maturity_date: Optional[str] = None
+    lease_end_date: Optional[str] = None
+    property_tax_due_date: Optional[str] = None
     property_deeds_titles: Optional[UploadField] = None
     mortgage_lease_statement: Optional[UploadField] = None
     second_mortgage_heloc: Optional[UploadField] = None

@@ -13,11 +13,16 @@ from app.billing.trial_scheduler import start_trial_scheduler
 from app.kits.routes_core import router as kit_router
 from app.letters.routes import router as letters_router
 from app.letters.scheduler import start_scheduler as start_nok_letter_scheduler
+from app.notifications.section_expiry_scheduler import (
+    start_section_expiry_scheduler,
+)
+from app.sections.section_meta_routes import router as section_meta_router
 from app.billing.routes import billing_router
 from app.nexrkinmessage.routes import router as message_of_nextkin_letters_router
 from app.nexrkinmessage.scheduler import check_scheduled_letters
 from app.billing.webhooks import webhook_router
 from app.admin.billing import admin_billing_router
+from app.support.routes import support_router, admin_support_router
 from app.sections.section1_vital_information.router import (
     router as section1_router
 )
@@ -116,6 +121,9 @@ async def startup():
 
     # 3️⃣ Owner inactivity check (90 days + 15 day follow-up)
     start_owner_inactivity_scheduler()
+
+    # 4️⃣ Expiry / renewal reminders for ALL sections (10 → 5 → 1 → 0 days)
+    start_section_expiry_scheduler()
     
     # 2️⃣ Start simple async loop for messages
     async def message_scheduler_loop():
@@ -148,9 +156,12 @@ app.include_router(auth_router)
 app.include_router(billing_router)
 app.include_router(webhook_router)
 app.include_router(admin_billing_router)
+app.include_router(support_router)
+app.include_router(admin_support_router)
 
 app.include_router(kit_router)
 app.include_router(letters_router)
+app.include_router(section_meta_router)
 app.include_router(section1_router)
 app.include_router(section5_router)
 app.include_router(section6_router)

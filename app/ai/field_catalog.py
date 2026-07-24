@@ -7,7 +7,14 @@ def _humanize_key(key: str) -> str:
 
 def format_field_catalog_prompt(catalog: list[dict] | None) -> str:
     if not catalog:
-        return ""
+        return (
+            "\n\nForm filling rules:\n"
+            "- Use the exact field keys required by the response schema patch.\n"
+            "- Put extracted values into the closest matching form fields.\n"
+            "- For note/location/document fields, return a clear plain string.\n"
+            "- Skip fields with no supporting evidence in the document.\n"
+            "- Fill EVERY field that the document supports — do not leave readable data unused.\n"
+        )
 
     lines: list[str] = []
 
@@ -26,12 +33,17 @@ def format_field_catalog_prompt(catalog: list[dict] | None) -> str:
         label = (item.get("label") or "").strip() or _humanize_key(str(key))
         helper = (item.get("helperText") or item.get("helper_text") or "").strip()
         placeholder = (item.get("placeholder") or "").strip()
+        options = item.get("options") if isinstance(item.get("options"), list) else []
 
         line = f'- {key} ("{label}") type={field_type}'
         if helper:
             line += f' — {helper}'
         if placeholder:
             line += f' — placeholder: "{placeholder}"'
+        if options:
+            option_text = ", ".join(str(opt) for opt in options if opt is not None)
+            if option_text:
+                line += f' — allowed options: [{option_text}]'
 
         lines.append(line)
 
@@ -39,14 +51,77 @@ def format_field_catalog_prompt(catalog: list[dict] | None) -> str:
         return ""
 
     return (
-        "\n\nForm field catalog for this upload area. "
-        "Use these exact keys in patch. "
-        "Match values to the label/helper meaning even when the document uses different wording.\n"
+        "\n\nForm field catalog for this upload area.\n"
+        "Placement rules (critical):\n"
+        "1) First understand what each extracted value MEANS (even if the document wording differs).\n"
+        "2) Compare that meaning to each field's key, label, helper text, and allowed options.\n"
+        "3) Place the value into the ONE exact matching field key — do not confuse similar labels.\n"
+        "4) Use these exact keys in patch. Never invent alternate key names when a catalog key fits.\n"
+        "5) If two fields look similar, prefer the stronger label/helper match; leave the other null.\n"
+        "6) Fill ALL fields the document supports. Aim to place every readable fact into a responsible field.\n"
+        "7) For Dropdown / RadioButtons / Select fields, return ONE of the allowed option strings exactly (best meaning match).\n"
+        "8) For Checkbox fields, return true/false (or yes/no). For single-option RadioButtons (checkbox UI), return that option string when true.\n"
+        "9) Field key names in the document may differ — always choose the catalog field whose LABEL or OPTIONS best match the fact.\n"
         + "\n".join(lines)
         + "\n- For TextInputWithUpload fields, return a plain string (notes, location, or extracted text).\n"
-        + "- For Dropdown fields, use one of the allowed option values when possible.\n"
+        + "- For Dropdown / RadioButtons fields, use one of the allowed option values when possible.\n"
         + "- Skip fields with no supporting evidence in the document.\n"
     )
+
+
+def build_default_field_catalog_from_schema(schema: dict | None) -> list[dict]:
+    """Build a lightweight catalog from JSON schema patch properties."""
+    if not isinstance(schema, dict):
+        return []
+
+    patch_schema = (
+        (schema.get("properties") or {}).get("patch")
+        if isinstance(schema.get("properties"), dict)
+        else None
+    )
+    if not isinstance(patch_schema, dict):
+        return []
+
+    catalog: list[dict] = []
+
+    def walk(node: dict, prefix: str = ""):
+        props = node.get("properties")
+        if not isinstance(props, dict):
+            return
+
+        for key, child in props.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if not isinstance(child, dict):
+                continue
+
+            child_type = child.get("type")
+            if child_type == "object" or (
+                isinstance(child_type, list) and "object" in child_type
+            ):
+                if isinstance(child.get("properties"), dict):
+                    walk(child, path)
+                continue
+
+            if child_type == "array":
+                items = child.get("items")
+                if isinstance(items, dict) and isinstance(items.get("properties"), dict):
+                    walk(items, path)
+                continue
+
+            leaf = path.split(".")[-1]
+            catalog.append(
+                {
+                    "key": leaf,
+                    "label": _humanize_key(leaf),
+                    "type": "TextInput",
+                    "helperText": "",
+                    "placeholder": "",
+                    "options": [],
+                }
+            )
+
+    walk(patch_schema)
+    return catalog
 
 
 def _flatten_patch_values(patch: object, prefix: str = "") -> list[tuple[str, str]]:
@@ -131,6 +206,7 @@ SECTION_PREVIEW_FIELD_KEYS: dict[str, list[str]] = {
         "model",
         "vin",
         "license_plate",
+        "registration_expiry",
         "insurance_company",
         "insurance_policy",
     ],
@@ -144,6 +220,7 @@ SECTION_PREVIEW_FIELD_KEYS: dict[str, list[str]] = {
         "policy_type",
         "policy_number",
         "policy_company",
+        "policy_expiry",
         "insurance_company",
         "provider",
         "coverage_amount",

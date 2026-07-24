@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     # (so portal middleware can read cookies set by api.*)
     COOKIE_DOMAIN: str | None = None
 
+    # Comma-separated owner emails allowed to use /admin/support inbox
+    # (in addition to JWT role=admin).
+    ADMIN_EMAILS: str = ""
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # ignore stray lines that caused earlier dotenv errors

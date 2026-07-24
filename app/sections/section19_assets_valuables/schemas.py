@@ -44,9 +44,11 @@ class RealEstateProperty(BaseModel):
     purchase_info: Optional[str] = None
     current_value: Optional[str] = None
     mortgage_info: Optional[str] = None
+    mortgage_maturity_date: Optional[str] = None
     rental_info: Optional[str] = None
     property_manager: Optional[UploadField] = None
     property_taxes: Optional[UploadField] = None
+    property_tax_due_date: Optional[str] = None
     insurance_info: Optional[UploadField] = None
     intended_disposition: Optional[str] = None
     property_documents: Optional[UploadField] = None

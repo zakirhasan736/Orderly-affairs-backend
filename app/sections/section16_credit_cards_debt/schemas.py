@@ -52,6 +52,8 @@ class Debt(BaseModel):
     current_balance: Optional[str] = None
     monthly_payment: Optional[str] = None
     payment_due_date: Optional[str] = None
+    next_payment_due_date: Optional[str] = None
+    loan_maturity_date: Optional[str] = None
     interest_rate: Optional[str] = None
 
     payment_method: Optional[str] = None

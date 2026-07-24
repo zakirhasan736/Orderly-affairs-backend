@@ -10,6 +10,7 @@ You are extracting data for the 'Insurance Policies' section of an estate planni
 
 Return JSON only.
 Do not guess.
+Read the uploaded document carefully (including OCR text, headers, tables, stamps, and fine print).
 Only include values clearly supported by the uploaded document.
 If a field is not present, use null for scalar fields and [] for arrays.
 
@@ -19,7 +20,8 @@ Important rules:
 - patch["7A"] must always be an array.
 - If the uploaded document describes one insurance policy, return exactly one object inside patch["7A"].
 - If the uploaded document describes multiple insurance policies, return one object per policy inside patch["7A"].
-- Keep keys exactly as required by schema.
+- Keep keys exactly as required by schema. Never rename fields.
+- Map values into the exact schema fields below — do not put company names into notes, or policy numbers into coverage_amount.
 - Never invent policy numbers, beneficiaries, coverage amounts, premium amounts, contact details, or insurance company names.
 - If a document only says where policy documents are stored, copy that storage location or note into policy_documents.
 - If a value is unclear, return null.
@@ -45,18 +47,29 @@ If the policy type is not one of these, set:
 - policy_type = "Other"
 - policy_type_other = the actual policy type from the document
 
-Field meanings:
-- policy_type = type/category of insurance policy.
+Exact field placement (required):
+- policy_type = type/category of insurance policy (use the normalized list above). For auto/vehicle cards use "Vehicle".
 - policy_type_other = custom policy type when policy_type is Other.
-- policy_documents_life = notes/location/details for life insurance documents, beneficiary forms, statements, or policy packet.
-- policy_company = insurance company/carrier name.
-- policy_number = policy number, member ID, certificate number, or plan number when clearly shown.
-- coverage_amount = death benefit, coverage limit, insured amount, benefit value, or liability limit.
+- policy_documents_life = notes/location/details for life insurance documents, beneficiary forms, statements, or policy packet (Life policies only).
+- policy_company = insurance company/carrier name exactly as shown (e.g. "State Farm", "MetLife").
+- policy_number = policy number, insurance number, member ID, certificate number, or plan number when clearly shown. Copy digits/letters exactly; do not invent. Always fill this when a policy/insurance number appears — never leave it only in notes. Treat labels like "Policy #", "Insurance Number", and "Member ID" as policy_number.
+- policy_expiry = policy end / expiration / "valid through" / end date of a policy period.
+  Examples: "Period: 01/01/2025 to 12/31/2025" → policy_expiry = "2025-12-31"
+  "Valid from January 1, 2025 through December 31, 2025" → policy_expiry = "2025-12-31"
+  Always take the END / TO date of a range, never the start. Prefer YYYY-MM-DD.
+- coverage_amount = death benefit, coverage limit, insured amount, benefit value, or liability limit (include currency if shown).
 - beneficiaries = beneficiary names, percentages, contingent beneficiaries, or beneficiary notes.
 - policy_contact = agent, broker, customer service, claims phone, email, address, or business card details.
-- premium_info = premium amount, payment schedule, autopay, due date, billing method, or payment notes.
+- premium_info = premium amount, payment schedule, autopay, due date, billing method, payment notes, AND full policy period text when shown.
 - policy_documents = policy document notes, card details, statement info, or where the policy documents are stored.
-- notes = any other important insurance-policy-related information clearly present.
+- notes = any other important insurance-policy-related information clearly present that does not fit another field.
+
+Reading tips:
+- Prefer declarations pages, ID cards, and statement headers for company + policy number.
+- Prefer schedule/benefit pages for coverage_amount and beneficiaries.
+- Prefer billing pages for premium_info and policy period dates.
+- Prefer agent/broker blocks for policy_contact.
+- Auto insurance cards usually contain BOTH vehicle identity and policy number — always extract policy_company, policy_number, and policy_expiry for this section.
 
 Common source documents:
 - life insurance policy
@@ -104,6 +117,7 @@ Required patch shape:
       "policy_documents_life": null,
       "policy_company": null,
       "policy_number": null,
+      "policy_expiry": null,
       "coverage_amount": null,
       "beneficiaries": null,
       "policy_contact": null,

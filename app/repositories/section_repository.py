@@ -9,6 +9,9 @@ from app.notifications.section_update_notifications import (
 from app.security.section_crypto import decrypt_section_data
 
 
+from app.utils.empty import is_effectively_empty
+
+
 def _content_fingerprint(data: dict) -> str:
     return hashlib.sha256(
         json.dumps(data, sort_keys=True, default=str).encode("utf-8"),
@@ -26,13 +29,7 @@ def _fingerprint_from_encrypted(
 
 
 def _is_effectively_empty(value) -> bool:
-    if value is None or value == "" or value == [] or value == {}:
-        return True
-    if isinstance(value, dict):
-        return all(_is_effectively_empty(v) for v in value.values())
-    if isinstance(value, list):
-        return all(_is_effectively_empty(v) for v in value)
-    return False
+    return is_effectively_empty(value)
 
 
 class SectionRepository:

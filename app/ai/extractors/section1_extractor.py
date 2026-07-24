@@ -8,6 +8,23 @@ VALID_SECTION1_SUBSECTIONS = {
     "additional_contacts",
 }
 
+# UI / classifier labels → extractor keys
+SECTION1_SUBSECTION_ALIASES = {
+    "1A": "vital_info",
+    "1a": "vital_info",
+    "1B": "next_of_kin",
+    "1b": "next_of_kin",
+    "1C": "additional_contacts",
+    "1c": "additional_contacts",
+}
+
+
+def normalize_section1_subsection(subsection: str | None) -> str | None:
+    if not subsection:
+        return None
+    key = subsection.strip()
+    return SECTION1_SUBSECTION_ALIASES.get(key, key)
+
 SECTION1_PROMPT = """
 You are extracting data for the 'Vital Information & Key Contacts' section of an estate planning app.
 
@@ -41,6 +58,8 @@ async def extract_section1_from_document(
     mime_type: str = "application/pdf",
     field_catalog: list[dict] | None = None,
 ):
+    subsection = normalize_section1_subsection(subsection)
+
     if subsection and subsection not in VALID_SECTION1_SUBSECTIONS:
         raise ValueError(f"Invalid Section 1 subsection: {subsection}")
 

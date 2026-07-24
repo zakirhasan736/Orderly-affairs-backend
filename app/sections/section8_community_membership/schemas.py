@@ -27,6 +27,7 @@ class CommunityGroup(BaseModel):
     organization_type_other: Optional[str] = None
 
     membership_details: Optional[str] = None
+    renewal_date: Optional[str] = None
     contact_info: Optional[UploadField] = None
     importance: Optional[str] = None
     notify_instructions: Optional[str] = None

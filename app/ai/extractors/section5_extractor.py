@@ -10,6 +10,7 @@ You are extracting data for the 'Vehicles' section of an estate planning app.
 
 Return JSON only.
 Do not guess.
+Read the full document carefully (all pages, tables, card faces, stamps, and fine print).
 Only include values clearly supported by the uploaded document.
 If a field is not present, use null for scalar fields and [] for arrays.
 
@@ -28,21 +29,25 @@ Important rules:
 - Do not include markdown.
 - Do not explain.
 
-Vehicle fields:
+Vehicle fields (exact placement):
 - year = vehicle year.
 - make = vehicle manufacturer, for example Toyota, Honda, Ford, BMW.
 - model = vehicle model.
 - color = vehicle color.
 - vin = Vehicle Identification Number.
 - license_plate = current license plate number.
-- registration_expiry = registration expiration date. If clearly possible, normalize to YYYY-MM-DD.
-- insurance_company = current insurance provider.
-- insurance_policy = insurance policy number.
+- registration_expiry = registration expiration / "valid through" / "expires" date.
+  Also use the END date of a clearly labeled registration period or policy/registration period
+  (for example "Period: 01/01/2025 to 12/31/2025" → registration_expiry = 2025-12-31)
+  when no separate registration expiry is printed.
+  Prefer YYYY-MM-DD when possible.
+- insurance_company = current insurance provider / carrier name (exact field — do not leave only in notes).
+- insurance_policy = insurance policy number / insurance number / NAIC / policy ID (exact field — do not leave only in notes). Treat labels like "Policy #", "Insurance Number", and "Member ID" as insurance_policy.
 - financing = loan, lease, lender, payoff, monthly payment, or owned-outright information.
 - maintenance_records = service records, receipts, maintenance schedule, or where records are stored.
 - parking_location = usual parking location.
 - spare_keys = spare key location.
-- notes = any other important vehicle-related information clearly present in the document.
+- notes = any other important vehicle-related information clearly present that does not fit another field.
 
 Common source documents:
 - vehicle registration

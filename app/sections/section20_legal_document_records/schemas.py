@@ -42,6 +42,7 @@ class Section20B(BaseModel):
     tax_software: Optional[str] = None
     business_tax_documents: Optional[UploadField] = None
     estimated_tax_payments: Optional[str] = None
+    tax_filing_deadline: Optional[str] = None
     tax_debt_issues: Optional[UploadField] = None
 
 
@@ -52,6 +53,7 @@ class OtherLegalDocument(BaseModel):
     document_description: Optional[str] = None
     parties_involved: Optional[str] = None
     important_dates: Optional[str] = None
+    expiration_date: Optional[str] = None
     document_location: Optional[str] = None
     renewal_requirements: Optional[str] = None
     contact_information: Optional[UploadField] = None

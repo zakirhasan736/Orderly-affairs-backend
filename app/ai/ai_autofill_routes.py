@@ -11,6 +11,15 @@ from google.genai.errors import ClientError
 from pydantic import BaseModel, Field
 
 from app.ai.autofill_registry import SECTION_EXTRACTORS
+from app.ai.cross_section_enrichment import (
+    build_detected_facts_payload,
+    enrich_primary_result,
+    insurance_cache_missing_policy_number,
+    merge_seed_into_cached,
+    seed_insurance_from_vehicles,
+    seed_vehicles_from_insurance,
+    sync_vehicle_insurance_shared_fields,
+)
 from app.ai.document_classifier import (
     build_additional_sections_payload,
     classify_document_for_section,
@@ -26,11 +35,18 @@ from app.ai.gemini_generate import (
     is_quota_exhausted_error,
 )
 from app.ai.ai_auth import get_current_owner, get_user_id
+from app.ai.background_section_persist import persist_cached_extractions_for_owner
 from app.database import ai_documents_collection
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["ai-autofill"])
+
+# Prefetch only the primary + these partners — keep reads fast.
+FAST_PARTNER_PREFETCH: dict[str, list[str]] = {
+    "vehicles": ["insurance_policies"],
+    "insurance_policies": ["vehicles"],
+}
 
 
 class AutofillSectionRequest(BaseModel):
@@ -39,6 +55,8 @@ class AutofillSectionRequest(BaseModel):
     subsection: str | None = None
     field_catalog: list[dict] | None = None
     use_routed_cache: bool = False
+    # Dashboard overview: classify only — do not extract into the probe section.
+    classify_only: bool = False
 
 
 def utc_now_naive():
@@ -91,12 +109,19 @@ def _should_use_cached_extraction(
     *,
     use_routed_cache: bool,
 ) -> bool:
-    if not _get_cached_extraction(doc, section_key):
+    cached = _get_cached_extraction(doc, section_key)
+    if not cached:
+        return False
+
+    # Partial vehicle→insurance seeds often miss policy_number. Re-read the
+    # document for insurance so "insurance number" lands on policy_number.
+    if section_key == "insurance_policies" and insurance_cache_missing_policy_number(
+        cached
+    ):
         return False
 
     # Document was already read for this section — never call Gemini again.
     return True
-
 
 def _should_extract_without_classification(
     doc: dict,
@@ -184,7 +209,7 @@ async def _safe_cache_additional_sections(**kwargs):
         logger.warning("Background section pre-cache failed: %s", repr(error))
 
 
-MAX_BACKGROUND_PREFETCH_SECTIONS = 2
+MAX_BACKGROUND_PREFETCH_SECTIONS = 3
 
 
 async def _safe_prefetch_sections(
@@ -199,6 +224,7 @@ async def _safe_prefetch_sections(
     if not section_keys:
         return
 
+    # Prefer speed: extract the matched section + close partners in parallel.
     limited_keys = section_keys[:MAX_BACKGROUND_PREFETCH_SECTIONS]
     additional_sections = [{"section_key": key} for key in limited_keys]
 
@@ -212,9 +238,31 @@ async def _safe_prefetch_sections(
             additional_sections=additional_sections,
             exclude_section="__none__",
             field_catalog=None,
+            sequential=False,
+        )
+
+        fresh = await ai_documents_collection.find_one(
+            {"_id": file_id, "user_id": user_id},
+            {"cached_extractions": 1},
+        )
+        cached = (fresh or doc).get("cached_extractions") or {}
+        # Save into vault even if the browser disconnected mid-read.
+        await persist_cached_extractions_for_owner(
+            owner_id=user_id,
+            cached_extractions=cached,
+            section_keys=limited_keys,
         )
     except Exception as error:
         logger.warning("Background section prefetch failed: %s", repr(error))
+
+
+def _limit_prefetch_keys(best_key: str, extra_keys: list[str]) -> list[str]:
+    partners = FAST_PARTNER_PREFETCH.get(best_key, [])
+    ordered: list[str] = []
+    for key in [best_key, *partners, *extra_keys]:
+        if key and key in SECTION_EXTRACTORS and key not in ordered:
+            ordered.append(key)
+    return ordered[:MAX_BACKGROUND_PREFETCH_SECTIONS]
 
 
 async def _run_extractor(
@@ -250,6 +298,7 @@ async def _cache_additional_sections(
     additional_sections: list[dict],
     exclude_section: str,
     field_catalog: list[dict] | None = None,
+    sequential: bool = False,
 ):
     if not additional_sections:
         return
@@ -281,9 +330,13 @@ async def _cache_additional_sections(
                 repr(error),
             )
 
-    await asyncio.gather(
-        *[cache_one(item["section_key"]) for item in additional_sections]
-    )
+    if sequential:
+        for item in additional_sections:
+            await cache_one(item["section_key"])
+    else:
+        await asyncio.gather(
+            *[cache_one(item["section_key"]) for item in additional_sections]
+        )
 
     await ai_documents_collection.update_one(
         {"_id": file_id, "user_id": user_id},
@@ -323,8 +376,98 @@ async def _finalize_autofill_success(
         if item["section_key"] not in consumed_set
     ]
 
+    # Canonicalize wording → exact section field keys before cache/cross-seed.
+    result = enrich_primary_result(result, payload.section) or result
+
     cached_extractions = dict(source_doc.get("cached_extractions") or {})
+    previous_cached = cached_extractions.get(payload.section)
     cached_extractions[payload.section] = result
+
+    # Keep useful fields from a prior thin seed when a fresh extract wins.
+    if (
+        previous_cached
+        and payload.section == "insurance_policies"
+        and not from_cache
+    ):
+        cached_extractions["insurance_policies"] = merge_seed_into_cached(
+            result,
+            previous_cached,
+            array_key="7A",
+        ) or result
+        result = cached_extractions["insurance_policies"]
+    elif (
+        previous_cached
+        and payload.section == "vehicles"
+        and not from_cache
+    ):
+        cached_extractions["vehicles"] = merge_seed_into_cached(
+            result,
+            previous_cached,
+            array_key="5A",
+        ) or result
+        result = cached_extractions["vehicles"]
+
+    # Cross-place shared vehicle <-> insurance fields so policy numbers aren't missed.
+    if payload.section == "vehicles":
+        insurance_seed = seed_insurance_from_vehicles(result)
+        if insurance_seed:
+            cached_extractions["insurance_policies"] = merge_seed_into_cached(
+                cached_extractions.get("insurance_policies"),
+                insurance_seed,
+                array_key="7A",
+            )
+            partner_in_additional = any(
+                item.get("section_key") == "insurance_policies"
+                for item in additional_sections
+            )
+            if not partner_in_additional:
+                additional_sections.append(
+                    {
+                        "section_key": "insurance_policies",
+                        "section_id": (get_section_meta("insurance_policies") or {}).get(
+                            "id"
+                        ),
+                        "section_label": (get_section_meta("insurance_policies") or {}).get(
+                            "label"
+                        ),
+                        "confidence": "medium",
+                        "data_summary": "Insurance policy details found on this vehicle document.",
+                    }
+                )
+    elif payload.section == "insurance_policies":
+        vehicle_seed = seed_vehicles_from_insurance(result)
+        if vehicle_seed:
+            cached_extractions["vehicles"] = merge_seed_into_cached(
+                cached_extractions.get("vehicles"),
+                vehicle_seed,
+                array_key="5A",
+            )
+            partner_in_additional = any(
+                item.get("section_key") == "vehicles"
+                for item in additional_sections
+            )
+            if not partner_in_additional:
+                additional_sections.append(
+                    {
+                        "section_key": "vehicles",
+                        "section_id": (get_section_meta("vehicles") or {}).get("id"),
+                        "section_label": (get_section_meta("vehicles") or {}).get("label"),
+                        "confidence": "medium",
+                        "data_summary": "Vehicle details found on this insurance document.",
+                    }
+                )
+
+    # Bidirectional meaning sync: policy/insurance number, company, expiry
+    # must appear on BOTH vehicles and insurance when present on either side.
+    cached_extractions = sync_vehicle_insurance_shared_fields(cached_extractions)
+    if payload.section in cached_extractions:
+        result = cached_extractions.get(payload.section) or result
+
+    detected_facts = build_detected_facts_payload(
+        primary_section=payload.section,
+        primary_result=result,
+        cached_extractions=cached_extractions,
+    )
 
     if doc.get("routed_section") == payload.section:
         routed_section = None
@@ -363,7 +506,10 @@ async def _finalize_autofill_success(
         else:
             keep_document = False
     else:
-        keep_document = False
+        # Keep the file after the first successful fill so the owner can
+        # re-open the section / press Auto-fill again without re-uploading.
+        # TTL cleanup still removes expired docs.
+        keep_document = True
 
     if keep_document:
         await ai_documents_collection.update_one(
@@ -383,6 +529,27 @@ async def _finalize_autofill_success(
 
     document_summary = classification.get("document_summary")
 
+    # Seeded / synced partner sections — client can persist without another Gemini call.
+    partner_results: dict[str, dict] = {}
+    for partner_key, partner_result in cached_extractions.items():
+        if partner_key == payload.section:
+            continue
+        if partner_key in FAST_PARTNER_PREFETCH.get(payload.section, []) or any(
+            item.get("section_key") == partner_key for item in additional_sections
+        ):
+            if isinstance(partner_result, dict):
+                partner_results[partner_key] = partner_result
+
+    # Persist primary + partners to vault in background (device may disconnect).
+    persist_keys = [payload.section, *partner_results.keys()]
+    asyncio.create_task(
+        persist_cached_extractions_for_owner(
+            owner_id=user_id,
+            cached_extractions=cached_extractions,
+            section_keys=persist_keys,
+        )
+    )
+
     return {
         "success": True,
         "section": payload.section,
@@ -391,6 +558,8 @@ async def _finalize_autofill_success(
         "result": result,
         "additional_sections": additional_sections,
         "section_previews": section_previews,
+        "detected_facts": detected_facts,
+        "partner_results": partner_results,
         "document_summary": document_summary,
         "file_kept": keep_document,
         "from_cache": from_cache,
@@ -503,10 +672,85 @@ async def autofill_section(
             mime_type=mime_type,
             requested_section_key=payload.section,
         )
-        classification = enforce_upload_section_first(classification, payload.section)
+        # Overview classify_only must not force the probe section.
+        if not payload.classify_only:
+            classification = enforce_upload_section_first(
+                classification, payload.section
+            )
+        else:
+            # Still apply vehicle/insurance pair helper when probing those sections.
+            if payload.section in {"vehicles", "insurance_policies"}:
+                classification = enforce_upload_section_first(
+                    classification, payload.section
+                )
 
         matches_requested = bool(classification.get("matches_requested_section"))
         best_section_key = classification.get("best_section_key") or payload.section
+
+        if payload.classify_only:
+            suggested = get_section_meta(best_section_key) or {}
+            additional_sections = build_additional_sections_payload(
+                classification,
+                best_section_key,
+            )
+            section_previews = build_fast_section_previews_from_classification(
+                classification,
+                suggested_section_key=best_section_key,
+            )
+
+            prefetch_keys = _limit_prefetch_keys(
+                best_section_key,
+                [
+                    item["section_key"]
+                    for item in additional_sections
+                    if item.get("section_key")
+                ],
+            )
+
+            await ai_documents_collection.update_one(
+                {"_id": payload.file_id, "user_id": user_id},
+                {
+                    "$set": {
+                        "status": "uploaded",
+                        "last_classification": classification,
+                        "routed_section": best_section_key,
+                        "pending_sections": [
+                            key
+                            for key in prefetch_keys
+                            if key in SECTION_EXTRACTORS
+                        ],
+                    }
+                },
+            )
+
+            asyncio.create_task(
+                _safe_prefetch_sections(
+                    file_id=payload.file_id,
+                    user_id=user_id,
+                    doc=doc,
+                    file_path=file_path,
+                    mime_type=mime_type,
+                    section_keys=prefetch_keys,
+                )
+            )
+
+            keep_document = True
+            return {
+                "success": True,
+                "classified_only": True,
+                "section": payload.section,
+                "best_section": best_section_key,
+                "best_section_id": suggested.get("id"),
+                "best_section_label": suggested.get("label"),
+                "best_subsection": suggested.get("default_subsection"),
+                "matches_requested_section": matches_requested,
+                "document_summary": classification.get("document_summary"),
+                "additional_sections": additional_sections,
+                "section_previews": section_previews,
+                "file_id": payload.file_id,
+                "mime_type": mime_type,
+                "file_kept": True,
+            }
 
         # Block only when the document has no data for the requested section.
         sections_conflict = (
@@ -612,7 +856,8 @@ async def autofill_section(
                         :MAX_BACKGROUND_PREFETCH_SECTIONS
                     ],
                     exclude_section=payload.section,
-                    field_catalog=None,
+                    field_catalog=payload.field_catalog,
+                    sequential=False,
                 )
             )
 
@@ -632,6 +877,20 @@ async def autofill_section(
 
     except HTTPException:
         raise
+
+    except ValueError as error:
+        await ai_documents_collection.update_one(
+            {"_id": payload.file_id, "user_id": user_id},
+            {"$set": {"status": "uploaded"}},
+        )
+        keep_document = True
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_autofill_request",
+                "message": str(error),
+            },
+        ) from error
 
     except GeminiServiceUnavailableError as error:
         await ai_documents_collection.update_one(

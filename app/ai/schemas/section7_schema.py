@@ -29,6 +29,7 @@ SECTION7_FULL_SCHEMA = {
                             "policy_documents_life": {"type": ["string", "null"]},
                             "policy_company": {"type": ["string", "null"]},
                             "policy_number": {"type": ["string", "null"]},
+                            "policy_expiry": {"type": ["string", "null"]},
                             "coverage_amount": {"type": ["string", "null"]},
                             "beneficiaries": {"type": ["string", "null"]},
                             "policy_contact": {"type": ["string", "null"]},

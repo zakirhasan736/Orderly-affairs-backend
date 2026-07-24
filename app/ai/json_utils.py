@@ -17,6 +17,15 @@ def _strip_fences(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _clean_jsonish(text: str) -> str:
+    cleaned = text.strip()
+    # Remove common trailing commas before } or ]
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    # Normalize smart quotes that sometimes leak into model output
+    cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'")
+    return cleaned
+
+
 def _repair_truncated_json(text: str) -> str | None:
     candidate = text.rstrip()
     if not candidate:
@@ -39,7 +48,7 @@ def _repair_truncated_json(text: str) -> str | None:
 
 
 def parse_gemini_json(raw_text: str | None, fallback: dict | None = None) -> dict:
-    text = _strip_fences(raw_text or "")
+    text = _clean_jsonish(_strip_fences(raw_text or ""))
 
     if not text:
         if fallback is not None:
@@ -56,7 +65,7 @@ def parse_gemini_json(raw_text: str | None, fallback: dict | None = None) -> dic
     repaired = _repair_truncated_json(text)
     if repaired:
         try:
-            parsed = json.loads(repaired)
+            parsed = json.loads(_clean_jsonish(repaired))
             if isinstance(parsed, dict):
                 return parsed
         except json.JSONDecodeError:
@@ -65,7 +74,7 @@ def parse_gemini_json(raw_text: str | None, fallback: dict | None = None) -> dic
     match = re.search(r"\{[\s\S]*\}", text)
     if match:
         try:
-            parsed = json.loads(match.group(0))
+            parsed = json.loads(_clean_jsonish(match.group(0)))
             if isinstance(parsed, dict):
                 return parsed
         except json.JSONDecodeError:

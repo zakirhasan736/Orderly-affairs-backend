@@ -144,3 +144,24 @@ async def upload_ai_document(
         print("❌ AI document upload failed:", repr(e))
         safe_delete_file(str(file_path))
         raise HTTPException(status_code=500, detail="Document upload failed.")
+
+
+@router.delete("/document/{file_id}")
+async def delete_uploaded_ai_document(
+    file_id: str,
+    current_user=Depends(get_current_owner),
+):
+    """Owner deletes a temporary AI upload (disk + Mongo) after fill is done."""
+    user_id = get_user_id(current_user)
+    doc = await ai_documents_collection.find_one(
+        {"_id": file_id, "user_id": user_id},
+        {"path": 1},
+    )
+
+    if not doc:
+        # Already gone — treat as success for idempotent cleanup.
+        return {"success": True, "deleted": False}
+
+    safe_delete_file(doc.get("path"))
+    await ai_documents_collection.delete_one({"_id": file_id, "user_id": user_id})
+    return {"success": True, "deleted": True}

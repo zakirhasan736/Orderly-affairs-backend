@@ -27,12 +27,16 @@ class InsurancePolicy(BaseModel):
     policy_documents_life: UploadValue = None
     policy_company: Optional[str] = None
     policy_number: UploadValue = None
+    policy_expiry: Optional[str] = None
     coverage_amount: Optional[str] = None
     beneficiaries: Optional[str] = None
     policy_contact: UploadValue = None
     premium_info: Optional[str] = None
     policy_documents: UploadValue = None
     notes: Optional[str] = None
+    # Emails selected for expiry reminders (owner + immediate-access people).
+    # None = default all; [] = nobody; list of emails = explicit selection.
+    reminder_recipients: Optional[List[str]] = None
 
     # 🔥 normalize "" → None
     @field_validator(

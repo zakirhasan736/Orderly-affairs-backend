@@ -198,23 +198,9 @@ class MFAResetRequest(BaseModel):
     mfa_challenge_token: str | None = None
     step_up_token: str | None = None
 
-# ---- Next-of-Kin ----
-class NextKinCreateRequest(BaseModel):
-    email: EmailStr
-    full_name: str
-    relationship: str
-    phone_number: str | None = None
-    access_level: str = "full" 
-    authorized_sections: list[str] | None = []
-    immediate_access: bool | None = False
-    nok_letter_received: bool | None = False
-    master_password: str | None = None
-    password_card_generated: bool | None = False
-    card_storage_location: str | None = None
-    key_bag_location: str | None = None
-    documents_bag_location: str | None = None
-    special_instructions: str | None = None
+from app.auth.nextkin_schemas import NextKinCreateRequest
 
+# ---- Next-of-Kin ----
 class NextKinUpdateRequest(BaseModel):
     email: EmailStr | None = None
     full_name: str | None = None
@@ -1093,7 +1079,18 @@ async def create_nextkin(
     enforce_usage(owner, "nextkin", count)
     # small inner util to avoid duplication
     async def _create_one(req: NextKinCreateRequest):
-        email = req.email.lower()
+        from app.auth.nextkin_validation import prepare_nextkin_create_fields
+
+        try:
+            normalized = prepare_nextkin_create_fields(req)
+        except ValueError as exc:
+            return {
+                "email": str(getattr(req, "email", "") or "").lower(),
+                "status": "error",
+                "error": str(exc),
+            }
+
+        email = normalized["email"]
 
         # 2️⃣ Prevent duplicate
         existing = await users_collection.find_one({"email": email})
@@ -1109,12 +1106,12 @@ async def create_nextkin(
 
         new_nok = {
             "email": email,
-            "full_name": req.full_name,
-            "relationship": req.relationship,
+            "full_name": normalized["full_name"],
+            "relationship": normalized["relationship"],
             "phone_number": req.phone_number,
 
-            "access_level": req.access_level,
-            "authorized_sections": req.authorized_sections or [],
+            "access_level": normalized["access_level"],
+            "authorized_sections": normalized["authorized_sections"] or [],
             "immediate_access": False,
             "access_timing": "immediate" if req.immediate_access else "upon_death",
             "access_revoked": False,
