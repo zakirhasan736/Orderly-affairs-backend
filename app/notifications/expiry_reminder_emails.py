@@ -4,6 +4,12 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.email_layout import (
+    email_callout,
+    escape,
+    portal_url,
+    render_simple_email,
+)
 
 
 def _is_renewal_style(field_label: str, item_label: str) -> bool:
@@ -45,36 +51,42 @@ def _body(
     renewal = _is_renewal_style(field_label, item_label)
     if days == 0:
         timing = "is due <b>today</b>" if renewal else "expires <b>today</b>"
+        title = "Due today" if renewal else "Expires today"
     elif days == 1:
         timing = "is due <b>tomorrow</b>" if renewal else "expires <b>tomorrow</b>"
+        title = "Due tomorrow" if renewal else "Expires tomorrow"
     else:
         timing = (
             f"is due in <b>{days} days</b>"
             if renewal
             else f"expires in <b>{days} days</b>"
         )
+        title = f"Due in {days} days" if renewal else f"Expires in {days} days"
 
-    return f"""
-    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#10213f">
-      <p>Hi {recipient_name or "there"},</p>
-      <p>
-        This is a reminder that an item in <b>{owner_name}</b>'s
-        Orderly Affairs kit {timing}.
-      </p>
-      <p><b>Section:</b> {section_title}</p>
-      <p><b>Item:</b> {item_label}</p>
-      <p><b>Field:</b> {field_label}</p>
-      <p><b>Deadline / renewal date:</b> {expiry_date}</p>
-      <p>
-        Please open Orderly Affairs, review the details, and renew, pay, or
-        update if needed (insurance, taxes, loans, leases, and other deadlines).
-      </p>
-      <p style="color:#64748b;font-size:12px">
-        Reminder schedule: 10 days → 5 days → 1 day → due / expiry day
-        (same countdown pattern as trial reminders).
-      </p>
-    </div>
-    """
+    return render_simple_email(
+        title=title,
+        greeting_name=recipient_name,
+        paragraphs=[
+            f"This is a reminder that an item in <b>{escape(owner_name)}</b>'s "
+            f"Orderly Affairs kit {timing}.",
+            "Please open Orderly Affairs, review the details, and renew, pay, or "
+            "update if needed (insurance, taxes, loans, leases, and other deadlines).",
+        ],
+        details=[
+            ("Section", section_title),
+            ("Item", item_label),
+            ("Field", field_label),
+            ("Deadline / renewal date", expiry_date),
+        ],
+        callout_html=email_callout(
+            "Reminder schedule: 10 days → 5 days → 1 day → due / expiry day "
+            "(same countdown pattern as trial reminders).",
+            tone="info",
+        ),
+        cta_url=portal_url(),
+        cta_label="Open Orderly Affairs",
+        preheader=f"{item_label or section_title} {timing.replace('<b>', '').replace('</b>', '')}",
+    )
 
 
 def send_expiry_reminder_email(

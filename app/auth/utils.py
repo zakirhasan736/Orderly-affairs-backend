@@ -4,6 +4,14 @@ from random import randint
 from datetime import datetime, timedelta
 from app.database import otp_collection
 from app.config import nextkin_login_url, settings
+from app.notifications.email_layout import (
+    email_callout,
+    email_code_box,
+    escape,
+    p,
+    render_email,
+    render_simple_email,
+)
 
 
 # ============================================================
@@ -21,14 +29,25 @@ async def generate_and_send_otp(email: str):
         from_email=settings.EMAIL_SENDER,
         to_emails=email,
         subject="Your Orderly Affairs verification code",
-        html_content=f"""
-        <div style='font-family:Arial,sans-serif'>
-          <p>Hello,</p>
-          <p>Your verification code is:</p>
-          <h2 style='letter-spacing:2px'>{otp}</h2>
-          <p>This code will expire in 10 minutes.</p>
-        </div>
-        """,
+        html_content=render_email(
+            title="Verification code",
+            preheader=f"Your verification code is {otp}",
+            body_html="".join(
+                [
+                    p("Hello,"),
+                    p(
+                        "Use the verification code below to continue. It expires "
+                        "in <b>10 minutes</b>."
+                    ),
+                    email_code_box(otp),
+                    email_callout(
+                        "If you did not request this code, you can safely ignore "
+                        "this email.",
+                        tone="info",
+                    ),
+                ]
+            ),
+        ),
     )
     try:
         sg.send(message)
@@ -58,22 +77,33 @@ async def send_nextkin_credentials(
     password: str,
     full_name: str | None = None,
 ):
+    login = nextkin_login_url()
     sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
     message = Mail(
         from_email=settings.EMAIL_SENDER,
         to_emails=email,
         subject="Orderly Affairs - Next-of-Kin Account Created",
-        html_content=f"""
-        <div style='font-family:Arial,sans-serif'>
-          <p>Hello {full_name or ''},</p>
-          <p>You have been designated as a Next-of-Kin by {owner_name}.</p>
-          <p><b>Login credentials:</b></p>
-          <p>Email: {email}<br>Password: {password}</p>
-          <p>Log in here: 
-             <a href="{nextkin_login_url()}">
-             {nextkin_login_url()}</a></p>
-        </div>
-        """,
+        html_content=render_simple_email(
+            title="Your Next-of-Kin account is ready",
+            greeting_name=full_name,
+            paragraphs=[
+                f"You have been designated as a Next-of-Kin by "
+                f"<b>{escape(owner_name)}</b>.",
+                "Use the login details below to access the kit when authorized.",
+            ],
+            details=[
+                ("Email", email),
+                ("Password", password),
+            ],
+            cta_url=login,
+            cta_label="Log in to Orderly Affairs",
+            callout_html=email_callout(
+                "Keep these credentials private. The kit owner may also share a "
+                "Password Card with additional instructions.",
+                tone="info",
+            ),
+            preheader="Your Next-of-Kin account credentials",
+        ),
     )
     try:
         sg.send(message)

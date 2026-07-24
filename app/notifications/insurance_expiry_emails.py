@@ -6,6 +6,12 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.email_layout import (
+    email_callout,
+    escape,
+    portal_url,
+    render_simple_email,
+)
 
 
 class InsuranceExpiryReminderDay(Enum):
@@ -32,34 +38,39 @@ def _body(
     expiry_date: str,
     company: str | None,
 ) -> str:
-    company_line = f"<p><b>Company:</b> {company}</p>" if company else ""
-
     if days == 0:
         timing = "expires <b>today</b>"
+        title = "Insurance expires today"
     elif days == 1:
         timing = "expires <b>tomorrow</b>"
+        title = "Insurance expires tomorrow"
     else:
         timing = f"expires in <b>{days} days</b>"
+        title = f"Insurance expires in {days} days"
 
-    return f"""
-    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#10213f">
-      <p>Hi {recipient_name or "there"},</p>
-      <p>
-        This is a reminder that an insurance policy for
-        <b>{owner_name}</b> {timing}.
-      </p>
-      <p><b>Policy:</b> {policy_label}</p>
-      {company_line}
-      <p><b>Expiry / registration end date:</b> {expiry_date}</p>
-      <p>
-        Please review the policy details in Orderly Affairs and renew or update
-        coverage if needed.
-      </p>
-      <p style="color:#64748b;font-size:12px">
-        Reminder schedule: 10 days → 5 days → 1 day → expiry day.
-      </p>
-    </div>
-    """
+    details = [("Policy", policy_label)]
+    if company:
+        details.append(("Company", company))
+    details.append(("Expiry / registration end date", expiry_date))
+
+    return render_simple_email(
+        title=title,
+        greeting_name=recipient_name,
+        paragraphs=[
+            f"This is a reminder that an insurance policy for "
+            f"<b>{escape(owner_name)}</b> {timing}.",
+            "Please review the policy details in Orderly Affairs and renew or "
+            "update coverage if needed.",
+        ],
+        details=details,
+        callout_html=email_callout(
+            "Reminder schedule: 10 days → 5 days → 1 day → expiry day.",
+            tone="info",
+        ),
+        cta_url=portal_url(),
+        cta_label="Open Orderly Affairs",
+        preheader=f"{policy_label} {timing.replace('<b>', '').replace('</b>', '')}",
+    )
 
 
 def send_insurance_expiry_email(

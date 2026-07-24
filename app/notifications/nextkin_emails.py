@@ -1,10 +1,19 @@
-from datetime import datetime
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+
 from app.config import nextkin_login_url, settings
 from app.notifications.display_names import (
     resolve_nextkin_display_name,
     resolve_owner_display_name,
+)
+from app.notifications.email_layout import (
+    email_button,
+    email_callout,
+    email_info_rows,
+    escape,
+    p,
+    render_email,
+    render_simple_email,
 )
 
 
@@ -26,132 +35,131 @@ async def send_nextkin_email(
 ):
     sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
 
-    subject = ""
-    html = ""
-
     owner_name = await resolve_owner_display_name(owner)
     nk_name = resolve_nextkin_display_name(nextkin)
+    login = nextkin_login_url()
 
     if event == NextKinEmailEvent.CREATED:
-        subject = "Orderly Affairs – You’ve been designated as Next-of-Kin"
-
-        html = f"""
-        <p>Hello {nk_name},</p>
-
-        <p>{owner_name} has designated you as their <strong>Next-of-Kin</strong> within their Orderly Affairs account.</p>
-
-        <p>This means that, at the appropriate time and once access is approved, you may be provided with access to important information they have prepared.</p>
-
-        <p>{owner_name} may also send you a separate letter or email containing instructions about the location of their <strong>Password Card</strong> and the procedures required to access their records.</p>
-
-        <p>Please keep any such instructions in a safe place.</p>
-
-        <p>If you believe you received this message in error, you may disregard it.</p>
-
-        <p>Kind regards,<br>
-        The Orderly Affairs Team</p>
-        """
+        subject = "Orderly Affairs – You've been designated as Next-of-Kin"
+        html = render_simple_email(
+            title="You've been designated as Next-of-Kin",
+            greeting_name=nk_name,
+            paragraphs=[
+                f"<b>{escape(owner_name)}</b> has designated you as their "
+                f"<strong>Next-of-Kin</strong> within their Orderly Affairs account.",
+                "At the appropriate time and once access is approved, you may be "
+                "provided with access to important information they have prepared.",
+                f"{escape(owner_name)} may also send a separate letter with "
+                "instructions about their <strong>Password Card</strong> and how to "
+                "access their records. Please keep any such instructions safe.",
+            ],
+            callout_html=email_callout(
+                "If you believe you received this message in error, you may disregard it.",
+                tone="info",
+            ),
+            preheader=f"{owner_name} designated you as Next-of-Kin",
+        )
 
     elif event == NextKinEmailEvent.ACCESS_APPROVED:
         subject = "Orderly Affairs – Access Granted"
-        html = f"""
-        <p>Hello {nk_name},</p>
-        <p>{owner_name} has granted you <b>Immediate Access</b>.</p>
-
-        <p><b>Login details:</b></p>
-        <ul>
-          <li>Email: {nextkin["email"]}</li>
-          {f"<li>Password: {plain_password}</li>" if plain_password else ""}
-        </ul>
-
-        <p>
-          <a href="{nextkin_login_url()}">
-            Log in to Orderly Affairs
-          </a>
-        </p>
-        """
+        details = [("Email", nextkin["email"])]
+        if plain_password:
+            details.append(("Password", plain_password))
+        html = render_simple_email(
+            title="Immediate access granted",
+            greeting_name=nk_name,
+            paragraphs=[
+                f"<b>{escape(owner_name)}</b> has granted you "
+                f"<b>Immediate Access</b> to their Orderly Affairs kit.",
+            ],
+            details=details,
+            cta_url=login,
+            cta_label="Log in to Orderly Affairs",
+            preheader="Your Next-of-Kin access has been granted",
+        )
 
     elif event == NextKinEmailEvent.ACCESS_REVOKED:
         subject = "Orderly Affairs – Access Revoked"
-        html = f"""
-        <p>Hello {nk_name},</p>
-        <p>{owner_name} has revoked your access.</p>
-        """
+        html = render_simple_email(
+            title="Access revoked",
+            greeting_name=nk_name,
+            paragraphs=[
+                f"<b>{escape(owner_name)}</b> has revoked your Next-of-Kin access.",
+            ],
+            callout_html=email_callout(
+                "If this was unexpected, please contact the kit owner directly.",
+                tone="warning",
+            ),
+            preheader="Your Next-of-Kin access was revoked",
+        )
 
     elif event == NextKinEmailEvent.PASSWORD_UPDATED:
         subject = "Orderly Affairs – Your Login Password Was Updated"
-        html = f"""
-        <p>Hello {nk_name},</p>
-        <p>{owner_name} has updated your <strong>Orderly Affairs</strong> login password.</p>
-
-        <p><b>Updated login details:</b></p>
-        <ul>
-          <li>Email: {nextkin["email"]}</li>
-          {f"<li>Password: {plain_password}</li>" if plain_password else ""}
-        </ul>
-
-        <p>
-          <a href="{nextkin_login_url()}"
-             style="
-               display: inline-block;
-               padding: 10px 18px;
-               background: #2563eb;
-               color: #ffffff;
-               text-decoration: none;
-               border-radius: 6px;
-               font-weight: bold;">
-            Log in to Orderly Affairs
-          </a>
-        </p>
-
-        <p style="color: #666; font-size: 14px;">
-          If you did not expect this change, please contact {owner_name} directly.
-        </p>
-        """
+        details = [("Email", nextkin["email"])]
+        if plain_password:
+            details.append(("Password", plain_password))
+        html = render_simple_email(
+            title="Your login password was updated",
+            greeting_name=nk_name,
+            paragraphs=[
+                f"<b>{escape(owner_name)}</b> has updated your Orderly Affairs "
+                "login password.",
+            ],
+            details=details,
+            cta_url=login,
+            cta_label="Log in to Orderly Affairs",
+            callout_html=email_callout(
+                f"If you did not expect this change, please contact {escape(owner_name)} directly.",
+                tone="info",
+            ),
+            preheader="Your Next-of-Kin password was updated",
+        )
 
     elif event == NextKinEmailEvent.DELETED:
         subject = "Orderly Affairs – Next-of-Kin Removed"
-        html = f"""
-        <p>Hello {nk_name},</p>
-        <p>Your Next-of-Kin designation under {owner_name} has been removed.</p>
-        """
+        html = render_simple_email(
+            title="Next-of-Kin designation removed",
+            greeting_name=nk_name,
+            paragraphs=[
+                f"Your Next-of-Kin designation under <b>{escape(owner_name)}</b> "
+                "has been removed.",
+            ],
+            preheader="Your Next-of-Kin designation was removed",
+        )
 
     elif event == NextKinEmailEvent.OWNER_DECEASED:
         subject = "Orderly Affairs – Access Available"
-        html = f"""
-        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <p>Hello {nk_name},</p>
-          <p>
-            <strong>{owner_name}</strong> has passed away. You may now access
-            their <strong>Orderly Affairs Kit</strong>.
-          </p>
-          <p><strong>Login details:</strong></p>
-          <ul>
-            <li>Email: {nextkin["email"]}</li>
-            <li>Password: Use the password printed on your Password Card</li>
-          </ul>
-          <p>
-            <a href="{nextkin_login_url()}"
-               style="
-                 display: inline-block;
-                 padding: 10px 18px;
-                 background: #2563eb;
-                 color: #ffffff;
-                 text-decoration: none;
-                 border-radius: 6px;
-                 font-weight: bold;">
-              Log in to Orderly Affairs
-            </a>
-          </p>
-          <p style="color: #666; font-size: 14px;">
-            If you also received a Letter to Next of Kin, please follow any
-            additional instructions it contains.
-          </p>
-        </div>
-        """
+        html = render_email(
+            title="Kit access is now available",
+            preheader=f"Access is available for {owner_name}'s Orderly Affairs kit",
+            body_html="".join(
+                [
+                    p(f"Hello {escape(nk_name)},"),
+                    p(
+                        f"<strong>{escape(owner_name)}</strong> has passed away. "
+                        "You may now access their <strong>Orderly Affairs Kit</strong>."
+                    ),
+                    email_info_rows(
+                        [
+                            ("Email", nextkin["email"]),
+                            (
+                                "Password",
+                                "Use the password printed on your Password Card",
+                            ),
+                        ]
+                    ),
+                    email_button(login, "Log in to Orderly Affairs"),
+                    email_callout(
+                        "If you also received a Letter to Next of Kin, please follow "
+                        "any additional instructions it contains.",
+                        tone="info",
+                    ),
+                ]
+            ),
+        )
 
     else:
-        return  # unknown event → do nothing safely
+        return
 
     message = Mail(
         from_email=settings.EMAIL_SENDER,

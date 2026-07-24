@@ -56,18 +56,19 @@ In addition to the online kit, you'll find two important physical items:
 """
 
 def render_email_html(doc: Dict[str, Any]) -> str:
-    # simple HTML wrapper
-    body = render_letter_text(doc).replace("\n", "<br/>")
-    owner = doc.get("owner_id", "")
-    return f"""
-    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111">
-      <p style="color:#666;font-size:12px;margin:0 0 10px 0">Owner ID: {owner}</p>
-      <h2 style="margin:0 0 12px 0">Letter to Next of Kin</h2>
-      <div>{body}</div>
-      <hr style="margin:24px 0;border:none;border-top:1px solid #eee"/>
-      <p style="font-size:12px;color:#666">Sent by Orderly Affairs</p>
-    </div>
-    """
+    from app.notifications.email_layout import escape, render_email
+
+    body = escape(render_letter_text(doc)).replace("\n", "<br/>")
+    return render_email(
+        title="Letter to Next of Kin",
+        preheader="A letter prepared for you through Orderly Affairs",
+        body_html=(
+            '<div style="font-family:-apple-system,BlinkMacSystemFont,'
+            "'Segoe UI',Helvetica,Arial,sans-serif; font-size:15px; "
+            'line-height:1.75; color:#334155;">'
+            f"{body}</div>"
+        ),
+    )
 
 async def send_email(to_email: str, subject: str, html: str) -> None:
     sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)

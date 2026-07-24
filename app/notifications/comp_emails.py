@@ -6,6 +6,11 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.email_layout import (
+    email_callout,
+    portal_url,
+    render_simple_email,
+)
 
 
 class CompEmailEvent(Enum):
@@ -18,7 +23,7 @@ class CompEmailEvent(Enum):
 
 def _ends_label(ends_at) -> str:
     if not ends_at:
-        return "Lifetime"
+        return "the end of your complimentary period"
     try:
         return ends_at.strftime("%Y-%m-%d")
     except Exception:
@@ -27,7 +32,10 @@ def _ends_label(ends_at) -> str:
 
 async def send_comp_email(*, user: dict, event: CompEmailEvent, ends_at=None) -> None:
     email = user["email"]
-    end_txt = _ends_label(ends_at or (user.get("billing") or {}).get("comp", {}).get("ends_at"))
+    name = user.get("full_name") or user.get("name")
+    end_txt = _ends_label(
+        ends_at or (user.get("billing") or {}).get("comp", {}).get("ends_at")
+    )
 
     subject_map = {
         CompEmailEvent.GRANTED: "Complimentary access to Orderly Affairs",
@@ -38,28 +46,75 @@ async def send_comp_email(*, user: dict, event: CompEmailEvent, ends_at=None) ->
     }
 
     body_map = {
-        CompEmailEvent.GRANTED: f"""
-            <p>You've been granted complimentary access to Orderly Affairs.</p>
-            <p><b>Access until:</b> {end_txt}</p>
-            <p>No payment is required during this period.</p>
-        """,
-        CompEmailEvent.REMINDER_30: f"""
-            <p>Your complimentary access ends on <b>{end_txt}</b> (about 30 days).</p>
-            <p>Please add a payment method and choose a plan before then to avoid interruption.</p>
-        """,
-        CompEmailEvent.REMINDER_7: f"""
-            <p>Your complimentary access ends on <b>{end_txt}</b> (7 days).</p>
-            <p>Activate a paid plan to keep your vault available after that date.</p>
-        """,
-        CompEmailEvent.REMINDER_1: f"""
-            <p>Your complimentary access ends tomorrow (<b>{end_txt}</b>).</p>
-            <p>Without a paid plan, login will be paused after that date.</p>
-        """,
-        CompEmailEvent.ENDED: """
-            <p>Your complimentary access period has ended.</p>
-            <p>Access is paused until a paid plan is activated. Please check this inbox
-            for billing messages from Orderly Affairs and update your plan to continue.</p>
-        """,
+        CompEmailEvent.GRANTED: render_simple_email(
+            title="Complimentary access granted",
+            greeting_name=name,
+            paragraphs=[
+                "You've been granted complimentary access to Orderly Affairs.",
+                "No payment is required during this period.",
+            ],
+            details=[("Access until", end_txt)],
+            cta_url=portal_url(),
+            cta_label="Open your vault",
+            preheader="Complimentary access to Orderly Affairs",
+        ),
+        CompEmailEvent.REMINDER_30: render_simple_email(
+            title="Complimentary access ends in ~30 days",
+            greeting_name=name,
+            paragraphs=[
+                f"Your complimentary access ends on <b>{end_txt}</b> (about 30 days).",
+                "Please add a payment method and choose a plan before then to avoid "
+                "interruption.",
+            ],
+            cta_url=portal_url(),
+            cta_label="Add billing details",
+            preheader="Complimentary access ends in about 30 days",
+        ),
+        CompEmailEvent.REMINDER_7: render_simple_email(
+            title="Complimentary access ends in 7 days",
+            greeting_name=name,
+            paragraphs=[
+                f"Your complimentary access ends on <b>{end_txt}</b> (7 days).",
+                "Activate a paid plan to keep your vault available after that date.",
+            ],
+            callout_html=email_callout(
+                "A paid plan is required after this date to keep access.",
+                tone="warning",
+            ),
+            cta_url=portal_url(),
+            cta_label="Choose a plan",
+            preheader="Complimentary access ends in 7 days",
+        ),
+        CompEmailEvent.REMINDER_1: render_simple_email(
+            title="Complimentary access ends tomorrow",
+            greeting_name=name,
+            paragraphs=[
+                f"Your complimentary access ends tomorrow (<b>{end_txt}</b>).",
+                "Without a paid plan, login will be paused after that date.",
+            ],
+            callout_html=email_callout(
+                "Act today to avoid an interruption.",
+                tone="danger",
+            ),
+            cta_url=portal_url(),
+            cta_label="Activate a plan",
+            preheader="Complimentary access ends tomorrow",
+        ),
+        CompEmailEvent.ENDED: render_simple_email(
+            title="Complimentary access has ended",
+            greeting_name=name,
+            paragraphs=[
+                "Your complimentary access period has ended.",
+                "Access is paused until a paid plan is activated.",
+            ],
+            callout_html=email_callout(
+                "Update your plan to continue using Orderly Affairs.",
+                tone="warning",
+            ),
+            cta_url=portal_url(),
+            cta_label="Update your plan",
+            preheader="Your complimentary access has ended",
+        ),
     }
 
     if event not in subject_map:

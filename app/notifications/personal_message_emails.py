@@ -10,25 +10,26 @@ from sendgrid.helpers.mail import Mail
 from app.config import settings
 from app.database import users_collection
 from app.notifications.display_names import resolve_owner_display_name
+from app.notifications.email_layout import brand_logo_url, portal_url
 from app.security.message_crypto import load_message
 
 _TEMPLATE_PATH = Path(__file__).parent / "templates" / "personal_message.html"
 _MESSAGE_SUBJECT_HEADING = """
-              <h1 style="margin:0 0 20px 0; font-size:24px; line-height:1.3; color:#213D59; font-weight:700;">
+              <h1 style="margin:0 0 20px 0; font-size:22px; line-height:1.3; color:#10213f; font-weight:700;">
                 {subject}
               </h1>
 """
 _ATTACHMENT_BLOCK = """
           <!-- Optional attachment (audio/video/file) -->
           <tr>
-            <td style="padding:16px 32px 32px 32px;">
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f6f9; border-radius:6px;">
+            <td style="padding:16px 28px 28px 28px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f6f9; border:1px solid #e2e8f0; border-radius:12px;">
                 <tr>
-                  <td style="padding:20px 24px;">
-                    <p style="margin:0 0 12px 0; font-size:14px; color:#213D59; font-weight:600;">
+                  <td style="padding:18px 20px;">
+                    <p style="margin:0 0 12px 0; font-size:14px; color:#10213f; font-weight:600;">
                       {sender_name} included an attachment for you
                     </p>
-                    <a href="{url}" style="display:inline-block; background-color:#213D59; color:#ffffff; text-decoration:none; padding:12px 24px; border-radius:4px; font-size:15px; font-weight:600;">
+                    <a href="{url}" style="display:inline-block; background-color:#10213f; color:#ffffff; text-decoration:none; padding:12px 22px; border-radius:10px; font-size:14px; font-weight:700;">
                       View {attachment_type}
                     </a>
                   </td>
@@ -71,6 +72,8 @@ def render_personal_message_html(
     attachment_type: str | None = None,
 ) -> str:
     template = _load_template()
+    portal = portal_url()
+    portal_host = portal.replace("https://", "").replace("http://", "")
 
     subject_heading = ""
     if message_subject and message_subject.strip():
@@ -92,6 +95,9 @@ def render_personal_message_html(
         "{{message_subject_heading}}": subject_heading,
         "{{message_body}}": _format_message_body(message_body),
         "{{attachment_block}}": attachment_block,
+        "{{logo_url}}": html.escape(brand_logo_url(), quote=True),
+        "{{portal_url}}": html.escape(portal, quote=True),
+        "{{portal_host}}": html.escape(portal_host),
     }
 
     rendered = template

@@ -9,6 +9,11 @@ from app.notifications.display_names import (
     resolve_nextkin_display_name,
     resolve_owner_display_name,
 )
+from app.notifications.email_layout import (
+    email_callout,
+    escape,
+    render_simple_email,
+)
 
 # Sections that should NOT email immediate-access people when updated.
 SECTIONS_EXCLUDED_FROM_UPDATE_NOTIFICATIONS = frozenset({"4", "8", "9", "11", "17"})
@@ -101,24 +106,24 @@ async def _send_section_update_email(
     nk_name = resolve_nextkin_display_name(nextkin)
     login_url = nextkin_login_url()
 
-    html = f"""
-    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-      <p>Hello {nk_name},</p>
-      <p>
-        <strong>{owner_name}</strong> has updated
-        <strong>{section_title}</strong> in their Orderly Affairs Kit.
-      </p>
-      <p>
-        Because you have immediate access, you can sign in to review the latest
-        information when you are ready.
-      </p>
-      <p>
-        <a href="{login_url}">Log in to Orderly Affairs</a>
-      </p>
-      <hr />
-      <small>Orderly Affairs update notification</small>
-    </div>
-    """
+    html = render_simple_email(
+        title=f"{section_title} updated",
+        greeting_name=nk_name,
+        paragraphs=[
+            f"<strong>{escape(owner_name)}</strong> has updated "
+            f"<strong>{escape(section_title)}</strong> in their Orderly Affairs Kit.",
+            "Because you have immediate access, you can sign in to review the latest "
+            "information when you are ready.",
+        ],
+        details=[("Section", section_title)],
+        callout_html=email_callout(
+            "Sign in when you're ready to review the latest details.",
+            tone="info",
+        ),
+        cta_url=login_url,
+        cta_label="Log in to Orderly Affairs",
+        preheader=f"{owner_name} updated {section_title}",
+    )
 
     message = Mail(
         from_email=settings.EMAIL_SENDER,

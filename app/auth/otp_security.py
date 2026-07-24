@@ -693,14 +693,36 @@ def _normalize_email(email: str) -> str:
 
 
 def deliver_email_otp(email: str, otp: int) -> None:
+    from app.notifications.email_layout import (
+        email_callout,
+        email_code_box,
+        p,
+        render_email,
+    )
+
     sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
     message = Mail(
         from_email=settings.EMAIL_SENDER,
         to_emails=email,
         subject="Your Orderly Affairs verification code",
-        html_content=(
-            f"<p>Your verification code is <b>{otp}</b>.</p>"
-            "<p>It expires in 10 minutes.</p>"
+        html_content=render_email(
+            title="Verification code",
+            preheader=f"Your verification code is {otp}",
+            body_html="".join(
+                [
+                    p("Hello,"),
+                    p(
+                        "Your verification code is below. It expires in "
+                        "<b>10 minutes</b>."
+                    ),
+                    email_code_box(otp),
+                    email_callout(
+                        "If you did not request this code, you can safely ignore "
+                        "this email.",
+                        tone="info",
+                    ),
+                ]
+            ),
         ),
     )
     sg.send(message)

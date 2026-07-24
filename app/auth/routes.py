@@ -566,30 +566,45 @@ async def _approve_and_notify_if_needed(
 
 async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
     try:
+        from app.notifications.email_layout import (
+            email_callout,
+            email_info_rows,
+            escape,
+            p,
+            render_email,
+        )
+
         sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
 
         subject = "Orderly Affairs – Next-of-Kin Access Alert"
-
-        html = f"""
-        <div style="font-family:Arial,sans-serif;line-height:1.6">
-          <h3>Next-of-Kin Login Alert</h3>
-          <p>
-            <b>{nextkin.get("full_name") or nextkin["email"]}</b>
-            has just accessed your Orderly Affairs Kit.
-          </p>
-          <ul>
-            <li><b>Access Level:</b> {nextkin.get("access_level")}</li>
-            <li><b>Email:</b> {nextkin["email"]}</li>
-            <li><b>Time:</b> {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}</li>
-          </ul>
-          <p>
-            If this access was unexpected, you can revoke access immediately
-            from your Owner Dashboard.
-          </p>
-          <hr />
-          <small>Orderly Affairs Security Notification</small>
-        </div>
-        """
+        nk_label = nextkin.get("full_name") or nextkin["email"]
+        html = render_email(
+            title="Next-of-Kin login alert",
+            preheader=f"{nk_label} accessed your Orderly Affairs kit",
+            body_html="".join(
+                [
+                    p(
+                        f"<b>{escape(nk_label)}</b> has just accessed your "
+                        "Orderly Affairs Kit."
+                    ),
+                    email_info_rows(
+                        [
+                            ("Access level", nextkin.get("access_level") or "—"),
+                            ("Email", nextkin["email"]),
+                            (
+                                "Time",
+                                datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                            ),
+                        ]
+                    ),
+                    email_callout(
+                        "If this access was unexpected, revoke access immediately "
+                        "from your Owner Dashboard.",
+                        tone="warning",
+                    ),
+                ]
+            ),
+        )
 
         message = Mail(
             from_email=settings.EMAIL_SENDER,
@@ -1025,7 +1040,11 @@ async def nextkin_login(request: Request, response: Response):
     await enforce_auth_rate_limit(request, key=f"nok-login:{email}")
 
     user = await users_collection.find_one({"email": email, "role": "nextkin"})
-    if not user or not verify_password(master_password, user.get("password_hash", "")):
+    stored_password = ""
+    if user:
+        stored_password = user.get("password_hash") or user.get("password") or ""
+
+    if not user or not verify_password(master_password, stored_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     await reset_auth_rate_limit(request, key=f"nok-login:{email}")
@@ -1211,6 +1230,7 @@ async def create_nextkin(
             "relationship": req.relationship,
             "status": "ok",
             "message": f"Next-of-Kin '{req.full_name}' created successfully.",
+            "master_password": plain_password,
         }
 
     # 5️⃣ Handle single or bulk payloads with SAME endpoint
@@ -1255,6 +1275,7 @@ async def create_nextkin(
         "owner": owner.get("full_name") or owner["email"],
         "id": res["id"],
         "temp_password_sent": True,
+        "master_password": res.get("master_password") or "",
     }
 
 
@@ -1294,6 +1315,9 @@ async def get_my_nextkin(
             "has_master_password": bool(
                 nk.get("password_hash") or nk.get("master_password")
             ),
+            # Owner-only: return plaintext so Access Management cards / print
+            # card can show the existing login password with the eye toggle.
+            "master_password": nk.get("master_password") or "",
             "card_storage_location": nk.get("card_storage_location"),
             "key_bag_location": nk.get("key_bag_location"),
             "documents_bag_location": nk.get("documents_bag_location"),
@@ -1426,6 +1450,8 @@ async def delete_nextkin(
 
     # 4️⃣ (Optional) Send notification email
     try:
+        from app.notifications.email_layout import email_callout, escape, render_simple_email
+
         owner_name = await resolve_owner_display_name(owner)
         nk_name = resolve_nextkin_display_name(nextkin)
         sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
@@ -1433,15 +1459,21 @@ async def delete_nextkin(
             from_email=settings.EMAIL_SENDER,
             to_emails=nextkin["email"],
             subject="Orderly Affairs - Next-of-Kin Account Deleted",
-            html_content=f"""
-            <div style='font-family:Arial,sans-serif'>
-              <p>Hello {nk_name},</p>
-              <p>Your Next-of-Kin account under <b>{owner_name}</b> has been deleted.</p>
-              <p>If you believe this was a mistake, please contact {owner_name} directly.</p>
-              <hr/>
-              <small>Deleted on {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</small>
-            </div>
-            """,
+            html_content=render_simple_email(
+                title="Next-of-Kin account deleted",
+                greeting_name=nk_name,
+                paragraphs=[
+                    f"Your Next-of-Kin account under <b>{escape(owner_name)}</b> "
+                    "has been deleted.",
+                    f"If you believe this was a mistake, please contact "
+                    f"{escape(owner_name)} directly.",
+                ],
+                callout_html=email_callout(
+                    f"Deleted on {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                    tone="info",
+                ),
+                preheader="Your Next-of-Kin account was deleted",
+            ),
         )
         sg.send(message)
     except Exception as e:
@@ -2575,19 +2607,37 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
     # Persist first, then send. On send failure: remove OTP and error out —
     # never return success after failing to deliver the code.
     try:
+        from app.notifications.email_layout import (
+            email_callout,
+            email_code_box,
+            p,
+            render_email,
+        )
+
         sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
         message = Mail(
             from_email=settings.EMAIL_SENDER,
             to_emails=email,
             subject="Orderly Affairs Password Reset",
-            html_content=f"""
-            <div style="font-family:Arial">
-                <h3>Password Reset Request</h3>
-                <p>Your password reset code:</p>
-                <h2>{otp}</h2>
-                <p>This code expires in 10 minutes.</p>
-            </div>
-            """
+            html_content=render_email(
+                title="Password reset",
+                preheader=f"Your password reset code is {otp}",
+                body_html="".join(
+                    [
+                        p("Hello,"),
+                        p(
+                            "Use the code below to reset your password. It expires "
+                            "in <b>10 minutes</b>."
+                        ),
+                        email_code_box(otp),
+                        email_callout(
+                            "If you did not request a password reset, you can "
+                            "safely ignore this email.",
+                            tone="info",
+                        ),
+                    ]
+                ),
+            ),
         )
         sg.send(message)
     except Exception as e:
