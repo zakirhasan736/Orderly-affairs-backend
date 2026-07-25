@@ -51,8 +51,21 @@ async def _process_due(limit: int = 50):
             if not to_email:
                 raise RuntimeError("NOK email missing")
 
-            subject = job.get("subject") or "Letter to Next of Kin"
-            html = render_email_html(letter)
+            owner_name = None
+            try:
+                from app.database import users_collection
+                from app.notifications.display_names import resolve_owner_display_name
+
+                owner = await users_collection.find_one(
+                    {"_id": ObjectId(str(letter.get("owner_id"))), "role": "owner"}
+                )
+                if owner:
+                    owner_name = await resolve_owner_display_name(owner)
+            except Exception:
+                owner_name = None
+
+            subject = job.get("subject") or "A letter from your loved one"
+            html = render_email_html(letter, owner_name=owner_name)
             await send_email(to_email, subject, html)
 
             await scheduled_letters.update_one(

@@ -36,6 +36,8 @@ class OnlineAccount(BaseModel):
     two_factor_auth: Optional[str] = None
 
     account_value: Optional[str] = None
+    subscription_renewal_date: Optional[str] = None
+    account_expiry_date: Optional[str] = None
     closure_instructions: Optional[str] = None
 
     account_documents: Optional[UploadField] = None

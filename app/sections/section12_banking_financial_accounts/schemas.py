@@ -35,6 +35,9 @@ class BankAccount(BaseModel):
     online_banking: Optional[str] = None
     online_banking_password: Optional[str] = None
 
+    cd_maturity_date: Optional[str] = None
+    last_statement_date: Optional[str] = None
+
     automatic_payments: Optional[str] = None
     debit_cards: Optional[UploadField] = None
     safe_deposit_box: Optional[str] = None
@@ -57,6 +60,7 @@ class DigitalPaymentAccount(BaseModel):
     business_personal: Optional[str] = None
     regular_transactions: Optional[str] = None
     security_info: Optional[str] = None
+    subscription_renewal_date: Optional[str] = None
 
     service_documents: Optional[UploadField] = None
 

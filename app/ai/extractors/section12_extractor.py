@@ -55,10 +55,17 @@ If the account type is clearly present but does not match the list:
 - bank_contact = branch, banker, phone, email, address, website, or contact card details.
 - online_banking = online banking username or login ID if clearly present.
 - online_banking_password = online banking password only if clearly present.
+- cd_maturity_date = CD maturity date, certificate maturity, or account maturity / end date. Prefer ISO YYYY-MM-DD.
+- last_statement_date = statement date, "as of" date, or end of statement period when clearly shown. Prefer ISO YYYY-MM-DD.
 - automatic_payments = automatic debits, bill payments, transfers, subscriptions, deposits, or recurring payments.
 - debit_cards = debit card or ATM card info, last 4 digits, card notes, linked card notes, or card document location.
 - safe_deposit_box = safe deposit box number, branch, key location, authorized users, or notes.
 - account_documents = statements, signature cards, opening documents, storage location, or upload notes.
+
+Date rules (critical for 12A):
+- Always fill cd_maturity_date for CDs / certificates when maturity is shown.
+- Always fill last_statement_date when a statement date or period end is shown.
+- Do not leave these date fields null when the document clearly supports them.
 
 12B means Digital Payment Services.
 
@@ -95,7 +102,11 @@ Use one of these values only if clearly supported:
 - business_personal = Personal or Business if clearly shown.
 - regular_transactions = recurring transfers, payments, customer payments, subscriptions, or common transaction notes.
 - security_info = two-factor authentication, security questions, authenticator app, backup codes, recovery email/phone, or credential storage note.
+- subscription_renewal_date = next subscription / billing renewal date, plan renewal, or service renewal when shown. Prefer ISO YYYY-MM-DD.
 - service_documents = statements, screenshots, transaction records, account records, or storage location.
+
+Date rules (critical for 12B):
+- Fill subscription_renewal_date when renews on, next bill date, or plan renewal is shown.
 
 Common source documents:
 - bank statement
@@ -153,6 +164,8 @@ Required 12A patch shape:
       "bank_contact": null,
       "online_banking": null,
       "online_banking_password": null,
+      "cd_maturity_date": null,
+      "last_statement_date": null,
       "automatic_payments": null,
       "debit_cards": null,
       "safe_deposit_box": null,
@@ -175,6 +188,7 @@ Required 12B patch shape:
       "business_personal": null,
       "regular_transactions": null,
       "security_info": null,
+      "subscription_renewal_date": null,
       "service_documents": null
     }}
   ]

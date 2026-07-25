@@ -209,7 +209,7 @@ async def _safe_cache_additional_sections(**kwargs):
         logger.warning("Background section pre-cache failed: %s", repr(error))
 
 
-MAX_BACKGROUND_PREFETCH_SECTIONS = 3
+MAX_BACKGROUND_PREFETCH_SECTIONS = 8
 
 
 async def _safe_prefetch_sections(
@@ -237,7 +237,7 @@ async def _safe_prefetch_sections(
             mime_type=mime_type,
             additional_sections=additional_sections,
             exclude_section="__none__",
-            field_catalog=None,
+            field_catalog=None,  # per-section rich catalogs built inside cache
             sequential=False,
         )
 
@@ -280,11 +280,20 @@ async def _run_extractor(
     meta = get_section_meta(section_key) or {}
     resolved_subsection = subsection or meta.get("default_subsection")
 
+    catalog = field_catalog
+    if not catalog:
+        try:
+            from app.ai.section_field_ssot import build_rich_catalog_for_section
+
+            catalog = build_rich_catalog_for_section(section_key) or None
+        except Exception:
+            catalog = None
+
     return await extractor(
         document_url=f"local_file:{file_path}",
         subsection=resolved_subsection,
         mime_type=mime_type,
-        field_catalog=field_catalog,
+        field_catalog=catalog,
     )
 
 
@@ -314,12 +323,14 @@ async def _cache_additional_sections(
             return
 
         try:
+            # Always use the target section's own rich catalog — never the
+            # caller's catalog (which belongs to a different section).
             result = await _run_extractor(
                 section_key,
                 file_path=file_path,
                 mime_type=mime_type,
                 subsection=None,
-                field_catalog=field_catalog,
+                field_catalog=None,
             )
             if isinstance(result, dict):
                 cached_extractions[section_key] = result

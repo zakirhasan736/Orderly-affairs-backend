@@ -33,8 +33,11 @@ class Settings(BaseSettings):
     SENDGRID_API_KEY: str
     EMAIL_SENDER: EmailStr
     MESSAGES_FROM_EMAIL: EmailStr = "messages@orderly-affairs.com"
-    # Absolute URL for logo in HTML emails (defaults to FRONTEND_URL/images/brand-logo.png)
+    # Absolute HTTPS logo URL for HTML emails. Leave blank to use Cloudinary default
+    # (email clients cannot load localhost / private image URLs).
     EMAIL_LOGO_URL: str | None = None
+    # Optional public support phone shown in NOK letter footers
+    SUPPORT_PHONE: str | None = None
 
     # === Cloudinary ===
     CLOUDINARY_CLOUD_NAME: str

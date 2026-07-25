@@ -28,6 +28,7 @@ SECTION8_FULL_SCHEMA = {
                             "organization_type": {"type": ["string", "null"]},
                             "organization_type_other": {"type": ["string", "null"]},
                             "membership_details": {"type": ["string", "null"]},
+                            "renewal_date": {"type": ["string", "null"]},
                             "contact_info": {"type": ["string", "null"]},
                             "importance": {"type": ["string", "null"]},
                             "notify_instructions": {"type": ["string", "null"]},

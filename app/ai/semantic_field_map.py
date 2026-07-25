@@ -99,11 +99,102 @@ SEMANTIC_CONCEPTS: dict[str, dict[str, Any]] = {
             "end_date",
             "coverage_ends",
             "term_end",
-            "renewal_date",
         ],
         "targets": {
             "vehicles": "registration_expiry",
             "insurance_policies": "policy_expiry",
+            "7": "policy_expiry",
+            "5": "registration_expiry",
+        },
+    },
+    "renewal_date": {
+        "label": "Membership / subscription renewal",
+        "aliases": [
+            "renewal_date",
+            "membership_renewal",
+            "membership_renewal_date",
+            "dues_renewal",
+            "dues_date",
+            "next_renewal",
+            "renews_on",
+            "renewal",
+            "renews",
+        ],
+        "targets": {
+            "community_memberships": "renewal_date",
+            "8": "renewal_date",
+            "passwords_online_accounts": "subscription_renewal_date",
+            "13": "subscription_renewal_date",
+            "banking_financial_accounts": "subscription_renewal_date",
+            "12": "subscription_renewal_date",
+        },
+    },
+    "subscription_renewal": {
+        "label": "Subscription / plan renewal",
+        "aliases": [
+            "subscription_renewal_date",
+            "subscription_renewal",
+            "subscription_expires",
+            "plan_renewal",
+            "plan_renewal_date",
+            "billing_renewal",
+            "next_billing_date",
+            "next_bill_date",
+        ],
+        "targets": {
+            "passwords_online_accounts": "subscription_renewal_date",
+            "13": "subscription_renewal_date",
+            "banking_financial_accounts": "subscription_renewal_date",
+            "12": "subscription_renewal_date",
+            "community_memberships": "renewal_date",
+            "8": "renewal_date",
+        },
+    },
+    "account_expiry": {
+        "label": "Account / access expiry",
+        "aliases": [
+            "account_expiry_date",
+            "account_expiry",
+            "account_expiration",
+            "access_expires",
+            "trial_ends",
+            "trial_end_date",
+            "plan_expires",
+            "plan_end_date",
+        ],
+        "targets": {
+            "passwords_online_accounts": "account_expiry_date",
+            "13": "account_expiry_date",
+        },
+    },
+    "maturity_date": {
+        "label": "CD / account maturity",
+        "aliases": [
+            "cd_maturity_date",
+            "maturity_date",
+            "maturity",
+            "matures",
+            "matures_on",
+            "cd_maturity",
+            "certificate_maturity",
+        ],
+        "targets": {
+            "banking_financial_accounts": "cd_maturity_date",
+            "12": "cd_maturity_date",
+        },
+    },
+    "last_statement_date": {
+        "label": "Last statement date",
+        "aliases": [
+            "last_statement_date",
+            "statement_date",
+            "statement_as_of",
+            "as_of_date",
+            "statement_period_end",
+        ],
+        "targets": {
+            "banking_financial_accounts": "last_statement_date",
+            "12": "last_statement_date",
         },
     },
     "coverage_amount": {
@@ -213,7 +304,8 @@ def as_plain_text(value: Any) -> str | None:
 _PERIOD_END_RE = re.compile(
     r"(?:"
     r"policy\s*period|period|valid(?:\s*(?:from|thru|through|until))?|expires?(?:\s*on)?|"
-    r"expiration|coverage\s*(?:period|ends?)|term|effective|from"
+    r"expiration|coverage\s*(?:period|ends?)|term|effective|from|"
+    r"renew(?:al|s)?(?:\s*(?:date|on|by))?|dues(?:\s*(?:due|date))?|matures?(?:\s*on)?"
     r")"
     r"[^\d]{0,48}"
     r"(?:"
@@ -229,6 +321,9 @@ _PERIOD_END_RE = re.compile(
     r"|"
     # Single end after to/until/ends
     r"(?:to|through|thru|until|ends?)\s*"
+    r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})"
+    r"|"
+    # Single date immediately after the keyword (renewal 12/31/2026)
     r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})"
     r")",
     re.IGNORECASE,
@@ -309,9 +404,39 @@ def normalize_date_to_iso(value: str | None) -> str | None:
         try:
             return f"{y:04d}-{month:02d}-{day:02d}"
         except Exception:
-            return text
+            return None
 
-    return text
+    # Month name: December 31, 2025 / Dec 31 2025
+    named = re.match(
+        r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+        r"\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$",
+        text,
+        re.IGNORECASE,
+    )
+    if named:
+        month = _MONTH_NAME_TO_NUM.get(named.group(1).lower().rstrip("."))
+        if month:
+            try:
+                return f"{int(named.group(3)):04d}-{month:02d}-{int(named.group(2)):02d}"
+            except Exception:
+                return None
+
+    return None
+
+
+_EMBEDDED_DATE_RE = re.compile(
+    r"("
+    r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+    r"|"
+    r"\d{4}-\d{2}-\d{2}"
+    r"|"
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def extract_end_date_from_text(text: str | None) -> str | None:
@@ -339,6 +464,7 @@ def extract_end_date_from_text(text: str | None) -> str | None:
             match.group(2)
             or match.group(4)
             or match.group(5)
+            or match.group(6)
             or match.group(3)
             or match.group(1)
         )
@@ -352,6 +478,54 @@ def extract_end_date_from_text(text: str | None) -> str | None:
     if re.match(r"^(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})$", raw.strip()):
         return normalize_date_to_iso(raw.strip())
 
+    # Embedded single date after renew / maturity / expires / statement wording
+    if re.search(
+        r"\b(renew|renewal|renews|dues|maturity|matures|expir|valid|statement|as of|trial)\b",
+        raw,
+        re.IGNORECASE,
+    ):
+        embedded = list(_EMBEDDED_DATE_RE.finditer(raw))
+        if embedded:
+            return normalize_date_to_iso(embedded[-1].group(1))
+
+    return None
+
+
+_DATE_CONCEPTS = frozenset(
+    {
+        "policy_expiry",
+        "renewal_date",
+        "subscription_renewal",
+        "account_expiry",
+        "maturity_date",
+        "last_statement_date",
+    }
+)
+
+
+def infer_date_concept_from_text(key: str, text: str) -> str | None:
+    """Classify a free-text date by field name + surrounding wording."""
+    blob = f"{_norm(key)} {_norm(text[:160])}"
+    if re.search(
+        r"\b(subscription renew|plan renew|billing renew|next bill|next billing)\b",
+        blob,
+    ):
+        return "subscription_renewal"
+    if re.search(r"\b(renewal|renews|dues|membership renew)\b", blob):
+        return "renewal_date"
+    if re.search(r"\b(maturity|matures|cd maturity|certificate of deposit)\b", blob):
+        return "maturity_date"
+    if re.search(r"\b(statement date|as of|statement period|last statement)\b", blob):
+        return "last_statement_date"
+    if re.search(
+        r"\b(account expir|access expir|trial end|plan expir|plan end)\b", blob
+    ):
+        return "account_expiry"
+    if re.search(
+        r"\b(policy|coverage|valid through|valid until|expir|period end|term end)\b",
+        blob,
+    ):
+        return "policy_expiry"
     return None
 
 
@@ -367,14 +541,14 @@ def collect_concepts_from_item(item: dict) -> dict[str, str]:
             continue
         concept = resolve_concept_from_key(key)
         if concept and concept not in found:
-            # If expiry field holds a range, keep only the end date.
-            if concept == "policy_expiry":
+            # Date concepts: prefer end-of-range / ISO when the value is a period.
+            if concept in _DATE_CONCEPTS:
                 end = extract_end_date_from_text(text) or normalize_date_to_iso(text)
                 found[concept] = end or text
             else:
                 found[concept] = text
 
-    # Infer expiry from any text-ish field (period wording often lands in notes/premium).
+    # Infer expiry from insurance-ish notes when still missing.
     if "policy_expiry" not in found:
         preferred_keys = (
             "premium_info",
@@ -393,6 +567,21 @@ def collect_concepts_from_item(item: dict) -> dict[str, str]:
                 found["policy_expiry"] = end
                 break
 
+    # Infer other date concepts from wording in any field (memberships, CDs, subscriptions).
+    for key, value in item.items():
+        if key.startswith("__"):
+            continue
+        text = as_plain_text(value)
+        if not text:
+            continue
+        end = extract_end_date_from_text(text) or normalize_date_to_iso(text)
+        if not end:
+            continue
+        concept = infer_date_concept_from_text(key, text)
+        if concept and concept not in found:
+            found[concept] = end
+
+    # Last resort for insurance/vehicle docs: any clear period end → policy_expiry.
     if "policy_expiry" not in found:
         for key, value in item.items():
             if key.startswith("__"):
@@ -402,10 +591,9 @@ def collect_concepts_from_item(item: dict) -> dict[str, str]:
                 found["policy_expiry"] = end
                 break
 
-    if "policy_expiry" in found:
-        found["policy_expiry"] = (
-            normalize_date_to_iso(found["policy_expiry"]) or found["policy_expiry"]
-        )
+    for concept in _DATE_CONCEPTS:
+        if concept in found:
+            found[concept] = normalize_date_to_iso(found[concept]) or found[concept]
 
     return found
 
@@ -424,7 +612,7 @@ def apply_concepts_to_item(
         existing = as_plain_text(next_item.get(target))
         if existing:
             # Still normalize an existing range into an end date.
-            if concept == "policy_expiry":
+            if concept in _DATE_CONCEPTS:
                 end = extract_end_date_from_text(existing)
                 if end and end != existing:
                     next_item[target] = end

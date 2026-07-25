@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from datetime import datetime
 from enum import Enum
 
 from sendgrid import SendGridAPIClient
@@ -5,11 +8,12 @@ from sendgrid.helpers.mail import Mail
 
 from app.config import settings
 from app.notifications.email_layout import (
-    email_callout,
-    p,
+    billing_url,
+    email_cta_row,
+    escape,
+    paper_body,
     portal_url,
-    render_email,
-    render_simple_email,
+    render_reminder_card,
 )
 
 
@@ -20,9 +24,34 @@ class TrialEmailEvent(Enum):
     ENDED = "ended"
 
 
+def _fmt_day(dt: datetime | None) -> str:
+    if not dt:
+        return "the end date"
+    return dt.strftime("%b %-d") if False else dt.strftime("%b %d").replace(" 0", " ")
+
+
+def _weekday(dt: datetime | None) -> str:
+    if not dt:
+        return "soon"
+    return dt.strftime("%A")
+
+
+def _trial_end(user: dict) -> datetime | None:
+    raw = (user.get("billing") or {}).get("trial_end")
+    if raw is None:
+        return None
+    if getattr(raw, "tzinfo", None) is not None:
+        return raw.replace(tzinfo=None)
+    return raw
+
+
 async def send_trial_email(*, user: dict, event: TrialEmailEvent):
     has_card = bool((user.get("billing") or {}).get("payment_method_attached"))
-    name = user.get("full_name") or user.get("name")
+    trial_end = _trial_end(user)
+    end_label = _fmt_day(trial_end)
+    weekday = _weekday(trial_end)
+    bill = billing_url()
+    plans = portal_url()
 
     subject_map = {
         TrialEmailEvent.DAY_10: "Your Orderly Affairs trial – 10 days remaining",
@@ -30,69 +59,71 @@ async def send_trial_email(*, user: dict, event: TrialEmailEvent):
         TrialEmailEvent.ENDED: "Your trial has ended",
     }
 
-    if has_card:
-        charge_note_10 = (
-            "Your saved card will be charged automatically when the trial ends "
-            "unless you cancel."
-        )
-        charge_note_3 = "Please ensure your payment method is valid."
-        charge_note_ended = "We are attempting payment using your saved card."
-        tone_ended = "info"
-    else:
-        charge_note_10 = (
-            "Add a payment method before the trial ends to keep access without "
-            "interruption."
-        )
-        charge_note_3 = (
-            "No card is on file yet. Add billing details soon or access will pause "
-            "when the trial ends."
-        )
-        charge_note_ended = (
-            "No successful payment was completed. Access is paused until you "
-            "activate a paid plan."
-        )
-        tone_ended = "warning"
-
-    body_map = {
-        TrialEmailEvent.DAY_10: render_simple_email(
-            title="10 days left on your trial",
-            greeting_name=name,
-            paragraphs=[
-                "Your free trial will end in <b>10 days</b>.",
-                charge_note_10,
-            ],
-            cta_url=portal_url(),
-            cta_label="Open Orderly Affairs",
+    if event == TrialEmailEvent.DAY_10:
+        if has_card:
+            body = (
+                f"Your saved card stays ready. On {escape(end_label)} you’ll be charged "
+                "$94.95 for the year, or $9.95 monthly if you switch — unless you cancel."
+            )
+            cta = email_cta_row((bill, "Review billing"), (plans, "Compare plans"))
+        else:
+            body = (
+                f"Add a card before {escape(end_label)} and nothing changes — you’ll be "
+                "charged $94.95 for the year, or $9.95 monthly if you prefer. No card yet "
+                "means your kit becomes read-only when the trial ends. Nothing is deleted "
+                "either way."
+            )
+            cta = email_cta_row((bill, "Add a card"), (plans, "Compare plans"))
+        html = render_reminder_card(
+            schedule_label="Daily 09:00 · trial ending in 10 days",
+            title=f"Your trial ends {weekday}.",
             preheader="Your free trial ends in 10 days",
-        ),
-        TrialEmailEvent.DAY_3: render_simple_email(
-            title="Trial ends in 3 days",
-            greeting_name=name,
-            paragraphs=[
-                "Your free trial ends in <b>3 days</b>.",
-                charge_note_3,
-            ],
-            callout_html=email_callout(
-                "Review billing now so your vault stays available.",
-                tone="warning",
-            ),
-            cta_url=portal_url(),
-            cta_label="Manage billing",
+            body_html=paper_body(body) + cta,
+        )
+    elif event == TrialEmailEvent.DAY_3:
+        if has_card:
+            body = (
+                f"Three days left. On {escape(end_label)} your card will be charged "
+                "$94.95 yearly (or $9.95 monthly if that’s your plan). Make sure the "
+                "card is still valid."
+            )
+            cta = email_cta_row((bill, "Review billing"), (plans, "Compare plans"))
+        else:
+            body = (
+                f"Add a card before {escape(end_label)} and nothing changes — you’ll be "
+                "charged $94.95 for the year, or $9.95 monthly if you prefer. No card yet "
+                f"means your kit becomes read-only on {_weekday(_next_day(trial_end))}. "
+                "Nothing is deleted either way."
+            )
+            cta = email_cta_row((bill, "Add a card"), (plans, "Compare plans"))
+        html = render_reminder_card(
+            schedule_label="Daily 09:00 · trial ending in 3 days",
+            title=f"Your trial ends {weekday}.",
             preheader="Your free trial ends in 3 days",
-        ),
-        TrialEmailEvent.ENDED: render_simple_email(
-            title="Your trial has ended",
-            greeting_name=name,
-            paragraphs=["Your trial has ended.", charge_note_ended],
-            callout_html=email_callout(
-                "Complete billing to restore or continue access.",
-                tone=tone_ended,
-            ),
-            cta_url=portal_url(),
-            cta_label="Continue to portal",
+            body_html=paper_body(body) + cta,
+        )
+    elif event == TrialEmailEvent.ENDED:
+        if has_card:
+            body = (
+                "Your trial has ended. We’re attempting payment with your saved card. "
+                "You’ll keep access once payment succeeds."
+            )
+            cta = email_cta_row((bill, "Check billing"))
+        else:
+            body = (
+                "Your trial has ended and no card is on file. Your kit is read-only "
+                "until you activate a paid plan. Nothing has been deleted."
+            )
+            cta = email_cta_row((bill, "Add a card"), (plans, "Compare plans"))
+        html = render_reminder_card(
+            schedule_label="Daily 09:00 · trial ended",
+            title="Your trial has ended.",
             preheader="Your Orderly Affairs trial has ended",
-        ),
-    }
+            body_html=paper_body(body) + cta,
+            warning=not has_card,
+        )
+    else:
+        return
 
     if event not in subject_map:
         return
@@ -102,6 +133,14 @@ async def send_trial_email(*, user: dict, event: TrialEmailEvent):
         from_email=settings.EMAIL_SENDER,
         to_emails=user["email"],
         subject=subject_map[event],
-        html_content=body_map[event],
+        html_content=html,
     )
     sg.send(message)
+
+
+def _next_day(dt: datetime | None) -> datetime | None:
+    if not dt:
+        return None
+    from datetime import timedelta
+
+    return dt + timedelta(days=1)

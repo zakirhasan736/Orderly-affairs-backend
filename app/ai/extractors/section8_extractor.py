@@ -48,11 +48,16 @@ Field meanings:
 - organization_name = name of the group, club, church, association, nonprofit, volunteer organization, team, hobby group, or membership organization.
 - organization_type = category of organization using the allowed values above.
 - organization_type_other = custom organization type when organization_type is Other.
-- membership_details = role, member ID, membership number, responsibilities, dues, renewal date, status, or account/login notes.
+- membership_details = role, member ID, membership number, responsibilities, dues amount, status, or account/login notes (do NOT put the renewal date here — use renewal_date).
+- renewal_date = next membership renewal, dues due date, or membership expiry / end date. Prefer ISO YYYY-MM-DD. If the document shows a period, use the END date only.
 - contact_info = phone, email, address, website, leader/contact person, office contact, or business card details.
 - importance = why this group is meaningful, memories, personal notes, or sentimental importance when clearly stated.
 - notify_instructions = whether to notify the organization, who should be notified, and any special requests after death/incapacity.
 - documents = membership cards, certificates, files, records, storage location, or related document notes.
+
+Date rules (critical):
+- Always fill renewal_date when the document shows renews on, dues due, membership expires, valid through, or a membership period end.
+- Do not bury renewal/expiry dates only inside membership_details when renewal_date can be filled.
 
 Common source documents:
 - membership card
@@ -96,6 +101,7 @@ Required patch shape:
       "organization_type": null,
       "organization_type_other": null,
       "membership_details": null,
+      "renewal_date": null,
       "contact_info": null,
       "importance": null,
       "notify_instructions": null,

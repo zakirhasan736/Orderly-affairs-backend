@@ -110,8 +110,15 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     from app.auth.otp_security import ensure_otp_send_lock_index
+    from app.auth.phone import ensure_owner_phone_index
+    from app.database import users_collection
 
     await ensure_otp_send_lock_index()
+    try:
+        await ensure_owner_phone_index(users_collection)
+    except Exception as exc:
+        if settings.APP_ENV == "development":
+            print("Owner phone unique index warning:", exc)
 
     # 1️⃣ Start APScheduler-based NOK LETTERS
     start_nok_letter_scheduler()
@@ -124,6 +131,11 @@ async def startup():
 
     # 4️⃣ Expiry / renewal reminders for ALL sections (10 → 5 → 1 → 0 days)
     start_section_expiry_scheduler()
+
+    # 5️⃣ Semi-annual kit review (“keep it current”)
+    from app.notifications.kit_review_emails import start_kit_review_scheduler
+
+    start_kit_review_scheduler()
     
     # 2️⃣ Start simple async loop for messages
     async def message_scheduler_loop():

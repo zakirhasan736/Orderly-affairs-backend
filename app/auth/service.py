@@ -196,8 +196,25 @@ async def trigger_death_letters(owner_id: str) -> dict:
             if not to_email:
                 raise RuntimeError("NOK email missing")
 
-            html = render_email_html(letter)
-            await send_email(to_email, "Letter to Next of Kin", html)
+            owner_name = None
+            try:
+                from app.database import users_collection
+                from app.notifications.display_names import resolve_owner_display_name
+
+                owner = await users_collection.find_one(
+                    {"_id": ObjectId(str(owner_id)), "role": "owner"}
+                )
+                if not owner:
+                    owner = await users_collection.find_one(
+                        {"_id": ObjectId(str(letter.get("owner_id"))), "role": "owner"}
+                    )
+                if owner:
+                    owner_name = await resolve_owner_display_name(owner)
+            except Exception:
+                owner_name = None
+
+            html = render_email_html(letter, owner_name=owner_name)
+            await send_email(to_email, "A letter from your loved one", html)
 
             await nok_letters_collection.update_one(
                 {"_id": letter["_id"]},

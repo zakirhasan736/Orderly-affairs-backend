@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.auth.phone import format_phone
+from app.auth.phone import (
+    format_phone,
+    looks_like_email,
+    looks_like_phone_identifier,
+)
 from app.security.auth_rate_limit import _as_naive_utc, _lock_duration_for_level
 from app.security.error_handlers import (
     GENERIC_NOT_FOUND,
@@ -33,6 +37,14 @@ class TestPhoneFormatting:
     def test_rejects_invalid(self):
         with pytest.raises(ValueError):
             format_phone("123")
+
+    def test_login_identifier_helpers(self):
+        assert looks_like_email("a@b.com") is True
+        assert looks_like_email("+12025550123") is False
+        assert looks_like_phone_identifier("+12025550123") is True
+        assert looks_like_phone_identifier("(202) 555-0123") is True
+        assert looks_like_phone_identifier("a@b.com") is False
+        assert looks_like_phone_identifier("123") is False
 
 
 class TestOtpStorage:

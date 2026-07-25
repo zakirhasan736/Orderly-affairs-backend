@@ -56,8 +56,16 @@ Field meanings:
 - recovery_info = backup email, recovery phone, security questions, recovery codes, account recovery notes, or where recovery info is stored.
 - two_factor_auth = 2FA method, authenticator app, SMS/email 2FA, security key, backup codes, recovery code storage, or trusted devices.
 - account_value = financial value, personal importance, business importance, subscription importance, stored files/photos, customer data, domain ownership, or other account significance.
+- subscription_renewal_date = next subscription renewal, billing renew date, or plan renews-on date. Prefer ISO YYYY-MM-DD. Do NOT put this only inside account_value.
+- account_expiry_date = account access expiry, trial end, plan end, or membership/account expiration (distinct from renewal when both appear). Prefer ISO YYYY-MM-DD.
 - closure_instructions = instructions for closing, deleting, memorializing, transferring, preserving, or notifying contacts about the account.
 - account_documents = screenshots, account statements, login info sheet, password manager export note, storage location, upload note, or related documents.
+
+Date rules (critical):
+- Streaming, shopping, SaaS, and membership logins often show renewal or expiry — always fill subscription_renewal_date and/or account_expiry_date when present.
+- If only one date is shown and it is labeled renewal/billing, use subscription_renewal_date.
+- If labeled expires / valid until / trial ends, use account_expiry_date.
+- If both appear, fill both fields.
 
 Common source documents:
 - password manager export
@@ -110,6 +118,8 @@ Required patch shape:
       "recovery_info": null,
       "two_factor_auth": null,
       "account_value": null,
+      "subscription_renewal_date": null,
+      "account_expiry_date": null,
       "closure_instructions": null,
       "account_documents": null
     }}

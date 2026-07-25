@@ -307,11 +307,26 @@ def insurance_cache_missing_policy_number(result: dict | None) -> bool:
 
 def enrich_primary_result(result: dict | None, section_key: str) -> dict | None:
     """Canonicalize fields on the primary extraction before cache/return."""
+    from app.ai.notes_field_recovery import recover_fields_from_notes
+
+    enriched = result
     if section_key == "vehicles":
-        return _enrich_items_in_place(result, "vehicles", "5A")
-    if section_key == "insurance_policies":
-        return _enrich_items_in_place(result, "insurance_policies", "7A")
-    return result
+        enriched = _enrich_items_in_place(result, "vehicles", "5A")
+    elif section_key == "insurance_policies":
+        enriched = _enrich_items_in_place(result, "insurance_policies", "7A")
+    elif section_key == "community_memberships":
+        enriched = _enrich_items_in_place(result, "community_memberships", "8A")
+    elif section_key == "banking_financial_accounts":
+        enriched = _enrich_items_in_place(result, "banking_financial_accounts", "12A")
+        enriched = _enrich_items_in_place(
+            enriched, "banking_financial_accounts", "12B"
+        )
+    elif section_key == "passwords_online_accounts":
+        enriched = _enrich_items_in_place(
+            result, "passwords_online_accounts", "13A"
+        )
+
+    return recover_fields_from_notes(enriched, section_key) or enriched
 
 
 def build_detected_facts_payload(

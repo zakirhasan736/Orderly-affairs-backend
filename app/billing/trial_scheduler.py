@@ -181,7 +181,7 @@ def start_trial_scheduler():
     scheduler.add_job(
         process_billing_schedulers,
         trigger="cron",
-        hour=0,
+        hour=9,
         minute=0,
         id="trial-reminder-job",
         replace_existing=True,

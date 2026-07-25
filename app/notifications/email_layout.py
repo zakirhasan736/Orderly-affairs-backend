@@ -1,7 +1,7 @@
-"""Shared modern HTML email layout for Orderly Affairs.
+"""Shared HTML email layout for Orderly Affairs.
 
-All transactional emails should wrap content with ``render_email`` so branding
-stays consistent: navy header with logo + title, polished body card, footer.
+Paper / ink brand system for reminder + transactional mail.
+Email-safe tables only (no flex). Fluid max-width — never fixed mock widths.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from typing import Iterable, Mapping, Sequence
 
 from app.config import settings
 
+# Legacy navy (kept for any remaining call sites)
 BRAND_NAVY = "#10213f"
 BRAND_NAVY_SOFT = "#1a335f"
 BRAND_MUTED = "#64748b"
@@ -19,18 +20,56 @@ BRAND_BG = "#f4f6f9"
 BRAND_CARD = "#ffffff"
 BRAND_ACCENT = "#2563eb"
 
+# Paper / ink (reminder templates + preferred shell)
+INK = "#132b26"
+INK_SOFT = "#3c4a46"
+INK_MUTED = "#8b9995"
+INK_HINT = "#6e7c77"
+PAPER = "#f2f1ec"
+PAPER_SOFT = "#f7f6f2"
+LINE = "#e4e6e1"
+LINE_SOFT = "#f2f1ec"
+WARN_INK = "#7a5a1c"
+WARN_BORDER = "#e8d9b5"
+DANGER = "#b4483f"
+DANGER_BORDER = "#e5b6b0"
+AMBER = "#8a6420"
+
+FONT_SANS = (
+    "'Instrument Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',"
+    "Helvetica,Arial,sans-serif"
+)
+FONT_SERIF = "'Instrument Serif',Georgia,'Times New Roman',serif"
+FONT_MONO = "'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace"
+
+# Hosted brand mark for email headers (email clients cannot load localhost).
+_DEFAULT_EMAIL_LOGO_URL = (
+    "https://res.cloudinary.com/davvdgwe3/image/upload/v1784951738/orderly-affairs/brand-logo.png"
+)
+
 
 def brand_logo_url() -> str:
-    """Public logo URL used in email headers (must be absolute for clients)."""
+    """Public logo URL used in email headers (must be absolute HTTPS for clients)."""
     custom = (getattr(settings, "EMAIL_LOGO_URL", None) or "").strip()
     if custom:
         return custom
-    base = (settings.FRONTEND_URL or "https://portal.orderly-affairs.com").rstrip("/")
-    return f"{base}/images/brand-logo.png"
+    return _DEFAULT_EMAIL_LOGO_URL
 
 
 def portal_url() -> str:
     return (settings.FRONTEND_URL or "https://portal.orderly-affairs.com").rstrip("/")
+
+
+def billing_url() -> str:
+    return f"{portal_url()}/dashboard"
+
+
+def kit_url() -> str:
+    return f"{portal_url()}/dashboard"
+
+
+def access_url() -> str:
+    return f"{portal_url()}/dashboard"
 
 
 def escape(value: object) -> str:
@@ -38,18 +77,57 @@ def escape(value: object) -> str:
 
 
 def email_button(url: str, label: str) -> str:
+    """Primary ink pill CTA (left-aligned, desktop-friendly)."""
+    return email_pill_button(url, label, variant="primary")
+
+
+def email_pill_button(
+    url: str,
+    label: str,
+    *,
+    variant: str = "primary",
+    full_width: bool = False,
+) -> str:
     safe_url = escape(url)
     safe_label = escape(label)
+    if variant == "danger":
+        bg, color, border = "#ffffff", DANGER, DANGER_BORDER
+    elif variant == "secondary":
+        bg, color, border = "#ffffff", INK, LINE
+    else:
+        bg, color, border = INK, "#ffffff", INK
+
+    display = "block" if full_width else "inline-block"
+    width = "width:100%; box-sizing:border-box; text-align:center;" if full_width else ""
     return f"""
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 8px 0;">
-      <tr>
-        <td align="left" style="border-radius:10px; background-color:{BRAND_NAVY};">
-          <a href="{safe_url}"
-             style="display:inline-block; padding:14px 22px; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; font-size:14px; font-weight:700; color:#ffffff; text-decoration:none; border-radius:10px; letter-spacing:0.01em;">
-            {safe_label}
-          </a>
-        </td>
-      </tr>
+    <a href="{safe_url}"
+       style="display:{display}; {width} padding:13px 20px; border-radius:22px; background:{bg}; color:{color}; border:1px solid {border}; font-family:{FONT_SANS}; font-size:13.5px; font-weight:500; text-decoration:none; line-height:1.2;">
+      {safe_label}
+    </a>
+    """
+
+
+def email_cta_row(
+    primary: tuple[str, str],
+    secondary: tuple[str, str] | None = None,
+    *,
+    secondary_variant: str = "secondary",
+) -> str:
+    """Reminder CTAs: full-width stacked pills (mobile-first, fluid width)."""
+    rows = [
+        f"""<tr><td style="padding:0 0 {'10px' if secondary else '0'} 0;">
+          {email_pill_button(primary[0], primary[1], variant="primary", full_width=True)}
+        </td></tr>"""
+    ]
+    if secondary:
+        rows.append(
+            f"""<tr><td style="padding:0;">
+              {email_pill_button(secondary[0], secondary[1], variant=secondary_variant, full_width=True)}
+            </td></tr>"""
+        )
+    return f"""
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0 0 0; width:100%;">
+      {''.join(rows)}
     </table>
     """
 
@@ -59,11 +137,11 @@ def email_code_box(code: str | int) -> str:
     return f"""
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:20px 0;">
       <tr>
-        <td align="center" style="background:{BRAND_BG}; border:1px solid {BRAND_BORDER}; border-radius:14px; padding:22px 16px;">
-          <p style="margin:0 0 8px 0; font-size:12px; font-weight:600; letter-spacing:0.12em; text-transform:uppercase; color:{BRAND_MUTED}; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+        <td align="center" style="background:{PAPER_SOFT}; border:1px solid {LINE}; border-radius:14px; padding:22px 16px;">
+          <p style="margin:0 0 8px 0; font-size:12px; font-weight:600; letter-spacing:0.12em; text-transform:uppercase; color:{INK_MUTED}; font-family:{FONT_MONO};">
             Verification code
           </p>
-          <p style="margin:0; font-size:32px; font-weight:800; letter-spacing:0.28em; color:{BRAND_NAVY}; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;">
+          <p style="margin:0; font-size:32px; font-weight:800; letter-spacing:0.28em; color:{INK}; font-family:{FONT_MONO};">
             {safe}
           </p>
         </td>
@@ -75,13 +153,14 @@ def email_code_box(code: str | int) -> str:
 def email_info_rows(rows: Sequence[tuple[str, str]]) -> str:
     """Render a compact labeled detail list."""
     items = []
-    for label, value in rows:
+    for i, (label, value) in enumerate(rows):
+        border = f"border-bottom:1px solid {LINE};" if i < len(rows) - 1 else ""
         items.append(
             f"""
             <tr>
-              <td style="padding:10px 0; border-bottom:1px solid {BRAND_BORDER}; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
-                <p style="margin:0 0 4px 0; font-size:11px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:{BRAND_MUTED};">{escape(label)}</p>
-                <p style="margin:0; font-size:15px; font-weight:600; color:{BRAND_NAVY}; line-height:1.5;">{escape(value)}</p>
+              <td style="padding:10px 0; {border} font-family:{FONT_SANS};">
+                <p style="margin:0 0 4px 0; font-size:11px; font-weight:500; letter-spacing:0.08em; text-transform:uppercase; color:{INK_MUTED}; font-family:{FONT_MONO};">{escape(label)}</p>
+                <p style="margin:0; font-size:15px; font-weight:600; color:{INK}; line-height:1.5;">{escape(value)}</p>
               </td>
             </tr>
             """
@@ -93,18 +172,65 @@ def email_info_rows(rows: Sequence[tuple[str, str]]) -> str:
     """
 
 
+def email_expiry_rows(
+    rows: Sequence[tuple[str, str, str]],
+) -> str:
+    """Expiry list: (section_code, label, date_text)."""
+    if not rows:
+        return ""
+    items: list[str] = []
+    for i, (code, label, date_text) in enumerate(rows):
+        border = f"border-bottom:1px solid {LINE_SOFT};" if i < len(rows) - 1 else ""
+        items.append(
+            f"""
+            <tr>
+              <td style="padding:14px 16px; {border} vertical-align:middle; width:66px;">
+                <span style="font-family:{FONT_MONO}; font-size:10px; font-weight:500; color:{INK_MUTED};">{escape(code)}</span>
+              </td>
+              <td style="padding:14px 8px; {border} vertical-align:middle; font-family:{FONT_SANS}; font-size:14px; color:{INK};">
+                {escape(label)}
+              </td>
+              <td style="padding:14px 16px; {border} vertical-align:middle; text-align:right; white-space:nowrap; font-family:{FONT_SANS}; font-size:13px; font-weight:500; color:{AMBER};">
+                {escape(date_text)}
+              </td>
+            </tr>
+            """
+        )
+    return f"""
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0 0 0; border:1px solid {LINE_SOFT}; border-radius:11px; overflow:hidden;">
+      {''.join(items)}
+    </table>
+    """
+
+
+def email_chips(labels: Sequence[str]) -> str:
+    if not labels:
+        return ""
+    cells = [
+        f"""<td style="padding:0 8px 8px 0;">
+          <span style="display:inline-block; font-family:{FONT_SANS}; font-size:12.5px; color:{INK_SOFT}; background:{PAPER_SOFT}; border-radius:6px; padding:7px 11px;">{escape(label)}</span>
+        </td>"""
+        for label in labels
+    ]
+    return f"""
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0 0 0;">
+      <tr>{''.join(cells)}</tr>
+    </table>
+    """
+
+
 def email_callout(text: str, *, tone: str = "info") -> str:
     tones = {
-        "info": ("#eff6ff", "#bfdbfe", BRAND_NAVY),
-        "warning": ("#fffbeb", "#fde68a", "#92400e"),
-        "danger": ("#fef2f2", "#fecaca", "#991b1b"),
+        "info": (PAPER_SOFT, LINE, INK),
+        "warning": ("#fdf8ee", WARN_BORDER, WARN_INK),
+        "danger": ("#fdf4f3", DANGER_BORDER, DANGER),
         "success": ("#ecfdf5", "#a7f3d0", "#065f46"),
     }
     bg, border, color = tones.get(tone, tones["info"])
     return f"""
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0;">
       <tr>
-        <td style="background:{bg}; border:1px solid {border}; border-radius:12px; padding:14px 16px; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; font-size:14px; line-height:1.6; color:{color};">
+        <td style="background:{bg}; border:1px solid {border}; border-radius:12px; padding:14px 16px; font-family:{FONT_SANS}; font-size:14px; line-height:1.6; color:{color};">
           {text}
         </td>
       </tr>
@@ -115,7 +241,7 @@ def email_callout(text: str, *, tone: str = "info") -> str:
 def p(text: str) -> str:
     """Paragraph with standard body styling. ``text`` may include safe HTML."""
     return f"""
-    <p style="margin:0 0 14px 0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; font-size:15px; line-height:1.7; color:#334155;">
+    <p style="margin:0 0 14px 0; font-family:{FONT_SANS}; font-size:14.5px; line-height:1.7; color:{INK_SOFT};">
       {text}
     </p>
     """
@@ -126,20 +252,57 @@ def greeting(name: str | None = None) -> str:
     return p(f"Hello {label},")
 
 
+def schedule_kicker(text: str) -> str:
+    """Mono uppercase schedule / reminder label above the card body title."""
+    return f"""
+    <p style="margin:0 0 12px 0; font-family:{FONT_MONO}; font-size:10px; font-weight:500; letter-spacing:0.14em; text-transform:uppercase; color:{INK_MUTED};">
+      {escape(text)}
+    </p>
+    """
+
+
+def paper_title(text: str, *, warning: bool = False) -> str:
+    color = WARN_INK if warning else INK
+    return f"""
+    <h1 style="margin:0; font-family:{FONT_SERIF}; font-size:22px; font-weight:400; line-height:1.25; color:{color};">
+      {escape(text)}
+    </h1>
+    """
+
+
+def paper_body(text: str) -> str:
+    """Body copy under a paper title. ``text`` may include safe HTML."""
+    return f"""
+    <p style="margin:12px 0 0 0; font-family:{FONT_SANS}; font-size:14.5px; line-height:1.7; color:{INK_SOFT};">
+      {text}
+    </p>
+    """
+
+
+def paper_hint(text: str) -> str:
+    return f"""
+    <p style="margin:14px 0 0 0; font-family:{FONT_SANS}; font-size:13.5px; line-height:1.65; color:{INK_HINT};">
+      {text}
+    </p>
+    """
+
+
 def render_email(
     *,
     title: str,
     body_html: str,
     preheader: str = "",
     eyebrow: str = "Orderly Affairs",
+    warning: bool = False,
 ) -> str:
-    """Wrap inner HTML in the branded Orderly Affairs email shell."""
+    """Wrap inner HTML in the branded paper / ink email shell (fluid max-width)."""
     logo = escape(brand_logo_url())
     safe_title = escape(title)
     safe_eyebrow = escape(eyebrow)
     safe_preheader = escape(preheader or title)
     portal = escape(portal_url())
     support = escape(getattr(settings, "EMAIL_SENDER", "support@orderly-affairs.com"))
+    card_border = WARN_BORDER if warning else LINE
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -147,27 +310,36 @@ def render_email(
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{safe_title}</title>
+  <style type="text/css">
+    @media only screen and (max-width: 620px) {{
+      .oa-shell {{ padding:14px 10px !important; }}
+      .oa-card {{ border-radius:12px !important; }}
+      .oa-pad {{ padding:20px 18px !important; }}
+      .oa-title {{ font-size:20px !important; }}
+      .oa-stack-cta {{ display:table !important; }}
+    }}
+  </style>
 </head>
-<body style="margin:0; padding:0; background-color:{BRAND_BG};">
+<body style="margin:0; padding:0; background-color:{PAPER};">
   <div style="display:none; max-height:0; overflow:hidden; mso-hide:all;">
     {safe_preheader}
   </div>
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:{BRAND_BG}; padding:28px 12px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:{PAPER};">
     <tr>
-      <td align="center">
-        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px; width:100%; background-color:{BRAND_CARD}; border-radius:16px; overflow:hidden; box-shadow:0 10px 30px rgba(16,33,63,0.08);">
+      <td align="center" class="oa-shell" style="padding:24px 14px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="oa-card" style="width:100%; max-width:560px; background-color:{BRAND_CARD}; border:1px solid {card_border}; border-radius:12px; overflow:hidden;">
           <tr>
-            <td style="background:linear-gradient(135deg, {BRAND_NAVY} 0%, {BRAND_NAVY_SOFT} 100%); background-color:{BRAND_NAVY}; padding:22px 28px;">
+            <td class="oa-pad" style="padding:18px 22px 8px 22px; border-bottom:1px solid {LINE_SOFT};">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
-                  <td valign="middle" width="48" style="padding-right:14px;">
-                    <img src="{logo}" width="40" height="40" alt="Orderly Affairs" style="display:block; width:40px; height:40px; border-radius:10px; background:#ffffff; object-fit:contain;" />
+                  <td valign="middle" width="44" style="padding-right:12px;">
+                    <img src="{logo}" width="36" height="36" alt="Orderly Affairs" style="display:block; width:36px; height:36px; border:0; outline:none; text-decoration:none;" />
                   </td>
                   <td valign="middle">
-                    <p style="margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:rgba(255,255,255,0.72); font-weight:600;">
+                    <p style="margin:0; font-family:{FONT_MONO}; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:{INK_MUTED}; font-weight:500;">
                       {safe_eyebrow}
                     </p>
-                    <p style="margin:4px 0 0 0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; font-size:20px; line-height:1.3; color:#ffffff; font-weight:700;">
+                    <p class="oa-title" style="margin:4px 0 0 0; font-family:{FONT_SERIF}; font-size:18px; line-height:1.25; color:{INK}; font-weight:400;">
                       {safe_title}
                     </p>
                   </td>
@@ -176,19 +348,20 @@ def render_email(
             </td>
           </tr>
           <tr>
-            <td style="padding:28px 28px 8px 28px;">
+            <td class="oa-pad" style="padding:22px 26px 8px 26px;">
               {body_html}
             </td>
           </tr>
           <tr>
-            <td style="padding:8px 28px 28px 28px;">
+            <td class="oa-pad" style="padding:8px 26px 24px 26px;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
-                  <td style="border-top:1px solid {BRAND_BORDER}; padding-top:18px;">
-                    <p style="margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; font-size:12px; line-height:1.6; color:{BRAND_MUTED};">
-                      This message was sent by Orderly Affairs.
-                      Visit <a href="{portal}" style="color:{BRAND_NAVY}; text-decoration:none; font-weight:600;">{portal}</a>
-                      or contact <a href="mailto:{support}" style="color:{BRAND_NAVY}; text-decoration:none; font-weight:600;">{support}</a>.
+                  <td style="border-top:1px solid {LINE}; padding-top:16px;">
+                    <p style="margin:0; font-family:{FONT_SANS}; font-size:12px; line-height:1.6; color:{INK_MUTED};">
+                      Sent by Orderly Affairs ·
+                      <a href="{portal}" style="color:{INK}; text-decoration:none; font-weight:500;">Open portal</a>
+                      ·
+                      <a href="mailto:{support}" style="color:{INK}; text-decoration:none; font-weight:500;">{support}</a>
                     </p>
                   </td>
                 </tr>
@@ -196,9 +369,91 @@ def render_email(
             </td>
           </tr>
         </table>
-        <p style="margin:16px 0 0 0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; font-size:11px; color:#94a3b8; text-align:center;">
-          Secure estate organization · Orderly Affairs
-        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+
+def render_reminder_card(
+    *,
+    title: str,
+    body_html: str,
+    preheader: str = "",
+    schedule_label: str = "",
+    warning: bool = False,
+) -> str:
+    """Reminder emails: schedule kicker + serif title card (matches design comps).
+
+    Uses fluid max-width (no fixed 390/600 mock widths).
+    """
+    logo = escape(brand_logo_url())
+    safe_preheader = escape(preheader or title)
+    portal = escape(portal_url())
+    support = escape(getattr(settings, "EMAIL_SENDER", "support@orderly-affairs.com"))
+    card_border = WARN_BORDER if warning else LINE
+    kicker = schedule_kicker(schedule_label) if schedule_label else ""
+    heading = paper_title(title, warning=warning)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{escape(title)}</title>
+  <style type="text/css">
+    @media only screen and (max-width: 620px) {{
+      .oa-shell {{ padding:14px 10px !important; }}
+      .oa-pad {{ padding:20px 18px !important; }}
+      .oa-title {{ font-size:20px !important; }}
+      .oa-hide-desk {{ display:none !important; max-height:0 !important; overflow:hidden !important; }}
+      .oa-show-mob {{ display:table !important; width:100% !important; }}
+    }}
+    @media only screen and (min-width: 621px) {{
+      .oa-show-mob {{ display:none !important; max-height:0 !important; overflow:hidden !important; mso-hide:all; }}
+    }}
+  </style>
+</head>
+<body style="margin:0; padding:0; background-color:{PAPER};">
+  <div style="display:none; max-height:0; overflow:hidden; mso-hide:all;">{safe_preheader}</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:{PAPER};">
+    <tr>
+      <td align="center" class="oa-shell" style="padding:20px 14px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:560px;">
+          <tr>
+            <td style="padding:0 0 14px 0;" align="left">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td valign="middle" style="padding-right:10px;">
+                    <img src="{logo}" width="28" height="28" alt="" style="display:block; width:28px; height:28px; border:0;" />
+                  </td>
+                  <td valign="middle" style="font-family:{FONT_MONO}; font-size:10px; font-weight:500; letter-spacing:0.14em; text-transform:uppercase; color:{INK_MUTED};">
+                    Orderly Affairs
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0 0 10px 0;">{kicker}</td>
+          </tr>
+          <tr>
+            <td class="oa-pad" style="background:#ffffff; border:1px solid {card_border}; border-radius:12px; padding:26px 28px; font-size:15px; color:{INK};">
+              <div class="oa-title">{heading}</div>
+              {body_html}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 4px 0 4px;">
+              <p style="margin:0; font-family:{FONT_SANS}; font-size:12px; line-height:1.6; color:{INK_MUTED}; text-align:center;">
+                <a href="{portal}" style="color:{INK}; text-decoration:none; font-weight:500;">Open portal</a>
+                ·
+                <a href="mailto:{support}" style="color:{INK}; text-decoration:none; font-weight:500;">{support}</a>
+              </p>
+            </td>
+          </tr>
+        </table>
       </td>
     </tr>
   </table>
@@ -230,7 +485,13 @@ def render_simple_email(
     if callout_html:
         parts.append(callout_html)
     if cta_url and cta_label:
-        parts.append(email_button(cta_url, cta_label))
+        parts.append(
+            f"""
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:18px 0 0 0; width:100%;">
+              <tr><td>{email_pill_button(cta_url, cta_label, variant="primary")}</td></tr>
+            </table>
+            """
+        )
     return render_email(
         title=title,
         preheader=preheader or title,

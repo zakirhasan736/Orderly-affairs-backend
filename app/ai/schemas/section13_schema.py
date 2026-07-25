@@ -34,6 +34,8 @@ SECTION13_FULL_SCHEMA = {
                             "recovery_info": {"type": ["string", "null"]},
                             "two_factor_auth": {"type": ["string", "null"]},
                             "account_value": {"type": ["string", "null"]},
+                            "subscription_renewal_date": {"type": ["string", "null"]},
+                            "account_expiry_date": {"type": ["string", "null"]},
                             "closure_instructions": {"type": ["string", "null"]},
                             "account_documents": {"type": ["string", "null"]},
                         },

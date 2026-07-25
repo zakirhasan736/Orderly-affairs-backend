@@ -14,7 +14,12 @@ from sendgrid.helpers.mail import Mail
 from bson import ObjectId
 from passlib.context import CryptContext
 from app.security.usage_guard import enforce_usage
-from app.auth.phone import format_phone
+from app.auth.phone import (
+    ensure_phone_available,
+    find_owner_by_login_identifier,
+    format_phone,
+    looks_like_email,
+)
 from app.auth.twilio_verify import check_verification_code
 from app.auth.otp_security import (
     send_otp_sms_secure,
@@ -107,13 +112,26 @@ class SignupRequest(BaseModel):
     email: EmailStr
     password: str
     full_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
     phone_number: str | None = None
     mfa_method: str | None = None  # "sms" | "email" | "authenticator"
     captcha_token: str | None = None
     otp_session_id: str | None = None
 
+    def resolved_full_name(self) -> str | None:
+        if self.full_name and self.full_name.strip():
+            return self.full_name.strip()
+        parts = [
+            (self.first_name or "").strip(),
+            (self.last_name or "").strip(),
+        ]
+        joined = " ".join(p for p in parts if p)
+        return joined or None
+
 class LoginRequest(BaseModel):
-    email: EmailStr
+    # Email or phone number (field name kept for API compatibility)
+    email: str
     password: str
     captcha_token: str | None = None
     otp_session_id: str | None = None
@@ -128,6 +146,8 @@ class EmailRequest(BaseModel):
     captcha_token: str | None = None
     otp_session_id: str | None = None
     mfa_challenge_token: str | None = None
+    # "signup" skips Cloudflare — pending signup OTP only
+    flow: str | None = None
 
 class VerifyEmailRequest(BaseModel):
     email: EmailStr
@@ -178,6 +198,8 @@ class ResendSignupSMSRequest(BaseModel):
     email: EmailStr
     captcha_token: str | None = None
     otp_session_id: str | None = None
+    # "signup" skips Cloudflare for pending-signup SMS resend
+    flow: str | None = None
 
 class PhoneRequest(BaseModel):
     phoneNumber: str
@@ -475,11 +497,20 @@ async def delete_expired_pending_signup(email: str):
 
 
 async def create_real_user_from_pending(pending: dict):
+    phone = pending.get("phone")
+    if phone:
+        await ensure_phone_available(
+            phone,
+            users_collection=users_collection,
+            pending_signup_collection=pending_signup_collection,
+            exclude_pending_email=pending.get("email"),
+        )
+
     new_user = build_owner_user_document(
         email=pending["email"],
         hashed_password=pending["password"],
         full_name=pending.get("full_name"),
-        phone=pending.get("phone"),
+        phone=phone,
         mfa_method=pending.get("mfa_method"),
         totp_secret=pending.get("totp_secret"),
         mfa_linked=pending.get("mfa_method") == "authenticator",
@@ -567,40 +598,42 @@ async def _approve_and_notify_if_needed(
 async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
     try:
         from app.notifications.email_layout import (
-            email_callout,
-            email_info_rows,
+            access_url,
+            email_cta_row,
             escape,
-            p,
-            render_email,
+            kit_url,
+            paper_body,
+            render_reminder_card,
         )
 
         sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
 
-        subject = "Orderly Affairs – Next-of-Kin Access Alert"
         nk_label = nextkin.get("full_name") or nextkin["email"]
-        html = render_email(
-            title="Next-of-Kin login alert",
+        first = (str(nk_label).strip().split() or ["Someone"])[0]
+        access = nextkin.get("access_level") or "Full Kit Access"
+        when = datetime.utcnow().strftime("%b %d · %I:%M %p UTC").replace(" 0", " ")
+        immediate = bool(nextkin.get("immediate_access"))
+        access_note = (
+            f"{escape(access)} with immediate access turned on."
+            if immediate
+            else f"{escape(access)}."
+        )
+
+        html = render_reminder_card(
+            schedule_label="Event-driven · someone signed in",
+            title=f"{first} opened your kit.",
             preheader=f"{nk_label} accessed your Orderly Affairs kit",
+            warning=True,
             body_html="".join(
                 [
-                    p(
-                        f"<b>{escape(nk_label)}</b> has just accessed your "
-                        "Orderly Affairs Kit."
+                    paper_body(
+                        f"{escape(when)} · {escape(nextkin.get('email') or '')}. "
+                        f"They have {access_note}"
                     ),
-                    email_info_rows(
-                        [
-                            ("Access level", nextkin.get("access_level") or "—"),
-                            ("Email", nextkin["email"]),
-                            (
-                                "Time",
-                                datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-                            ),
-                        ]
-                    ),
-                    email_callout(
-                        "If this access was unexpected, revoke access immediately "
-                        "from your Owner Dashboard.",
-                        tone="warning",
+                    email_cta_row(
+                        (kit_url(), "This was expected"),
+                        (access_url(), "Revoke access now"),
+                        secondary_variant="danger",
                     ),
                 ]
             ),
@@ -609,15 +642,15 @@ async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
         message = Mail(
             from_email=settings.EMAIL_SENDER,
             to_emails=owner["email"],
-            subject=subject,
+            subject="Orderly Affairs – Next-of-Kin Access Alert",
             html_content=html,
         )
 
         sg.send(message)
 
     except Exception as e:
-        # ⚠️ Never block login
-        print("⚠️ Owner login notification failed:", e)
+        # Never block login
+        print("Owner login notification failed:", e)
 
 # ============================================================
 # 1️⃣ OWNER SIGNUP
@@ -635,11 +668,6 @@ async def signup(user: SignupRequest, request: Request):
 
     await enforce_auth_rate_limit(request, key=f"signup:{email}")
 
-    from app.auth.captcha import verify_captcha_token
-
-    if not verify_captcha_token(user.captcha_token, get_client_ip(request)):
-        raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
-
     # real user already exists
     existing_user = await users_collection.find_one({"email": email})
     if existing_user:
@@ -654,10 +682,13 @@ async def signup(user: SignupRequest, request: Request):
     # pending signup already exists
     existing_pending = await get_active_pending_signup(email)
     if existing_pending:
-        raise HTTPException(
-            status_code=400,
-            detail="Signup already started. Please complete verification or use resend."
-        )
+        # Same person continuing (password matches) may restart / switch MFA method.
+        if not verify_password(user.password, existing_pending.get("password", "")):
+            raise HTTPException(
+                status_code=400,
+                detail="Signup already started. Please complete verification or use resend."
+            )
+        await pending_signup_collection.delete_one({"_id": existing_pending["_id"]})
 
     phone = None
     if user.mfa_method == "sms":
@@ -671,12 +702,26 @@ async def signup(user: SignupRequest, request: Request):
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+        await ensure_phone_available(
+            phone,
+            users_collection=users_collection,
+            pending_signup_collection=pending_signup_collection,
+            exclude_pending_email=email,
+        )
+
     hashed_pw = hash_password(user.password)
+
+    full_name = user.resolved_full_name()
+    if not full_name:
+        raise HTTPException(
+            status_code=400,
+            detail="First name and last name are required",
+        )
 
     pending_doc = {
         "email": email,
         "password": hashed_pw,
-        "full_name": user.full_name,
+        "full_name": full_name,
         "phone": phone,
         "mfa_method": user.mfa_method,
         "totp_secret": None,
@@ -929,30 +974,59 @@ async def signup(user: SignupRequest, request: Request):
 #     }
 @router.post("/login")
 async def owner_login(data: LoginRequest, request: Request, response: Response):
-    email = data.email.lower().strip()
+    identifier = (data.email or "").strip()
+    if not identifier:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter your email or phone number",
+        )
 
     from app.auth.captcha import verify_captcha_token
 
     if not verify_captcha_token(data.captcha_token, get_client_ip(request)):
         raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
 
-    await enforce_auth_rate_limit(request, key=f"login:{email}")
+    rate_key = identifier.lower() if looks_like_email(identifier) else identifier
+    await enforce_auth_rate_limit(request, key=f"login:{rate_key}")
 
-    # do not let pending signup pretend to be a real user
-    pending = await pending_signup_collection.find_one({
-        "email": email,
-        "expires_at": {"$gt": datetime.utcnow()}
-    })
-    if pending:
-        raise HTTPException(
-            status_code=403,
-            detail="Signup not completed yet. Please finish MFA verification first."
-        )
+    user = await find_owner_by_login_identifier(
+        identifier,
+        users_collection=users_collection,
+    )
 
-    user = await users_collection.find_one({
-        "email": email,
-        "role": "owner"
-    })
+    # Pending signup for this email (phone login won't match pending by phone alone below)
+    pending_email = (
+        identifier.lower()
+        if looks_like_email(identifier)
+        else (user.get("email") if user else None)
+    )
+    if pending_email:
+        pending = await pending_signup_collection.find_one({
+            "email": pending_email,
+            "expires_at": {"$gt": datetime.utcnow()},
+        })
+        if pending:
+            raise HTTPException(
+                status_code=403,
+                detail="Signup not completed yet. Please finish MFA verification first.",
+            )
+
+    # Also block login when identifier is a phone tied only to an unfinished signup
+    if not user and not looks_like_email(identifier):
+        try:
+            phone_id = format_phone(identifier)
+        except ValueError:
+            phone_id = None
+        if phone_id:
+            pending_phone = await pending_signup_collection.find_one({
+                "phone": phone_id,
+                "expires_at": {"$gt": datetime.utcnow()},
+            })
+            if pending_phone:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Signup not completed yet. Please finish MFA verification first.",
+                )
 
     stored_password = ""
     if user:
@@ -961,17 +1035,21 @@ async def owner_login(data: LoginRequest, request: Request, response: Response):
     if not user or not verify_password(data.password, stored_password):
         # Ops-only diagnostics (never returned to the client)
         if not user:
-            print(f"login 401: no owner account for {email}")
+            print(f"login 401: no owner account for {identifier!r}")
         elif not stored_password:
-            print(f"login 401: owner {email} has empty password hash")
+            print(f"login 401: owner {user.get('email')} has empty password hash")
         else:
             print(
-                f"login 401: bad password for {email} "
+                f"login 401: bad password for {user.get('email')} "
                 f"(hash_prefix={stored_password[:20]!r})"
             )
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email, phone number, or password",
+        )
 
-    await reset_auth_rate_limit(request, key=f"login:{email}")
+    email = user["email"].lower().strip()
+    await reset_auth_rate_limit(request, key=f"login:{rate_key}")
 
     billing = user.get("billing", {})
 
@@ -1185,12 +1263,13 @@ async def create_nextkin(
                 plain_password=plain_password,
             )
 
-        # ✅ CASE 2: No immediate access → send CREATED email ONLY
+        # CASE 2: No immediate access → invite email with temp password
         else:
             await send_nextkin_email(
                 event=NextKinEmailEvent.CREATED,
                 nextkin=nextkin,
                 owner=owner,
+                plain_password=plain_password,
             )
 
         # # 4️⃣ Email credentials (best-effort)
@@ -1901,12 +1980,19 @@ async def send_email_otp(
     authorization: str | None = Header(default=None),
 ):
     email = payload.email.lower().strip()
+    is_signup_flow = (payload.flow or "").lower().strip() == "signup"
 
     pending = await pending_signup_collection.find_one({
         "email": email,
         "mfa_method": "email",
         "expires_at": {"$gt": datetime.utcnow()}
     })
+
+    if is_signup_flow and not pending:
+        raise HTTPException(
+            status_code=400,
+            detail="Signup session expired. Please start signup again.",
+        )
 
     if not pending:
         user = await users_collection.find_one({"email": email, "role": "owner"})
@@ -1976,6 +2062,14 @@ async def send_email_otp(
             email=email,
             captcha_token=payload.captcha_token,
             session_id=payload.otp_session_id,
+            # Signup never requires Cloudflare (pending signup or explicit flow).
+            skip_captcha=(
+                pending is not None
+                or is_signup_flow
+                or verify_mfa_challenge_token(
+                    payload.mfa_challenge_token, email
+                )
+            ),
             store_otp=_store_send_email_otp,
             rollback_otp=_rollback_send_email_otp,
         )
@@ -2786,6 +2880,14 @@ async def start_sms_mfa(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+        await ensure_phone_available(
+            phone,
+            users_collection=users_collection,
+            pending_signup_collection=pending_signup_collection,
+            exclude_user_id=user["_id"],
+            exclude_pending_email=user.get("email"),
+        )
+
         await users_collection.update_one(
             {"_id": user["_id"]},
             {"$set": {"phone": phone, "updated_at": datetime.utcnow()}}
@@ -2908,6 +3010,8 @@ async def resend_sms_mfa(payload: ResendSignupSMSRequest, request: Request):
                 email=email,
                 captcha_token=payload.captcha_token,
                 session_id=payload.otp_session_id,
+                # Pending signup SMS never requires Cloudflare
+                skip_captcha=True,
             )
         except HTTPException:
             raise
@@ -2934,7 +3038,16 @@ async def resend_sms_mfa(payload: ResendSignupSMSRequest, request: Request):
     })
 
     if not user:
-        raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
+        # Signup resend with no pending session — don't ask for Cloudflare
+        if (payload.flow or "").lower().strip() == "signup":
+            raise HTTPException(
+                status_code=400,
+                detail="No SMS signup in progress for this email. Start signup again.",
+            )
+        raise HTTPException(
+            status_code=400,
+            detail="No SMS signup in progress for this email. Start signup again.",
+        )
 
     methods = normalize_mfa_methods(user)
     if not methods["sms"]:
@@ -3136,6 +3249,14 @@ async def link_sms(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    await ensure_phone_available(
+        phone,
+        users_collection=users_collection,
+        pending_signup_collection=pending_signup_collection,
+        exclude_user_id=user["_id"],
+        exclude_pending_email=user.get("email"),
+    )
+
     await users_collection.update_one(
         {"_id": user["_id"]},
         {
@@ -3154,12 +3275,7 @@ async def link_sms(
     
 @router.post("/resume-pending-signup")
 async def resume_pending_signup(payload: EmailRequest, request: Request):
-    from app.auth.captcha import verify_captcha_token
-
     email = payload.email.lower().strip()
-
-    if not verify_captcha_token(payload.captcha_token, get_client_ip(request)):
-        raise HTTPException(status_code=400, detail="CAPTCHA verification failed")
 
     await enforce_auth_rate_limit(request, key=f"resume-signup:{email}")
 

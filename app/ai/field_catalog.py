@@ -62,6 +62,14 @@ def format_field_catalog_prompt(catalog: list[dict] | None) -> str:
         "7) For Dropdown / RadioButtons / Select fields, return ONE of the allowed option strings exactly (best meaning match).\n"
         "8) For Checkbox fields, return true/false (or yes/no). For single-option RadioButtons (checkbox UI), return that option string when true.\n"
         "9) Field key names in the document may differ — always choose the catalog field whose LABEL or OPTIONS best match the fact.\n"
+        "10) DATE FIELDS (critical):\n"
+        "   - Keys containing expiry/expiration/expires/valid_through/policy_expiry/registration_expiry → the END / last valid date.\n"
+        "   - Keys containing renewal/renews/dues → next renewal or dues date (memberships, subscriptions).\n"
+        "   - Keys containing maturity/cd_maturity → CD or loan maturity / end date.\n"
+        "   - Keys containing last_statement/statement_date → most recent statement date.\n"
+        "   - If a document shows a period like '01/01/2025 to 12/31/2025', put ONLY the end date in the expiry/renewal/maturity field.\n"
+        "   - Prefer ISO YYYY-MM-DD when possible.\n"
+        "   - Never leave a catalog date field empty when the document clearly shows that date.\n"
         + "\n".join(lines)
         + "\n- For TextInputWithUpload fields, return a plain string (notes, location, or extracted text).\n"
         + "- For Dropdown / RadioButtons fields, use one of the allowed option values when possible.\n"
@@ -225,11 +233,27 @@ SECTION_PREVIEW_FIELD_KEYS: dict[str, list[str]] = {
         "provider",
         "coverage_amount",
     ],
+    "community_memberships": [
+        "organization_name",
+        "organization_type",
+        "renewal_date",
+        "membership_details",
+    ],
     "banking_financial_accounts": [
         "bank_name",
         "account_type",
         "account_number",
         "routing_number",
+        "cd_maturity_date",
+        "last_statement_date",
+        "subscription_renewal_date",
+    ],
+    "passwords_online_accounts": [
+        "service_name",
+        "account_type",
+        "account_username",
+        "subscription_renewal_date",
+        "account_expiry_date",
     ],
     "investment_accounts": [
         "account_name",

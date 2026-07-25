@@ -40,6 +40,9 @@ Global privacy and safety rules:
 - Place each value in the exact schema field it belongs to. Do not leave a value only in notes when a dedicated field exists.
 - Understand wording mismatches against field labels: decide what the value MEANS first, then choose the one exact catalog key. Do not confuse similar labels.
 - Read tables row-by-row and multi-column layouts fully.
+- MULTI-ITEM RULE: If the document describes multiple policies, accounts, vehicles, memberships, or people, return one object per entity in the subsection array — never merge them into one object.
+- LONG TEXT RULE: Put short facts (IDs, dates, names, amounts, dropdown values) into dedicated fields. Use notes/description TextAreas only for leftover prose that does not fit another field.
+- DATE RULE: Fill expiry / renewal / maturity / statement date fields whenever those dates appear. Prefer ISO YYYY-MM-DD. For periods, use the END date.
 - Do not extract or return raw passwords.
 - Do not extract or return raw PINs.
 - Do not extract or return full SSN/social security numbers.
@@ -156,7 +159,172 @@ def _extract_sync(
 
     normalized = normalize_extraction_result(parsed)
     # Understand meaning → place onto exact catalog field keys/labels.
-    return remap_extraction_result(normalized, field_catalog)
+    remapped = remap_extraction_result(normalized, field_catalog)
+    return remapped
+
+
+def _iter_patch_items(result: dict | None):
+    if not isinstance(result, dict):
+        return
+    patch = result.get("patch") if isinstance(result.get("patch"), dict) else None
+    if not isinstance(patch, dict):
+        return
+    for value in patch.values():
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    yield item
+        elif isinstance(value, dict):
+            yield value
+
+
+def _empty_catalog_keys(result: dict | None, field_catalog: list[dict] | None) -> list[str]:
+    """Catalog keys that are still empty across all patch items."""
+    if not field_catalog:
+        return []
+    keys = [
+        str(item.get("key") or item.get("field_key") or "").strip()
+        for item in field_catalog
+        if isinstance(item, dict)
+    ]
+    keys = [key for key in keys if key]
+    if not keys:
+        return []
+
+    filled: set[str] = set()
+    items = list(_iter_patch_items(result))
+    if not items:
+        return keys
+
+    for item in items:
+        for key in keys:
+            value = item.get(key)
+            if value is None or value == "" or value == [] or value == {}:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            filled.add(key)
+
+    return [key for key in keys if key not in filled]
+
+
+def _needs_pass_b(result: dict | None, field_catalog: list[dict] | None) -> bool:
+    empty = _empty_catalog_keys(result, field_catalog)
+    if len(empty) < 3:
+        return False
+    # Only worth a second pass when long text or some signal already exists.
+    has_signal = False
+    for item in _iter_patch_items(result):
+        for key, value in item.items():
+            if key.startswith("__"):
+                continue
+            text = value if isinstance(value, str) else ""
+            if isinstance(value, dict):
+                text = str(value.get("text") or "")
+            if text and len(text.strip()) >= 8:
+                has_signal = True
+                break
+        if has_signal:
+            break
+    return has_signal and len(empty) >= 3
+
+
+def _merge_pass_b_into(primary: dict | None, secondary: dict | None) -> dict | None:
+    """Fill only empty fields on primary from secondary (Pass B)."""
+    if not isinstance(primary, dict):
+        return secondary
+    if not isinstance(secondary, dict):
+        return primary
+
+    primary_patch = primary.get("patch") if isinstance(primary.get("patch"), dict) else {}
+    secondary_patch = (
+        secondary.get("patch") if isinstance(secondary.get("patch"), dict) else {}
+    )
+    if not isinstance(primary_patch, dict) or not isinstance(secondary_patch, dict):
+        return primary
+
+    next_patch = dict(primary_patch)
+    for sub_key, primary_val in primary_patch.items():
+        secondary_val = secondary_patch.get(sub_key)
+        if isinstance(primary_val, list) and isinstance(secondary_val, list):
+            merged_items = []
+            for index, item in enumerate(primary_val):
+                if not isinstance(item, dict):
+                    merged_items.append(item)
+                    continue
+                other = secondary_val[index] if index < len(secondary_val) else None
+                if not isinstance(other, dict):
+                    merged_items.append(item)
+                    continue
+                merged = dict(item)
+                for key, value in other.items():
+                    if key.startswith("__"):
+                        continue
+                    existing = merged.get(key)
+                    empty = (
+                        existing is None
+                        or existing == ""
+                        or existing == []
+                        or existing == {}
+                        or (isinstance(existing, str) and not existing.strip())
+                    )
+                    if empty and value not in (None, "", [], {}):
+                        merged[key] = value
+                merged_items.append(merged)
+            # Append extra entities discovered only in Pass B
+            if len(secondary_val) > len(primary_val):
+                for extra in secondary_val[len(primary_val) :]:
+                    if isinstance(extra, dict):
+                        merged_items.append(extra)
+            next_patch[sub_key] = merged_items
+        elif isinstance(primary_val, dict) and isinstance(secondary_val, dict):
+            merged = dict(primary_val)
+            for key, value in secondary_val.items():
+                existing = merged.get(key)
+                empty = (
+                    existing is None
+                    or existing == ""
+                    or (isinstance(existing, str) and not existing.strip())
+                )
+                if empty and value not in (None, "", [], {}):
+                    merged[key] = value
+            next_patch[sub_key] = merged
+        elif secondary_val and not primary_val:
+            next_patch[sub_key] = secondary_val
+
+    next_result = dict(primary)
+    next_result["patch"] = next_patch
+    return next_result
+
+
+def _extract_pass_b_sync(
+    *,
+    document_url: str,
+    mime_type: str,
+    prompt: str,
+    response_schema: dict,
+    field_catalog: list[dict] | None,
+    empty_keys: list[str],
+):
+    """Second pass: fill only the still-empty catalog fields."""
+    empty_list = ", ".join(empty_keys[:40])
+    pass_b_prompt = f"""
+{prompt}
+
+PASS B — FILL EMPTY FIELDS ONLY:
+The first extraction left these catalog fields empty or incomplete: {empty_list}
+Re-read the document and fill ONLY those empty fields (and any other clearly missing schema fields).
+Do not clear or overwrite fields that already have good values.
+If multiple entities exist, keep one object per entity.
+Prefer dedicated fields over dumping into notes.
+"""
+    return _extract_sync(
+        document_url=document_url,
+        mime_type=mime_type,
+        prompt=pass_b_prompt,
+        response_schema=response_schema,
+        field_catalog=field_catalog,
+    )
 
 
 async def extract_structured_from_document(
@@ -167,16 +335,41 @@ async def extract_structured_from_document(
     response_schema: dict,
     field_catalog: list[dict] | None = None,
 ):
+    from app.ai.notes_field_recovery import recover_fields_from_notes
+
     catalog = field_catalog or build_default_field_catalog_from_schema(
         response_schema
     )
     catalog_prompt = format_field_catalog_prompt(catalog)
+    full_prompt = f"{prompt}{catalog_prompt}"
 
-    return await asyncio.to_thread(
+    first = await asyncio.to_thread(
         _extract_sync,
         document_url=document_url,
         mime_type=mime_type,
-        prompt=f"{prompt}{catalog_prompt}",
+        prompt=full_prompt,
         response_schema=response_schema,
         field_catalog=catalog,
     )
+
+    section_key = (first or {}).get("section") if isinstance(first, dict) else None
+    recovered = recover_fields_from_notes(first, section_key or "") or first
+
+    if _needs_pass_b(recovered, catalog):
+        empty_keys = _empty_catalog_keys(recovered, catalog)
+        try:
+            second = await asyncio.to_thread(
+                _extract_pass_b_sync,
+                document_url=document_url,
+                mime_type=mime_type,
+                prompt=full_prompt,
+                response_schema=response_schema,
+                field_catalog=catalog,
+                empty_keys=empty_keys,
+            )
+            second = recover_fields_from_notes(second, section_key or "") or second
+            recovered = _merge_pass_b_into(recovered, second) or recovered
+        except Exception as error:
+            logger.warning("AI Pass B refill skipped: %s", repr(error))
+
+    return recovered
