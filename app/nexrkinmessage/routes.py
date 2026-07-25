@@ -20,6 +20,7 @@ router = APIRouter(prefix="/message", tags=["Message"])
 MESSAGE_MEDIA_EXTENSIONS = (
     ".mp4", ".mov", ".webm", ".m4v",
     ".mp3", ".m4a", ".wav", ".aac", ".ogg",
+    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif",
 )
 
 
@@ -27,7 +28,7 @@ def is_allowed_message_media(file: UploadFile) -> bool:
     content_type = (file.content_type or "").lower()
     filename = (file.filename or "").lower()
 
-    if content_type.startswith(("video/", "audio/")):
+    if content_type.startswith(("video/", "audio/", "image/")):
         return True
 
     if content_type in {"", "application/octet-stream"}:
@@ -293,7 +294,7 @@ async def upload_message_media(
     if not is_allowed_message_media(file):
         raise HTTPException(
             status_code=400,
-            detail="Only audio/video files are allowed"
+            detail="Only audio, video, or image files are allowed",
         )
 
     file.file.seek(0, 2)
@@ -305,10 +306,21 @@ async def upload_message_media(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    uploaded = upload_media_file(
-        file.file,
-        folder=MESSAGE_MEDIA_FOLDER,
+    content_type = (file.content_type or "").lower()
+    filename = (file.filename or "").lower()
+    is_image = content_type.startswith("image/") or filename.endswith(
+        (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif")
     )
+
+    if is_image:
+        from app.security.cloudinary_service import upload_file as cloudinary_upload_file
+
+        uploaded = cloudinary_upload_file(file.file, folder=MESSAGE_MEDIA_FOLDER)
+    else:
+        uploaded = upload_media_file(
+            file.file,
+            folder=MESSAGE_MEDIA_FOLDER,
+        )
 
     return {
         "url": uploaded["secure_url"],
