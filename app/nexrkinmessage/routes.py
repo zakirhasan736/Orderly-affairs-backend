@@ -323,31 +323,49 @@ async def delete_uploaded_message_media(
     payload: MediaDeleteRequest,
     request: Request, authorization: str | None = Header(default=None)
 ):
+    """Delete message media from Cloudinary.
+
+    Used for:
+    - orphan cleanup (uploaded while composing, before the message is saved)
+    - removing an attachment that is already linked to one of the owner's messages
+    """
     decoded = decode_access_token(request, authorization)
     if decoded.get("role") != "owner":
         raise HTTPException(status_code=403, detail="Owner only")
 
-    if not payload.public_id.startswith(MESSAGE_MEDIA_FOLDER):
+    public_id = (payload.public_id or "").strip()
+    if not public_id.startswith(f"{MESSAGE_MEDIA_FOLDER}/") and public_id != MESSAGE_MEDIA_FOLDER:
         raise HTTPException(
             status_code=400,
             detail="Only message media can be deleted from this endpoint",
         )
 
     owner_id = decoded.get("owner_id") or decoded.get("sub")
-    if decoded.get("role") == "owner":
+    sub = decoded.get("sub")
+    if sub:
         from app.database import users_collection
-        owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
+
+        owner_query: dict = {"role": "owner"}
+        if ObjectId.is_valid(str(sub)):
+            owner_query["$or"] = [{"email": sub}, {"_id": ObjectId(str(sub))}]
+        else:
+            owner_query["email"] = sub
+
+        owner = await users_collection.find_one(owner_query)
         if owner:
             owner_id = str(owner["_id"])
 
-    owned = await messageofnextkin_collection.find_one({
-        "owner_id": str(owner_id),
-        "media.public_id": payload.public_id,
-        "is_deleted": False,
-    })
-    if not owned:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this file")
+    # Detach from any of this owner's messages that still reference the file.
+    await messageofnextkin_collection.update_many(
+        {
+            "owner_id": str(owner_id),
+            "media.public_id": public_id,
+            "is_deleted": False,
+        },
+        {"$set": {"media": None, "updated_at": datetime.utcnow()}},
+    )
 
-    delete_file(payload.public_id, payload.resource_type)
+    # Allow orphan deletes: media uploaded during compose is not in Mongo yet.
+    delete_file(public_id, payload.resource_type)
 
     return {"status": "deleted"}
