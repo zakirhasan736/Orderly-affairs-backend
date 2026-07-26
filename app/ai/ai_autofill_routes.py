@@ -42,6 +42,7 @@ from app.ai.ai_auth import get_current_owner, get_user_id
 from app.ai.background_section_persist import persist_cached_extractions_for_owner
 from app.ai.local_document_extract import describe_read_source
 from app.database import ai_documents_collection
+from app.storage.vault import resolve_stored_ai_document_path
 
 logger = logging.getLogger(__name__)
 
@@ -699,10 +700,14 @@ async def autofill_section(
     if not doc:
         raise HTTPException(
             status_code=404,
-            detail="Document not found, expired, or already processed.",
+            detail={
+                "code": "ai_document_missing",
+                "message": "Document not found, expired, or already processed.",
+            },
         )
 
-    file_path = doc.get("path")
+    resolved = resolve_stored_ai_document_path(doc)
+    file_path = str(resolved) if resolved else None
     mime_type = doc.get("mime_type")
     keep_document = False
 
@@ -713,14 +718,34 @@ async def autofill_section(
             await delete_ai_document(payload.file_id, user_id)
             raise HTTPException(
                 status_code=410,
-                detail="Uploaded document expired. Please upload again.",
+                detail={
+                    "code": "ai_document_expired",
+                    "message": "Uploaded document expired. Please upload again.",
+                },
             )
 
-        if not file_path or not Path(file_path).exists():
-            await delete_ai_document(payload.file_id, user_id)
+        if not resolved:
+            # Keep the DB row — path may be fixable after vault/config deploy.
+            logger.warning(
+                "AI document file missing on disk file_id=%s user_id=%s path=%s folder_uuid=%s",
+                payload.file_id,
+                user_id,
+                doc.get("path"),
+                doc.get("folder_uuid"),
+            )
             raise HTTPException(
                 status_code=404,
-                detail="Uploaded document file not found.",
+                detail={
+                    "code": "ai_document_file_missing",
+                    "message": "Uploaded document file not found. Please upload again.",
+                },
+            )
+
+        # Heal stale absolute paths after VAULT_ROOT / cwd changes.
+        if str(doc.get("path") or "") != file_path:
+            await ai_documents_collection.update_one(
+                {"_id": payload.file_id, "user_id": user_id},
+                {"$set": {"path": file_path, "updated_at": utc_now_naive()}},
             )
 
         latest_doc = await ai_documents_collection.find_one(

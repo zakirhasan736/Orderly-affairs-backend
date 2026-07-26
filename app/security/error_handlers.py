@@ -23,6 +23,20 @@ def _sanitize_http_detail(status_code: int, detail) -> str | dict:
     if status_code >= 500:
         return GENERIC_SERVER_ERROR
 
+    # Keep machine-readable codes for client UX (e.g. AI re-upload prompts).
+    if isinstance(detail, dict) and detail.get("code"):
+        return {
+            "code": str(detail["code"]),
+            "message": str(
+                detail.get("message")
+                or (
+                    GENERIC_NOT_FOUND
+                    if status_code == 404
+                    else GENERIC_SERVER_ERROR
+                )
+            ),
+        }
+
     if status_code == 404:
         return GENERIC_NOT_FOUND
 

@@ -94,6 +94,74 @@ def resolve_vault_file_path(folder_uuid: str, stored_filename: str) -> Path:
     return path
 
 
+def resolve_stored_ai_document_path(doc: dict | None) -> Path | None:
+    """
+    Locate an uploaded AI document on disk.
+
+    Prefer vault layout (folder_uuid + stored_filename) so absolute paths stay valid
+    even if VAULT_ROOT or the process cwd changed after upload.
+    Falls back to legacy absolute path / flat AI_UPLOAD_DIR.
+    """
+    if not isinstance(doc, dict):
+        return None
+
+    candidates: list[Path] = []
+
+    folder_uuid = doc.get("folder_uuid")
+    stored = doc.get("stored_filename")
+    if folder_uuid and stored:
+        try:
+            candidates.append(resolve_vault_file_path(str(folder_uuid), str(stored)))
+        except HTTPException:
+            pass
+
+    raw_path = doc.get("path")
+    if raw_path:
+        candidates.append(Path(str(raw_path)))
+
+    # Legacy flat folder (pre-vault).
+    if stored:
+        legacy_root = Path(
+            getattr(settings, "AI_UPLOAD_DIR", None)
+            or __import__("os").getenv("AI_UPLOAD_DIR", "app/uploads/ai-documents")
+        )
+        if not legacy_root.is_absolute():
+            legacy_root = Path.cwd() / legacy_root
+        candidates.append(legacy_root / Path(str(stored)).name)
+
+    # file_id-based name under vault when stored_filename missing.
+    file_id = doc.get("_id")
+    mime = str(doc.get("mime_type") or "")
+    ext_map = {
+        "application/pdf": ".pdf",
+        "text/plain": ".txt",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+    }
+    if folder_uuid and file_id:
+        ext = ext_map.get(mime, "")
+        try:
+            candidates.append(
+                resolve_vault_file_path(str(folder_uuid), f"{file_id}{ext}")
+            )
+        except HTTPException:
+            pass
+
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if path.exists() and path.is_file():
+                return path.resolve()
+        except OSError:
+            continue
+    return None
+
+
 def user_quota_bytes(user: dict | None) -> int:
     if user:
         limits = user.get("enterprise_limits") or {}

@@ -24,6 +24,7 @@ from app.ai.ai_auth import get_current_owner, get_user_id
 from app.ai.local_document_extract import extract_document_text
 from app.storage.vault import (
     ensure_owner_vault_dir,
+    resolve_stored_ai_document_path,
     resolve_vault_file_path,
     user_quota_bytes,
     vault_quota_check,
@@ -383,8 +384,8 @@ async def list_owner_ai_documents(
 
     documents = []
     async for doc in cursor:
-        path = Path(doc.get("path") or "")
-        if not path.exists():
+        path = resolve_stored_ai_document_path(doc)
+        if not path:
             continue
         documents.append(serialize_ai_document(doc))
 
@@ -420,8 +421,8 @@ async def preview_ai_document(
         await ai_documents_collection.delete_one({"_id": file_id, "user_id": user_id})
         raise HTTPException(status_code=410, detail="Document expired.")
 
-    path = Path(doc.get("path") or "")
-    if not path.exists() or not path.is_file():
+    path = resolve_stored_ai_document_path(doc)
+    if not path:
         raise HTTPException(status_code=404, detail="Document file missing.")
 
     filename = doc.get("original_filename") or path.name
