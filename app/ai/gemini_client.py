@@ -6,9 +6,10 @@ from typing import Literal
 
 from google import genai
 
-# Flash-only stack — no Pro / Live / realtime (document classify & fill).
+# Flash-only stack — keep the cheap 2.x Flash models for document fill.
+# Avoid 3.5 Flash here ($1.50/$9) unless you explicitly opt in via env.
 DEFAULT_PRIMARY_MODEL = "gemini-2.5-flash"
-DEFAULT_FALLBACK_MODELS = "gemini-2.0-flash,gemini-3.5-flash"
+DEFAULT_FALLBACK_MODELS = "gemini-2.0-flash"
 
 GeminiModelTier = Literal["pro", "flash"]
 

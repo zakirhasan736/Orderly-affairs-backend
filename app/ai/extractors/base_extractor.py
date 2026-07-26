@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from app.ai.field_catalog import (
@@ -114,6 +115,7 @@ def _run_gemini_extract(
     response_schema: dict,
     field_catalog: list[dict] | None,
     force_vision: bool = False,
+    operation: str = "extract",
 ):
     contents, extract_meta = build_gemini_document_contents(
         path=path,
@@ -121,21 +123,37 @@ def _run_gemini_extract(
         prompt=final_prompt,
         force_vision=force_vision,
     )
-    if extract_meta.get("gemini_input") == "text":
+    gemini_input = str(extract_meta.get("gemini_input") or "unknown")
+    if gemini_input == "text":
         logger.info(
-            "Gemini extract using local text (%s, quality=%.2f)",
+            "Gemini extract path=text method=%s quality=%.2f file=%s",
             extract_meta.get("method"),
             float(extract_meta.get("quality_score") or 0),
+            path.name,
         )
     elif force_vision:
-        logger.info("Gemini extract using vision fallback")
+        logger.info(
+            "Gemini extract path=file_bytes reason=vision_fallback file=%s",
+            path.name,
+        )
+    else:
+        logger.info(
+            "Gemini extract path=file_bytes method=%s needs_vision=%s file=%s",
+            extract_meta.get("method"),
+            extract_meta.get("needs_vision"),
+            path.name,
+        )
 
     response = generate_gemini_content(
         contents=contents,
         response_mime_type="application/json",
         response_json_schema=response_schema,
         temperature=0,
-        max_output_tokens=32768,
+        # Cap output — 32k invited huge thinking/output bills.
+        max_output_tokens=8192,
+        operation=operation,
+        gemini_input=gemini_input,
+        file_name=path.name,
     )
 
     raw_text = getattr(response, "text", None) or ""
@@ -153,7 +171,8 @@ def _run_gemini_extract(
 
     normalized = normalize_extraction_result(parsed)
     remapped = remap_extraction_result(normalized, field_catalog)
-    return remapped, extract_meta
+    usage = getattr(response, "_orderly_usage", None)
+    return remapped, extract_meta, usage if isinstance(usage, dict) else None
 
 
 def _extract_sync(
@@ -163,6 +182,7 @@ def _extract_sync(
     prompt: str,
     response_schema: dict,
     field_catalog: list[dict] | None = None,
+    operation: str = "extract",
 ):
     if mime_type not in SUPPORTED_MIME_TYPES:
         raise ValueError("Unsupported file type")
@@ -186,28 +206,49 @@ def _extract_sync(
 {GLOBAL_PRIVACY_EXTRACTION_RULES}
 """
 
-    remapped, extract_meta = _run_gemini_extract(
+    remapped, extract_meta, usage_a = _run_gemini_extract(
         path=path,
         mime_type=mime_type,
         final_prompt=final_prompt,
         response_schema=response_schema,
         field_catalog=field_catalog,
         force_vision=False,
+        operation=operation,
     )
+    usages: list[dict] = [usage_a] if usage_a else []
 
     # Smart switch: empty fill or low confidence after text path → vision once.
     if should_fallback_to_vision(remapped, extract_meta):
         logger.info(
-            "Text path weak (empty/low confidence); retrying with Gemini vision"
+            "Text path weak (empty/low confidence); retrying with Gemini vision file=%s",
+            path.name,
         )
-        remapped, extract_meta = _run_gemini_extract(
+        remapped, extract_meta, usage_b = _run_gemini_extract(
             path=path,
             mime_type=mime_type,
             final_prompt=final_prompt,
             response_schema=response_schema,
             field_catalog=field_catalog,
             force_vision=True,
+            operation=f"{operation}_vision_fallback",
         )
+        if usage_b:
+            usages.append(usage_b)
+
+    total_usd = sum(float(u.get("estimated_usd") or 0) for u in usages)
+    total_tokens = sum(int(u.get("total_tokens") or 0) for u in usages)
+    inputs = ",".join(str(u.get("gemini_input") or "?") for u in usages) or str(
+        extract_meta.get("gemini_input") or "unknown"
+    )
+    logger.info(
+        "Gemini DOC_TOTAL op=%s file=%s calls=%s gemini_input=%s total_tokens=%s ~usd=%.6f",
+        operation,
+        path.name,
+        len(usages),
+        inputs,
+        total_tokens,
+        total_usd,
+    )
 
     if isinstance(remapped, dict):
         remapped["__extract_meta"] = {
@@ -217,6 +258,9 @@ def _extract_sync(
             "read_source": extract_meta.get("read_source") or "gemini",
             "needs_vision": extract_meta.get("needs_vision"),
             "result_confidence": remapped.get("confidence"),
+            "gemini_calls": len(usages),
+            "estimated_usd": round(total_usd, 6),
+            "total_tokens": total_tokens,
         }
 
     return remapped
@@ -268,10 +312,18 @@ def _empty_catalog_keys(result: dict | None, field_catalog: list[dict] | None) -
 
 
 def _needs_pass_b(result: dict | None, field_catalog: list[dict] | None) -> bool:
+    # Cost control: second Gemini pass is optional (GEMINI_ENABLE_PASS_B=1).
+    if (os.getenv("GEMINI_ENABLE_PASS_B") or "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+
     empty = _empty_catalog_keys(result, field_catalog)
-    # With Pro, run a refill pass whenever any catalog fields remain empty
-    # and the first pass already found some document signal.
-    if len(empty) < 1:
+    # Only refill when several fields are still empty and we already got signal.
+    if len(empty) < 3:
         return False
     has_signal = False
     for item in _iter_patch_items(result):
@@ -384,6 +436,7 @@ Prefer dedicated fields over dumping into notes.
         prompt=pass_b_prompt,
         response_schema=response_schema,
         field_catalog=field_catalog,
+        operation="extract_pass_b",
     )
 
 

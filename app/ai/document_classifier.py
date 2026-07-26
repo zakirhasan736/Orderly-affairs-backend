@@ -469,6 +469,7 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
         mime_type=mime_type,
         prompt=_build_classification_prompt(requested_section_key),
     )
+    gemini_input = str(_extract_meta.get("gemini_input") or "unknown")
 
     response = generate_gemini_content(
         contents=contents,
@@ -477,6 +478,9 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
         temperature=0,
         # Keep headroom so additional_sections arrays are not truncated.
         max_output_tokens=2048,
+        operation="classify",
+        gemini_input=gemini_input,
+        file_name=path.name,
     )
 
     raw_text = getattr(response, "text", None) or ""
