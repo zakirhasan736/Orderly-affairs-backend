@@ -90,9 +90,33 @@ class Settings(BaseSettings):
     # (in addition to JWT role=admin).
     ADMIN_EMAILS: str = ""
 
+    # === Document vault (AI autofill uploads on VPS disk) ===
+    # Production: /var/storage/vault  |  Local: storage/vault (project-relative)
+    VAULT_ROOT: str = "storage/vault"
+    # Hard ceiling for all users combined (default 100 GB).
+    VAULT_GLOBAL_QUOTA_GB: float = 100.0
+    # Default per-owner cap; overridden by user.enterprise_limits.storage_gb when set.
+    VAULT_USER_QUOTA_MB: float = 5120.0  # 5 GB
+    # Max size of a single AI upload.
+    AI_UPLOAD_MAX_MB: float = 15.0
+    # 0 = keep forever (vault). >0 = expire uploads after N minutes.
+    AI_UPLOAD_TTL_MINUTES: int = 0
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # ignore stray lines that caused earlier dotenv errors
+
+    @property
+    def VAULT_GLOBAL_QUOTA_BYTES(self) -> int:
+        return int(float(self.VAULT_GLOBAL_QUOTA_GB) * (1024**3))
+
+    @property
+    def VAULT_USER_QUOTA_BYTES(self) -> int:
+        return int(float(self.VAULT_USER_QUOTA_MB) * (1024**2))
+
+    @property
+    def AI_UPLOAD_MAX_BYTES(self) -> int:
+        return int(float(self.AI_UPLOAD_MAX_MB) * (1024**2))
 
 
 # --- Initialize Settings ---

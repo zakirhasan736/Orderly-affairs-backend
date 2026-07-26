@@ -440,6 +440,8 @@ def build_owner_user_document(
     totp_secret: str | None = None,
     mfa_linked: bool = False,
 ):
+    import uuid as _uuid
+
     return {
         "email": email,
         "password": hashed_password,
@@ -447,6 +449,8 @@ def build_owner_user_document(
         "phone": phone,
         "role": "owner",
         "owner_id": None,
+        # Opaque vault folder id (not Mongo _id) under VAULT_ROOT/users/
+        "folder_uuid": str(_uuid.uuid4()),
         "verified": True,
         "totp_secret": totp_secret,
         "provisioned_secret": None,

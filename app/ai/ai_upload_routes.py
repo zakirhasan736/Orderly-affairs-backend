@@ -18,19 +18,26 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 
+from app.config import settings
 from app.database import ai_documents_collection
 from app.ai.ai_auth import get_current_owner, get_user_id
 from app.ai.local_document_extract import extract_document_text
+from app.storage.vault import (
+    ensure_owner_vault_dir,
+    resolve_vault_file_path,
+    user_quota_bytes,
+    vault_quota_check,
+    vault_usage_bytes,
+)
 
 
 router = APIRouter(prefix="/ai", tags=["ai-upload"])
 
-UPLOAD_DIR = Path(os.getenv("AI_UPLOAD_DIR", "app/uploads/ai-documents"))
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-# Keep owner uploads available long enough to re-open / preview after autofill.
-AI_UPLOAD_TTL_MINUTES = int(os.getenv("AI_UPLOAD_TTL_MINUTES", str(7 * 24 * 60)))
-MAX_FILE_SIZE = 15 * 1024 * 1024  # 15MB
+# 0 = permanent vault storage (recommended on VPS).
+AI_UPLOAD_TTL_MINUTES = int(
+    os.getenv("AI_UPLOAD_TTL_MINUTES", str(settings.AI_UPLOAD_TTL_MINUTES))
+)
+MAX_FILE_SIZE = settings.AI_UPLOAD_MAX_BYTES
 
 ALLOWED_MIME_TYPES = {
     "application/pdf": ".pdf",
@@ -185,6 +192,9 @@ async def delete_same_topic_documents(
 
 
 async def cleanup_expired_ai_documents():
+    if AI_UPLOAD_TTL_MINUTES <= 0:
+        return
+
     now = utc_now_naive()
 
     cursor = ai_documents_collection.find(
@@ -220,12 +230,22 @@ async def upload_ai_document(
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File too large. Max 15MB.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large. Max {int(settings.AI_UPLOAD_MAX_MB)}MB.",
+        )
+
+    await vault_quota_check(
+        user=current_user,
+        user_id=user_id,
+        incoming_bytes=len(contents),
+    )
 
     ext = ALLOWED_MIME_TYPES[file.content_type]
     file_id = uuid.uuid4().hex
     stored_filename = f"{file_id}{ext}"
-    file_path = UPLOAD_DIR / stored_filename
+    folder_uuid, vault_dir = await ensure_owner_vault_dir(current_user)
+    file_path = resolve_vault_file_path(folder_uuid, stored_filename)
     original_filename = (file.filename or f"document{ext}").strip() or f"document{ext}"
     section_key = str(section).strip() if section is not None else ""
     content_hash = content_hash_for_bytes(contents)
@@ -246,6 +266,7 @@ async def upload_ai_document(
             section=section_key or None,
         )
 
+        vault_dir.mkdir(parents=True, exist_ok=True)
         file_path.write_bytes(contents)
 
         # Best effort file permission hardening.
@@ -255,7 +276,11 @@ async def upload_ai_document(
             pass
 
         now = utc_now_naive()
-        expires_at = now + timedelta(minutes=AI_UPLOAD_TTL_MINUTES)
+        expires_at = (
+            now + timedelta(minutes=AI_UPLOAD_TTL_MINUTES)
+            if AI_UPLOAD_TTL_MINUTES > 0
+            else None
+        )
 
         # Local extract snapshot (cheap for TXT/searchable PDF; OCR optional).
         local_extract = extract_document_text(file_path, file.content_type)
@@ -264,6 +289,7 @@ async def upload_ai_document(
             "_id": file_id,
             "user_id": user_id,
             "owner_id": user_id,
+            "folder_uuid": folder_uuid,
             "role": "owner",
             "path": str(file_path),
             "stored_filename": stored_filename,
@@ -276,6 +302,7 @@ async def upload_ai_document(
             "expires_at": expires_at,
             "status": "uploaded",
             "source": "upload",
+            "storage": "vault",
             "extracted_text": (local_extract.get("text") or "")[:50000],
             "extract_method": local_extract.get("method"),
             "extract_quality": local_extract.get("quality_score"),
@@ -311,7 +338,7 @@ async def upload_ai_document(
             "original_filename": original_filename,
             "mime_type": file.content_type,
             "size_bytes": len(contents),
-            "expires_at": expires_at.isoformat(),
+            "expires_at": expires_at.isoformat() if expires_at else None,
             "preview_url": f"/ai/document/{file_id}/preview",
             "content_hash": content_hash,
             "unchanged": extract_reuse,
@@ -320,6 +347,7 @@ async def upload_ai_document(
             "needs_vision": bool(local_extract.get("needs_vision")),
             "extract_method": local_extract.get("method"),
             "extract_quality": local_extract.get("quality_score"),
+            "storage": "vault",
         }
 
     except HTTPException:
@@ -348,6 +376,7 @@ async def list_owner_ai_documents(
             "$or": [
                 {"expires_at": {"$gt": now}},
                 {"expires_at": None},
+                {"expires_at": {"$exists": False}},
             ],
         }
     ).sort("created_at", -1)
@@ -359,7 +388,16 @@ async def list_owner_ai_documents(
             continue
         documents.append(serialize_ai_document(doc))
 
-    return {"success": True, "documents": documents}
+    used = await vault_usage_bytes(user_id=user_id)
+    return {
+        "success": True,
+        "documents": documents,
+        "storage": {
+            "used_bytes": used,
+            "user_quota_bytes": user_quota_bytes(current_user),
+            "global_quota_bytes": settings.VAULT_GLOBAL_QUOTA_BYTES,
+        },
+    }
 
 
 @router.get("/document/{file_id}/preview")
@@ -402,7 +440,7 @@ async def delete_uploaded_ai_document(
     file_id: str,
     current_user=Depends(get_current_owner),
 ):
-    """Owner deletes a temporary AI upload (disk + Mongo) after fill is done."""
+    """Owner deletes a vault upload (disk + Mongo) from overview / section history."""
     user_id = get_user_id(current_user)
     doc = await ai_documents_collection.find_one(
         {"_id": file_id, "user_id": user_id},

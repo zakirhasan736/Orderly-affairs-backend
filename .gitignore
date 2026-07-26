@@ -39,6 +39,10 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# Private document vault (never commit user uploads)
+/storage/
+/var/storage/
+
 # vercel
 .vercel
 

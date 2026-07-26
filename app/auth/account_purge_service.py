@@ -1,8 +1,7 @@
-"""Full owner account wipe: Cloudinary, local AI uploads, Mongo, Stripe."""
+"""Full owner account wipe: Cloudinary, vault AI uploads, Mongo, Stripe."""
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,10 +25,10 @@ from app.database import (
     users_collection,
 )
 from app.security.cloudinary_purge import purge_owner_cloudinary_media
+from app.storage.vault import purge_owner_vault_dir
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
-AI_UPLOAD_DIR = Path(os.getenv("AI_UPLOAD_DIR", "app/uploads/ai-documents"))
 DELETE_CONFIRM_PHRASE = "DELETE"
 
 
@@ -42,7 +41,6 @@ def _safe_delete_path(path_value: str | None) -> None:
             path.unlink()
     except Exception:
         pass
-
 
 def _collect_media_public_ids(docs: list[dict]) -> list[str]:
     ids: list[str] = []
@@ -90,17 +88,16 @@ async def _cancel_stripe_for_owner(owner: dict) -> dict:
     return summary
 
 
-async def _purge_ai_documents(owner_id: str) -> int:
+async def _purge_ai_documents(owner: dict) -> int:
+    owner_id = str(owner["_id"])
     deleted = 0
     cursor = ai_documents_collection.find({"user_id": owner_id})
     async for doc in cursor:
         _safe_delete_path(doc.get("path"))
-        # Also try stored_filename under default upload dir.
-        stored = doc.get("stored_filename")
-        if stored:
-            _safe_delete_path(str(AI_UPLOAD_DIR / stored))
         await ai_documents_collection.delete_one({"_id": doc["_id"]})
         deleted += 1
+    # Remove the whole vault folder (covers orphans + uuid layout).
+    await purge_owner_vault_dir(owner)
     return deleted
 
 
@@ -109,7 +106,7 @@ async def purge_owner_account(owner: dict) -> dict:
     Irreversibly remove an owner and all owned data:
     - Cloudinary orderly_affairs/{email}/ folder
     - Message / letter media public_ids
-    - Local AI autofill uploads
+    - VPS vault AI autofill uploads
     - Mongo: sections, kits, letters, messages, NOKs, tokens, support, OTPs
     - Stripe subscription + customer (best effort)
     """
@@ -130,7 +127,7 @@ async def purge_owner_account(owner: dict) -> dict:
         owner_email=email,
         message_public_ids=media_ids,
     )
-    ai_deleted = await _purge_ai_documents(owner_id)
+    ai_deleted = await _purge_ai_documents(owner)
     stripe_summary = await _cancel_stripe_for_owner(owner)
 
     # Next-of-kin accounts linked to this owner.
