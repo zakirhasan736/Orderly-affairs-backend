@@ -4,14 +4,16 @@ import asyncio
 import logging
 from pathlib import Path
 
-from google.genai import types
-
 from app.ai.field_catalog import (
     build_default_field_catalog_from_schema,
     format_field_catalog_prompt,
 )
 from app.ai.gemini_generate import generate_gemini_content
 from app.ai.json_utils import parse_gemini_json
+from app.ai.local_document_extract import (
+    build_gemini_document_contents,
+    should_fallback_to_vision,
+)
 from app.ai.smart_field_placement import remap_extraction_result
 
 logger = logging.getLogger(__name__)
@@ -37,7 +39,9 @@ Global privacy and safety rules:
 - Extract EVERY clearly visible fillable value that maps to the schema — do not stop after the first few fields.
 - Only include values clearly supported by the uploaded document.
 - Prefer concrete extracted strings for names, dates, addresses, policy numbers, account labels, locations, and notes.
-- Place each value in the exact schema field it belongs to. Do not leave a value only in notes when a dedicated field exists.
+- EXACT FIELD MATCH (critical): For every fact in the document, find the ONE catalog/schema input field whose key or label matches that fact, and put the value there. Never leave matched data only in notes when a dedicated field exists.
+- If the document text matches a field label (or a close synonym), that field MUST be filled with the corresponding value.
+- Do not invent alternate key names. Use only the exact catalog/schema keys.
 - Understand wording mismatches against field labels: decide what the value MEANS first, then choose the one exact catalog key. Do not confuse similar labels.
 - Read tables row-by-row and multi-column layouts fully.
 - MULTI-ITEM RULE: If the document describes multiple policies, accounts, vehicles, memberships, or people, return one object per entity in the subsection array — never merge them into one object.
@@ -102,6 +106,56 @@ def normalize_extraction_result(parsed: dict | None) -> dict:
     return result
 
 
+def _run_gemini_extract(
+    *,
+    path: Path,
+    mime_type: str,
+    final_prompt: str,
+    response_schema: dict,
+    field_catalog: list[dict] | None,
+    force_vision: bool = False,
+):
+    contents, extract_meta = build_gemini_document_contents(
+        path=path,
+        mime_type=mime_type,
+        prompt=final_prompt,
+        force_vision=force_vision,
+    )
+    if extract_meta.get("gemini_input") == "text":
+        logger.info(
+            "Gemini extract using local text (%s, quality=%.2f)",
+            extract_meta.get("method"),
+            float(extract_meta.get("quality_score") or 0),
+        )
+    elif force_vision:
+        logger.info("Gemini extract using vision fallback")
+
+    response = generate_gemini_content(
+        contents=contents,
+        response_mime_type="application/json",
+        response_json_schema=response_schema,
+        temperature=0,
+        max_output_tokens=32768,
+    )
+
+    raw_text = getattr(response, "text", None) or ""
+    if not raw_text and getattr(response, "candidates", None):
+        try:
+            parts = response.candidates[0].content.parts or []
+            raw_text = "".join(getattr(part, "text", "") or "" for part in parts)
+        except Exception:
+            raw_text = ""
+
+    try:
+        parsed = parse_gemini_json(raw_text)
+    except RuntimeError:
+        raise RuntimeError("Gemini returned invalid JSON")
+
+    normalized = normalize_extraction_result(parsed)
+    remapped = remap_extraction_result(normalized, field_catalog)
+    return remapped, extract_meta
+
+
 def _extract_sync(
     *,
     document_url: str,
@@ -122,9 +176,8 @@ def _extract_sync(
     if not path.exists() or not path.is_file():
         raise FileNotFoundError("Document file not found")
 
-    file_bytes = path.read_bytes()
-
-    if len(file_bytes) > MAX_INLINE_FILE_SIZE:
+    file_size = path.stat().st_size
+    if file_size > MAX_INLINE_FILE_SIZE:
         raise ValueError("File too large for AI extraction")
 
     final_prompt = f"""
@@ -133,33 +186,39 @@ def _extract_sync(
 {GLOBAL_PRIVACY_EXTRACTION_RULES}
 """
 
-    response = generate_gemini_content(
-        contents=[
-            types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-            final_prompt,
-        ],
-        response_mime_type="application/json",
-        response_json_schema=response_schema,
-        temperature=0,
-        max_output_tokens=16384,
+    remapped, extract_meta = _run_gemini_extract(
+        path=path,
+        mime_type=mime_type,
+        final_prompt=final_prompt,
+        response_schema=response_schema,
+        field_catalog=field_catalog,
+        force_vision=False,
     )
 
-    raw_text = getattr(response, "text", None) or ""
-    if not raw_text and getattr(response, "candidates", None):
-        try:
-            parts = response.candidates[0].content.parts or []
-            raw_text = "".join(getattr(part, "text", "") or "" for part in parts)
-        except Exception:
-            raw_text = ""
+    # Smart switch: empty fill or low confidence after text path → vision once.
+    if should_fallback_to_vision(remapped, extract_meta):
+        logger.info(
+            "Text path weak (empty/low confidence); retrying with Gemini vision"
+        )
+        remapped, extract_meta = _run_gemini_extract(
+            path=path,
+            mime_type=mime_type,
+            final_prompt=final_prompt,
+            response_schema=response_schema,
+            field_catalog=field_catalog,
+            force_vision=True,
+        )
 
-    try:
-        parsed = parse_gemini_json(raw_text)
-    except RuntimeError:
-        raise RuntimeError("Gemini returned invalid JSON")
+    if isinstance(remapped, dict):
+        remapped["__extract_meta"] = {
+            "method": extract_meta.get("method"),
+            "quality_score": extract_meta.get("quality_score"),
+            "gemini_input": extract_meta.get("gemini_input"),
+            "read_source": extract_meta.get("read_source") or "gemini",
+            "needs_vision": extract_meta.get("needs_vision"),
+            "result_confidence": remapped.get("confidence"),
+        }
 
-    normalized = normalize_extraction_result(parsed)
-    # Understand meaning → place onto exact catalog field keys/labels.
-    remapped = remap_extraction_result(normalized, field_catalog)
     return remapped
 
 
@@ -210,9 +269,10 @@ def _empty_catalog_keys(result: dict | None, field_catalog: list[dict] | None) -
 
 def _needs_pass_b(result: dict | None, field_catalog: list[dict] | None) -> bool:
     empty = _empty_catalog_keys(result, field_catalog)
-    if len(empty) < 3:
+    # With Pro, run a refill pass whenever any catalog fields remain empty
+    # and the first pass already found some document signal.
+    if len(empty) < 1:
         return False
-    # Only worth a second pass when long text or some signal already exists.
     has_signal = False
     for item in _iter_patch_items(result):
         for key, value in item.items():
@@ -221,12 +281,12 @@ def _needs_pass_b(result: dict | None, field_catalog: list[dict] | None) -> bool
             text = value if isinstance(value, str) else ""
             if isinstance(value, dict):
                 text = str(value.get("text") or "")
-            if text and len(text.strip()) >= 8:
+            if text and len(text.strip()) >= 4:
                 has_signal = True
                 break
         if has_signal:
             break
-    return has_signal and len(empty) >= 3
+    return has_signal
 
 
 def _merge_pass_b_into(primary: dict | None, secondary: dict | None) -> dict | None:

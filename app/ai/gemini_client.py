@@ -6,10 +6,14 @@ from typing import Literal
 
 from google import genai
 
-DEFAULT_FLASH_MODEL = "gemini-3.5-flash"
-DEFAULT_FLASH_FALLBACK_MODELS = "gemini-3.1-flash-lite,gemini-flash-latest"
+# Cost-first primary for 40–50 docs/user; Lite then Pro when Flash is limited.
+# Prefer aliases / Gemini 3.x — gemini-2.5-flash returns 404 for many new API keys.
+DEFAULT_PRIMARY_MODEL = "gemini-flash-latest"
+DEFAULT_FALLBACK_MODELS = (
+    "gemini-3.6-flash,gemini-flash-lite-latest,gemini-pro-latest"
+)
 
-GeminiModelTier = Literal["flash"]
+GeminiModelTier = Literal["pro", "flash"]
 
 
 @lru_cache(maxsize=1)
@@ -23,7 +27,7 @@ def get_gemini_client():
 
 
 def get_gemini_model():
-    return os.getenv("GEMINI_MODEL", DEFAULT_FLASH_MODEL)
+    return os.getenv("GEMINI_MODEL", DEFAULT_PRIMARY_MODEL)
 
 
 def get_gemini_model_candidates(explicit_model: str | None = None) -> list[str]:
@@ -31,7 +35,10 @@ def get_gemini_model_candidates(explicit_model: str | None = None) -> list[str]:
         return [explicit_model]
 
     primary = get_gemini_model()
-    fallbacks_raw = os.getenv("GEMINI_FALLBACK_MODELS", DEFAULT_FLASH_FALLBACK_MODELS)
+    fallbacks_raw = os.getenv(
+        "GEMINI_FALLBACK_MODELS",
+        DEFAULT_FALLBACK_MODELS,
+    )
 
     candidates: list[str] = []
     for model_name in [primary, *fallbacks_raw.split(",")]:
@@ -39,4 +46,4 @@ def get_gemini_model_candidates(explicit_model: str | None = None) -> list[str]:
         if cleaned and cleaned not in candidates:
             candidates.append(cleaned)
 
-    return candidates or [DEFAULT_FLASH_MODEL]
+    return candidates or [DEFAULT_PRIMARY_MODEL]

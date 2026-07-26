@@ -13,8 +13,11 @@ from pydantic import BaseModel, Field
 from app.ai.autofill_registry import SECTION_EXTRACTORS
 from app.ai.cross_section_enrichment import (
     build_detected_facts_payload,
+    cached_extraction_needs_full_read,
     enrich_primary_result,
-    insurance_cache_missing_policy_number,
+    insurance_result_is_thin,
+    is_cross_seed_extraction,
+    mark_full_extraction,
     merge_seed_into_cached,
     seed_insurance_from_vehicles,
     seed_vehicles_from_insurance,
@@ -25,6 +28,7 @@ from app.ai.document_classifier import (
     classify_document_for_section,
     enforce_upload_section_first,
     get_section_meta,
+    harden_vehicle_insurance_routing,
 )
 from app.ai.field_catalog import (
     build_fast_section_previews_from_classification,
@@ -36,6 +40,7 @@ from app.ai.gemini_generate import (
 )
 from app.ai.ai_auth import get_current_owner, get_user_id
 from app.ai.background_section_persist import persist_cached_extractions_for_owner
+from app.ai.local_document_extract import describe_read_source
 from app.database import ai_documents_collection
 
 logger = logging.getLogger(__name__)
@@ -113,14 +118,12 @@ def _should_use_cached_extraction(
     if not cached:
         return False
 
-    # Partial vehicle→insurance seeds often miss policy_number. Re-read the
-    # document for insurance so "insurance number" lands on policy_number.
-    if section_key == "insurance_policies" and insurance_cache_missing_policy_number(
-        cached
-    ):
+    # Cross-seeds / thin partner bridges must never short-circuit a full
+    # section field-catalog extract against the uploaded document.
+    if cached_extraction_needs_full_read(section_key, cached):
         return False
 
-    # Document was already read for this section — never call Gemini again.
+    # Document was already fully read for this section — reuse it.
     return True
 
 def _should_extract_without_classification(
@@ -135,7 +138,10 @@ def _should_extract_without_classification(
 
     consumed = set(doc.get("consumed_sections") or [])
     if section_key in consumed:
-        return False
+        # Allow re-extract when prior fill was only a thin cross-seed.
+        cached = _get_cached_extraction(doc, section_key)
+        if not cached_extraction_needs_full_read(section_key, cached):
+            return False
 
     pending = doc.get("pending_sections") or []
     if section_key in pending:
@@ -155,6 +161,17 @@ def _should_extract_without_classification(
     }
     if section_key in additional_keys:
         return True
+
+    # Hard-paired partners (vehicles ↔ insurance) when this upload already
+    # touched one side of the pair — still extract without re-classifying.
+    related = set(pending) | set(consumed) | additional_keys
+    routed = doc.get("routed_section")
+    if routed:
+        related.add(routed)
+    for primary, partners in FAST_PARTNER_PREFETCH.items():
+        pair = {primary, *partners}
+        if section_key in pair and related.intersection(pair):
+            return True
 
     return False
 
@@ -245,13 +262,9 @@ async def _safe_prefetch_sections(
             {"_id": file_id, "user_id": user_id},
             {"cached_extractions": 1},
         )
-        cached = (fresh or doc).get("cached_extractions") or {}
-        # Save into vault even if the browser disconnected mid-read.
-        await persist_cached_extractions_for_owner(
-            owner_id=user_id,
-            cached_extractions=cached,
-            section_keys=limited_keys,
-        )
+        # Cache only — do NOT vault-persist here. Prefetch + finalize + partner
+        # fill were each writing vehicles and creating duplicate rows.
+        _ = (fresh or doc).get("cached_extractions") or {}
     except Exception as error:
         logger.warning("Background section prefetch failed: %s", repr(error))
 
@@ -319,7 +332,12 @@ async def _cache_additional_sections(
     cached_extractions = dict((fresh or doc).get("cached_extractions") or {})
 
     async def cache_one(section_key: str):
-        if section_key in cached_extractions or section_key == exclude_section:
+        if section_key == exclude_section:
+            return
+
+        existing = cached_extractions.get(section_key)
+        # Re-extract when prior cache is only a partner seed / too thin.
+        if existing and not cached_extraction_needs_full_read(section_key, existing):
             return
 
         try:
@@ -333,7 +351,19 @@ async def _cache_additional_sections(
                 field_catalog=None,
             )
             if isinstance(result, dict):
-                cached_extractions[section_key] = result
+                full = mark_full_extraction(result) or result
+                # Keep useful shared fields from a prior seed.
+                if existing and is_cross_seed_extraction(existing):
+                    array_key = "7A" if section_key == "insurance_policies" else (
+                        "5A" if section_key == "vehicles" else None
+                    )
+                    if array_key:
+                        full = (
+                            merge_seed_into_cached(full, existing, array_key=array_key)
+                            or full
+                        )
+                        full = mark_full_extraction(full) or full
+                cached_extractions[section_key] = full
         except Exception as error:
             logger.warning(
                 "Failed to pre-cache section %s: %s",
@@ -373,6 +403,12 @@ async def _finalize_autofill_success(
     existing_pending = list(source_doc.get("pending_sections") or [])
     existing_consumed = list(source_doc.get("consumed_sections") or [])
 
+    extract_meta = {}
+    if isinstance(result, dict):
+        raw_meta = result.pop("__extract_meta", None)
+        if isinstance(raw_meta, dict):
+            extract_meta = raw_meta
+
     if payload.section not in existing_consumed:
         existing_consumed.append(payload.section)
 
@@ -389,6 +425,8 @@ async def _finalize_autofill_success(
 
     # Canonicalize wording → exact section field keys before cache/cross-seed.
     result = enrich_primary_result(result, payload.section) or result
+    if not from_cache:
+        result = mark_full_extraction(result) or result
 
     cached_extractions = dict(source_doc.get("cached_extractions") or {})
     previous_cached = cached_extractions.get(payload.section)
@@ -471,8 +509,29 @@ async def _finalize_autofill_success(
     # Bidirectional meaning sync: policy/insurance number, company, expiry
     # must appear on BOTH vehicles and insurance when present on either side.
     cached_extractions = sync_vehicle_insurance_shared_fields(cached_extractions)
+
+    # If insurance is still thin after sync but vehicles have policy data, force seed.
+    if insurance_result_is_thin(cached_extractions.get("insurance_policies")):
+        forced = seed_insurance_from_vehicles(cached_extractions.get("vehicles"))
+        if forced:
+            cached_extractions["insurance_policies"] = merge_seed_into_cached(
+                cached_extractions.get("insurance_policies"),
+                forced,
+                array_key="7A",
+            )
+            cached_extractions = sync_vehicle_insurance_shared_fields(
+                cached_extractions
+            )
+
     if payload.section in cached_extractions:
         result = cached_extractions.get(payload.section) or result
+
+    # Insurance primary must never return blank when vehicles already hold the policy.
+    if payload.section == "insurance_policies" and insurance_result_is_thin(result):
+        synced_insurance = cached_extractions.get("insurance_policies")
+        if synced_insurance and not insurance_result_is_thin(synced_insurance):
+            result = synced_insurance
+            cached_extractions["insurance_policies"] = result
 
     detected_facts = build_detected_facts_payload(
         primary_section=payload.section,
@@ -540,19 +599,53 @@ async def _finalize_autofill_success(
 
     document_summary = classification.get("document_summary")
 
-    # Seeded / synced partner sections — client can persist without another Gemini call.
+    if not extract_meta and isinstance(doc, dict):
+        extract_meta = {
+            "method": doc.get("extract_method"),
+            "quality_score": doc.get("extract_quality"),
+            "needs_vision": doc.get("needs_vision"),
+            "gemini_input": "text" if not doc.get("needs_vision") else "file_bytes",
+            "read_source": (
+                "cache"
+                if from_cache or doc.get("extract_reuse")
+                else ("system" if not doc.get("needs_vision") else "gemini")
+            ),
+        }
+
+    read_source = describe_read_source(
+        extract_meta,
+        from_cache=from_cache or bool(doc.get("extract_reuse")),
+    )
+
+    if extract_meta:
+        await ai_documents_collection.update_one(
+            {"_id": file_id, "user_id": user_id},
+            {
+                "$set": {
+                    "last_extract_meta": extract_meta,
+                    "read_source": read_source,
+                }
+            },
+        )
+
+    # Only return FULL partner extracts here. Cross-seeds are bridges — the
+    # client must run a catalog extract per related section against the file.
     partner_results: dict[str, dict] = {}
     for partner_key, partner_result in cached_extractions.items():
         if partner_key == payload.section:
             continue
+        if not isinstance(partner_result, dict):
+            continue
+        if cached_extraction_needs_full_read(partner_key, partner_result):
+            continue
         if partner_key in FAST_PARTNER_PREFETCH.get(payload.section, []) or any(
             item.get("section_key") == partner_key for item in additional_sections
         ):
-            if isinstance(partner_result, dict):
-                partner_results[partner_key] = partner_result
+            partner_results[partner_key] = partner_result
 
-    # Persist primary + partners to vault in background (device may disconnect).
-    persist_keys = [payload.section, *partner_results.keys()]
+    # Persist PRIMARY only. Partner sections are filled+persisted sequentially
+    # by the overview runner — writing partners here duplicated vehicle rows.
+    persist_keys = [payload.section]
     asyncio.create_task(
         persist_cached_extractions_for_owner(
             owner_id=user_id,
@@ -575,6 +668,9 @@ async def _finalize_autofill_success(
         "file_kept": keep_document,
         "from_cache": from_cache,
         "document_deleted": not keep_document,
+        "read_source": read_source,
+        "extract_method": extract_meta.get("method"),
+        "extract_meta": extract_meta,
     }
 
 
@@ -678,6 +774,83 @@ async def autofill_section(
             },
         )
 
+        # Exact-byte re-upload: reuse prior classification — skip Gemini classify.
+        reused_classification = doc.get("last_classification")
+        if (
+            payload.classify_only
+            and doc.get("extract_reuse")
+            and isinstance(reused_classification, dict)
+            and reused_classification
+        ):
+            classification = harden_vehicle_insurance_routing(
+                dict(reused_classification)
+            )
+            matches_requested = bool(classification.get("matches_requested_section"))
+            best_section_key = classification.get("best_section_key") or payload.section
+            suggested = get_section_meta(best_section_key) or {}
+            additional_sections = build_additional_sections_payload(
+                classification,
+                best_section_key,
+            )
+            section_previews = build_fast_section_previews_from_classification(
+                classification,
+                suggested_section_key=best_section_key,
+            )
+            prefetch_keys = _limit_prefetch_keys(
+                best_section_key,
+                [
+                    item["section_key"]
+                    for item in additional_sections
+                    if item.get("section_key")
+                ],
+            )
+            await ai_documents_collection.update_one(
+                {"_id": payload.file_id, "user_id": user_id},
+                {
+                    "$set": {
+                        "status": "uploaded",
+                        "last_classification": classification,
+                        "routed_section": best_section_key,
+                        "pending_sections": [
+                            key
+                            for key in prefetch_keys
+                            if key in SECTION_EXTRACTORS
+                        ],
+                    }
+                },
+            )
+            # Prefetch only missing sections; cached partners are skipped inside.
+            asyncio.create_task(
+                _safe_prefetch_sections(
+                    file_id=payload.file_id,
+                    user_id=user_id,
+                    doc=doc,
+                    file_path=file_path,
+                    mime_type=mime_type,
+                    section_keys=prefetch_keys,
+                )
+            )
+            keep_document = True
+            return {
+                "success": True,
+                "classified_only": True,
+                "from_cache": True,
+                "extract_reuse": True,
+                "unchanged": True,
+                "section": payload.section,
+                "best_section": best_section_key,
+                "best_section_id": suggested.get("id"),
+                "best_section_label": suggested.get("label"),
+                "best_subsection": suggested.get("default_subsection"),
+                "matches_requested_section": matches_requested,
+                "document_summary": classification.get("document_summary"),
+                "additional_sections": additional_sections,
+                "section_previews": section_previews,
+                "file_id": payload.file_id,
+                "mime_type": mime_type,
+                "file_kept": True,
+            }
+
         classification = await classify_document_for_section(
             document_url=f"local_file:{file_path}",
             mime_type=mime_type,
@@ -699,6 +872,11 @@ async def autofill_section(
         best_section_key = classification.get("best_section_key") or payload.section
 
         if payload.classify_only:
+            # Always harden auto/vehicle routing even for overview probes.
+            classification = harden_vehicle_insurance_routing(classification)
+            # Re-read after harden — best_section may have changed.
+            matches_requested = bool(classification.get("matches_requested_section"))
+            best_section_key = classification.get("best_section_key") or payload.section
             suggested = get_section_meta(best_section_key) or {}
             additional_sections = build_additional_sections_payload(
                 classification,

@@ -180,11 +180,15 @@ def _vehicles_are_duplicates(existing: dict, incoming: dict) -> bool:
     incoming_vin = _normalize_comparable(incoming.get("vin"))
     if existing_vin and incoming_vin and existing_vin == incoming_vin:
         return True
+    if existing_vin and incoming_vin and existing_vin != incoming_vin:
+        return False
 
     existing_plate = _normalize_comparable(existing.get("license_plate"))
     incoming_plate = _normalize_comparable(incoming.get("license_plate"))
     if existing_plate and incoming_plate and existing_plate == incoming_plate:
         return True
+    if existing_plate and incoming_plate and existing_plate != incoming_plate:
+        return False
 
     year_a = _normalize_comparable(existing.get("year"))
     year_b = _normalize_comparable(incoming.get("year"))
@@ -192,7 +196,7 @@ def _vehicles_are_duplicates(existing: dict, incoming: dict) -> bool:
     make_b = _normalize_comparable(incoming.get("make"))
     model_a = _normalize_comparable(existing.get("model"))
     model_b = _normalize_comparable(incoming.get("model"))
-    return bool(
+    if (
         year_a
         and year_b
         and make_a
@@ -202,7 +206,35 @@ def _vehicles_are_duplicates(existing: dict, incoming: dict) -> bool:
         and year_a == year_b
         and make_a == make_b
         and model_a == model_b
-    )
+    ):
+        return True
+
+    # Soft match: thin insurance seed ↔ richer vehicle extract share a policy.
+    def _policy(item: dict) -> str:
+        raw = item.get("insurance_policy") or item.get("policy_number") or ""
+        return _normalize_comparable(raw).replace("-", "").replace("_", "").replace(".", "").replace("#", "")
+
+    policy_a = _policy(existing)
+    policy_b = _policy(incoming)
+    if policy_a and policy_b and policy_a == policy_b:
+        existing_identity = bool(
+            existing_vin
+            or existing_plate
+            or (year_a and make_a and model_a)
+        )
+        incoming_identity = bool(
+            incoming_vin
+            or incoming_plate
+            or (year_b and make_b and model_b)
+        )
+        if not existing_identity or not incoming_identity:
+            return True
+        if make_a and make_b and make_a == make_b and (
+            not year_a or not year_b or year_a == year_b
+        ):
+            return True
+
+    return False
 
 
 def _is_upload_shape(value: Any) -> bool:

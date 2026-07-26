@@ -70,9 +70,28 @@ def seed_insurance_from_vehicles(vehicle_result: dict | None) -> dict | None:
 
     for vehicle in _vehicle_items(vehicle_result):
         concepts = collect_concepts_from_item(vehicle)
-        company = concepts.get("policy_company")
-        number = concepts.get("policy_number")
-        expiry = concepts.get("policy_expiry")
+        company = (
+            concepts.get("policy_company")
+            or as_plain_text(vehicle.get("insurance_company"))
+            or as_plain_text(vehicle.get("policy_company"))
+        )
+        number = (
+            concepts.get("policy_number")
+            or as_plain_text(vehicle.get("insurance_policy"))
+            or as_plain_text(vehicle.get("policy_number"))
+        )
+        expiry = (
+            concepts.get("policy_expiry")
+            or as_plain_text(vehicle.get("registration_expiry"))
+            or as_plain_text(vehicle.get("policy_expiry"))
+        )
+
+        if company:
+            concepts["policy_company"] = company
+        if number:
+            concepts["policy_number"] = number
+        if expiry:
+            concepts["policy_expiry"] = expiry
 
         if not company and not number and not expiry:
             continue
@@ -114,12 +133,13 @@ def seed_insurance_from_vehicles(vehicle_result: dict | None) -> dict | None:
         "scope": "section",
         "subsection": None,
         "confidence": 0.75,
+        "extraction_source": "cross_seed",
         "patch": {"7A": policies},
     }
 
 
 def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
-    """Seed vehicle insurance + expiry fields from an insurance extraction."""
+    """Seed vehicle fields from an insurance extraction — auto/vehicle policies only."""
     insurance_result = _enrich_items_in_place(
         insurance_result, "insurance_policies", "7A"
     )
@@ -130,20 +150,27 @@ def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
     chosen = None
     for policy in policies:
         policy_type = (as_plain_text(policy.get("policy_type")) or "").lower()
-        if policy_type == "vehicle":
+        notes = (as_plain_text(policy.get("notes")) or "").lower()
+        docs = (as_plain_text(policy.get("policy_documents")) or "").lower()
+        blob = f"{policy_type} {notes} {docs}"
+        is_vehicle = (
+            policy_type == "vehicle"
+            or "auto" in blob
+            or "vin" in blob
+            or "license plate" in blob
+            or "vehicle" in blob
+        )
+        is_home = (
+            "homeowner" in blob
+            or "renter" in blob
+            or "dwelling" in blob
+            or "home " in f" {blob} "
+        )
+        if is_vehicle and not is_home:
             chosen = policy
             break
-    if chosen is None:
-        for policy in policies:
-            concepts = collect_concepts_from_item(policy)
-            if (
-                concepts.get("policy_number")
-                or concepts.get("policy_company")
-                or concepts.get("policy_expiry")
-            ):
-                chosen = policy
-                break
 
+    # Do NOT fall back to life/home/health policies — that wrongly creates Vehicles rows.
     if chosen is None:
         return None
 
@@ -157,6 +184,7 @@ def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
         "scope": "section",
         "subsection": None,
         "confidence": 0.7,
+        "extraction_source": "cross_seed",
         "patch": {"5A": [vehicle]},
     }
 
@@ -204,6 +232,13 @@ def merge_seed_into_cached(
     merged_patch = dict(existing_patch)
     merged_patch[array_key] = merged_items
     merged["patch"] = merged_patch
+    # Keep a full Gemini extraction marked as such; don't demote to seed.
+    if existing.get("extraction_source") == "gemini":
+        merged["extraction_source"] = "gemini"
+    elif seed.get("extraction_source") == "cross_seed" and not existing.get(
+        "extraction_source"
+    ):
+        merged["extraction_source"] = "cross_seed"
     return merged
 
 
@@ -226,6 +261,77 @@ def _first_item_concepts(result: dict | None, array_key: str) -> dict[str, str]:
     return {}
 
 
+def _shared_policy_concepts(concepts: dict[str, str] | None) -> dict[str, str]:
+    if not concepts:
+        return {}
+    return {
+        key: value
+        for key, value in concepts.items()
+        if key in SHARED_VEHICLE_INSURANCE_CONCEPTS and value
+    }
+
+
+def insurance_result_is_thin(result: dict | None) -> bool:
+    """True when insurance patch lacks the core policy identity fields."""
+    concepts = _shared_policy_concepts(_first_item_concepts(result, "7A"))
+    return not bool(
+        concepts.get("policy_number") or concepts.get("policy_company")
+    )
+
+
+def is_cross_seed_extraction(result: dict | None) -> bool:
+    """True when the cache entry was copied from a partner section, not Gemini."""
+    return isinstance(result, dict) and result.get("extraction_source") == "cross_seed"
+
+
+def mark_full_extraction(result: dict | None) -> dict | None:
+    """Tag a real section extractor result so partner fills can trust it."""
+    if not isinstance(result, dict):
+        return result
+    if result.get("extraction_source") == "cross_seed":
+        return result
+    next_result = dict(result)
+    next_result["extraction_source"] = "gemini"
+    return next_result
+
+
+def vehicles_result_is_thin(result: dict | None) -> bool:
+    """True when vehicles patch has almost no useful fields."""
+    if is_cross_seed_extraction(result):
+        return True
+    items = _vehicle_items(result)
+    if not items or not isinstance(items[0], dict):
+        return True
+    filled = 0
+    for key, value in items[0].items():
+        if key in {"id", "_id"}:
+            continue
+        if as_plain_text(value):
+            filled += 1
+    return filled < 3
+
+
+def cached_extraction_needs_full_read(
+    section_key: str,
+    result: dict | None,
+) -> bool:
+    """
+    Partner / cache reuse must re-read the document when the stored patch is
+    only a cross-section seed or otherwise too thin for that section's fields.
+    """
+    if not isinstance(result, dict):
+        return True
+    if is_cross_seed_extraction(result):
+        return True
+    if section_key == "insurance_policies":
+        return insurance_cache_missing_policy_number(result) or insurance_result_is_thin(
+            result
+        )
+    if section_key == "vehicles":
+        return vehicles_result_is_thin(result)
+    return False
+
+
 def sync_vehicle_insurance_shared_fields(
     cached_extractions: dict | None,
 ) -> dict:
@@ -240,8 +346,12 @@ def sync_vehicle_insurance_shared_fields(
     vehicle_result = cached.get("vehicles")
     insurance_result = cached.get("insurance_policies")
 
-    vehicle_concepts = _first_item_concepts(vehicle_result, "5A")
-    insurance_concepts = _first_item_concepts(insurance_result, "7A")
+    vehicle_concepts = _shared_policy_concepts(
+        _first_item_concepts(vehicle_result, "5A")
+    )
+    insurance_concepts = _shared_policy_concepts(
+        _first_item_concepts(insurance_result, "7A")
+    )
 
     merged_concepts: dict[str, str] = {}
     for concept in SHARED_VEHICLE_INSURANCE_CONCEPTS:
@@ -251,6 +361,23 @@ def sync_vehicle_insurance_shared_fields(
             or ""
         )
     merged_concepts = {k: v for k, v in merged_concepts.items() if v}
+
+    # Vehicles have policy data but insurance is blank/thin → build insurance now.
+    if vehicle_concepts and insurance_result_is_thin(insurance_result):
+        seeded = seed_insurance_from_vehicles(vehicle_result)
+        if seeded:
+            insurance_result = merge_seed_into_cached(
+                insurance_result,
+                seeded,
+                array_key="7A",
+            )
+            cached["insurance_policies"] = insurance_result
+            insurance_concepts = _shared_policy_concepts(
+                _first_item_concepts(insurance_result, "7A")
+            )
+            for concept in SHARED_VEHICLE_INSURANCE_CONCEPTS:
+                if not merged_concepts.get(concept) and insurance_concepts.get(concept):
+                    merged_concepts[concept] = insurance_concepts[concept]
 
     if not merged_concepts:
         return cached
@@ -267,11 +394,11 @@ def sync_vehicle_insurance_shared_fields(
             next_vehicle["patch"] = patch
             cached["vehicles"] = next_vehicle
 
-    if insurance_result:
+    if cached.get("insurance_policies"):
         insurance_result = _enrich_items_in_place(
-            insurance_result, "insurance_policies", "7A"
+            cached.get("insurance_policies"), "insurance_policies", "7A"
         )
-        patch = dict(insurance_result.get("patch") or {})
+        patch = dict((insurance_result or {}).get("patch") or {})
         items = patch.get("7A")
         if isinstance(items, list) and items and isinstance(items[0], dict):
             items = list(items)
@@ -284,8 +411,22 @@ def sync_vehicle_insurance_shared_fields(
                 or merged_concepts.get("policy_company")
             ):
                 items[0]["policy_type"] = "Vehicle"
+            # Force-write shared fields even if previous blank strings blocked apply.
+            for concept, value in merged_concepts.items():
+                if concept == "policy_number" and not as_plain_text(
+                    items[0].get("policy_number")
+                ):
+                    items[0]["policy_number"] = value
+                if concept == "policy_company" and not as_plain_text(
+                    items[0].get("policy_company")
+                ):
+                    items[0]["policy_company"] = value
+                if concept == "policy_expiry" and not as_plain_text(
+                    items[0].get("policy_expiry")
+                ):
+                    items[0]["policy_expiry"] = value
             patch["7A"] = items
-            next_insurance = dict(insurance_result)
+            next_insurance = dict(insurance_result or {})
             next_insurance["patch"] = patch
             cached["insurance_policies"] = next_insurance
     elif merged_concepts.get("policy_number") or merged_concepts.get("policy_company"):

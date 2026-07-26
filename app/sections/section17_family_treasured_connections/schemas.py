@@ -12,8 +12,10 @@ class UploadedFile(BaseModel):
 
 
 class UploadField(BaseModel):
+    text: Optional[str] = None
     files: List[UploadedFile] = []
     _deleted_files: List[str] = []
+    model_config = {"extra": "ignore"}
 
 
 # ---------------- 17A — Ancestry & Family Tree (NON-REPEATABLE) ----------------

@@ -1,20 +1,7 @@
-from pydantic import BaseModel, RootModel, Field, field_validator
+from pydantic import BaseModel, RootModel, field_validator
 from typing import Dict, List, Optional, Union
 
-
-class UploadedFile(BaseModel):
-    name: str
-    url: str
-    public_id: str
-    version: Optional[int] = 1
-
-
-class UploadField(BaseModel):
-    files: List[UploadedFile] = Field(default_factory=list)
-    deleted_files: List[str] = Field(default_factory=list, alias="_deleted_files")
-
-    class Config:
-        populate_by_name = True
+from app.sections.common_upload_field import UploadField
 
 
 UploadValue = Union[str, UploadField, None]
@@ -38,7 +25,6 @@ class InsurancePolicy(BaseModel):
     # None = default all; [] = nobody; list of emails = explicit selection.
     reminder_recipients: Optional[List[str]] = None
 
-    # 🔥 normalize "" → None
     @field_validator(
         "policy_documents_life",
         "policy_number",
@@ -50,6 +36,9 @@ class InsurancePolicy(BaseModel):
     def empty_string_to_none(cls, v):
         if v == "":
             return None
+        # Prefer structured upload shape so `text` survives round-trips.
+        if isinstance(v, str):
+            return {"text": v, "files": []}
         return v
 
 

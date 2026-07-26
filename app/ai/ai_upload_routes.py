@@ -1,5 +1,6 @@
 # app/ai/ai_upload_routes.py
 
+import hashlib
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from fastapi.responses import FileResponse
 
 from app.database import ai_documents_collection
 from app.ai.ai_auth import get_current_owner, get_user_id
+from app.ai.local_document_extract import extract_document_text
 
 
 router = APIRouter(prefix="/ai", tags=["ai-upload"])
@@ -75,6 +77,40 @@ def normalize_document_topic(name: Optional[str]) -> str:
     return " ".join(str(name or "").strip().lower().split())
 
 
+def content_hash_for_bytes(contents: bytes) -> str:
+    return hashlib.sha256(contents).hexdigest()
+
+
+def _cache_is_reusable(doc: dict | None) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    cached = doc.get("cached_extractions")
+    if isinstance(cached, dict) and cached:
+        return True
+    classification = doc.get("last_classification")
+    return isinstance(classification, dict) and bool(classification)
+
+
+async def find_reusable_hash_match(*, user_id: str, content_hash: str) -> dict | None:
+    """Prior upload of the exact same bytes with reusable AI cache/classification."""
+    if not content_hash:
+        return None
+    cursor = (
+        ai_documents_collection.find(
+            {
+                "user_id": user_id,
+                "content_hash": content_hash,
+            }
+        )
+        .sort("created_at", -1)
+        .limit(8)
+    )
+    async for doc in cursor:
+        if _cache_is_reusable(doc):
+            return doc
+    return None
+
+
 def serialize_ai_document(doc: dict) -> dict:
     created = normalize_mongo_datetime(doc.get("created_at"))
     updated = normalize_mongo_datetime(doc.get("updated_at")) or created
@@ -92,6 +128,8 @@ def serialize_ai_document(doc: dict) -> dict:
         "preview_url": f"/ai/document/{doc.get('_id')}/preview",
         "source": doc.get("source") or "upload",
         "section": doc.get("routed_section") or doc.get("section"),
+        "content_hash": doc.get("content_hash"),
+        "extract_reuse": bool(doc.get("extract_reuse")),
     }
 
 
@@ -190,8 +228,17 @@ async def upload_ai_document(
     file_path = UPLOAD_DIR / stored_filename
     original_filename = (file.filename or f"document{ext}").strip() or f"document{ext}"
     section_key = str(section).strip() if section is not None else ""
+    content_hash = content_hash_for_bytes(contents)
 
     try:
+        # Exact byte match — copy AI cache before topic cleanup deletes the prior row.
+        prior = await find_reusable_hash_match(
+            user_id=user_id,
+            content_hash=content_hash,
+        )
+        extract_reuse = bool(prior)
+        reused_from_file_id = str(prior.get("_id")) if prior else None
+
         # Same topic re-upload: delete previous DB row + disk file, then add new.
         replaced_file_ids = await delete_same_topic_documents(
             user_id=user_id,
@@ -210,6 +257,9 @@ async def upload_ai_document(
         now = utc_now_naive()
         expires_at = now + timedelta(minutes=AI_UPLOAD_TTL_MINUTES)
 
+        # Local extract snapshot (cheap for TXT/searchable PDF; OCR optional).
+        local_extract = extract_document_text(file_path, file.content_type)
+
         doc = {
             "_id": file_id,
             "user_id": user_id,
@@ -220,14 +270,34 @@ async def upload_ai_document(
             "original_filename": original_filename,
             "mime_type": file.content_type,
             "size_bytes": len(contents),
+            "content_hash": content_hash,
             "created_at": now,
             "updated_at": now,
             "expires_at": expires_at,
             "status": "uploaded",
             "source": "upload",
+            "extracted_text": (local_extract.get("text") or "")[:50000],
+            "extract_method": local_extract.get("method"),
+            "extract_quality": local_extract.get("quality_score"),
+            "needs_vision": bool(local_extract.get("needs_vision")),
+            "extract_reuse": extract_reuse,
+            "unchanged": extract_reuse,
         }
         if section_key:
             doc["section"] = section_key
+
+        if prior:
+            for key in (
+                "cached_extractions",
+                "last_classification",
+                "routed_section",
+                "pending_sections",
+                "document_summary",
+            ):
+                if prior.get(key) is not None:
+                    doc[key] = prior.get(key)
+            if reused_from_file_id:
+                doc["reused_from_file_id"] = reused_from_file_id
 
         await ai_documents_collection.insert_one(doc)
 
@@ -243,6 +313,13 @@ async def upload_ai_document(
             "size_bytes": len(contents),
             "expires_at": expires_at.isoformat(),
             "preview_url": f"/ai/document/{file_id}/preview",
+            "content_hash": content_hash,
+            "unchanged": extract_reuse,
+            "extract_reuse": extract_reuse,
+            "reused_from_file_id": reused_from_file_id,
+            "needs_vision": bool(local_extract.get("needs_vision")),
+            "extract_method": local_extract.get("method"),
+            "extract_quality": local_extract.get("quality_score"),
         }
 
     except HTTPException:

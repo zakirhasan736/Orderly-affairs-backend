@@ -49,3 +49,6 @@ phonenumbers
 twilio==9.10.9
 google==3.0.0
 google-genai
+pypdf==5.4.0
+pymupdf==1.25.5
+pytesseract==0.3.13

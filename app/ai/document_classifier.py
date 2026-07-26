@@ -2,13 +2,13 @@
 
 import asyncio
 import json
+import re
 from pathlib import Path
-
-from google.genai import types
 
 from app.ai.extractors.base_extractor import LOCAL_FILE_PREFIX, SUPPORTED_MIME_TYPES
 from app.ai.gemini_generate import generate_gemini_content
 from app.ai.json_utils import parse_gemini_json
+from app.ai.local_document_extract import build_gemini_document_contents
 
 
 AI_SECTION_OPTIONS = [
@@ -179,6 +179,161 @@ CLASSIFICATION_SCHEMA = {
 
 VEHICLE_INSURANCE_PAIR = frozenset({"vehicles", "insurance_policies"})
 
+# Auto / vehicle insurance docs must NEVER route to Main Residence.
+_AUTO_DOC_RE = re.compile(
+    r"\b("
+    r"auto(?:mobile)?|vehicle|car|truck|vin|license\s*plate|number\s*plate|"
+    r"registration|motor|drivers?\s*license|insurance\s*card|policy\s*card|"
+    r"liability|collision|comprehensive|garaging"
+    r")\b",
+    re.I,
+)
+_HOME_DOC_RE = re.compile(
+    r"\b("
+    r"homeowner|homeowners|home\s*owner|home\s*insurance|renters?|"
+    r"dwelling|mortgage|deed|property\s*address|hoa|home\s*policy"
+    r")\b",
+    re.I,
+)
+
+
+def _classification_text_blob(classification: dict) -> str:
+    parts = [str(classification.get("document_summary") or "")]
+    for item in classification.get("additional_sections") or []:
+        if isinstance(item, dict):
+            parts.append(str(item.get("data_summary") or ""))
+            parts.append(str(item.get("section_key") or ""))
+    parts.append(str(classification.get("best_section_key") or ""))
+    return " ".join(parts)
+
+
+def _ensure_additional_section(
+    classification: dict,
+    *,
+    section_key: str,
+    data_summary: str,
+    confidence: str = "high",
+) -> None:
+    additional = list(classification.get("additional_sections") or [])
+    keys = {
+        item.get("section_key")
+        for item in additional
+        if isinstance(item, dict)
+    }
+    if section_key in keys:
+        classification["additional_sections"] = additional
+        return
+    if classification.get("best_section_key") == section_key:
+        return
+    additional.append(
+        {
+            "section_key": section_key,
+            "confidence": confidence,
+            "data_summary": data_summary,
+        }
+    )
+    classification["additional_sections"] = additional
+
+
+def harden_vehicle_insurance_routing(classification: dict) -> dict:
+    """
+    Correct common misroutes for auto insurance / vehicle docs.
+
+    - Auto cards belong to vehicles + insurance_policies
+    - Never send auto/vehicle insurance to main_residence
+    - Always keep the vehicle↔insurance partner listed
+    """
+    if not isinstance(classification, dict):
+        return classification
+
+    blob = _classification_text_blob(classification)
+    looks_auto = bool(_AUTO_DOC_RE.search(blob))
+    looks_home = bool(_HOME_DOC_RE.search(blob))
+    best = classification.get("best_section_key")
+
+    additional = [
+        item
+        for item in (classification.get("additional_sections") or [])
+        if isinstance(item, dict) and item.get("section_key") in SECTION_META_BY_KEY
+    ]
+
+    # Strip Main Residence from auto-only documents.
+    if looks_auto and not looks_home:
+        additional = [
+            item
+            for item in additional
+            if item.get("section_key") != "main_residence"
+        ]
+        if best == "main_residence":
+            # Prefer insurance when it looks like a policy/card; else vehicles.
+            if re.search(r"\binsurance|policy|carrier|premium\b", blob, re.I):
+                best = "insurance_policies"
+            else:
+                best = "vehicles"
+            classification["best_section_key"] = best
+            classification["confidence"] = classification.get("confidence") or "high"
+            classification["matches_requested_section"] = False
+
+        # Ensure both partners exist for auto docs.
+        classification["additional_sections"] = additional
+        if best == "vehicles":
+            _ensure_additional_section(
+                classification,
+                section_key="insurance_policies",
+                data_summary="Auto insurance policy details found on this vehicle document.",
+            )
+        elif best == "insurance_policies":
+            _ensure_additional_section(
+                classification,
+                section_key="vehicles",
+                data_summary="Vehicle details found on this insurance document.",
+            )
+        elif best not in VEHICLE_INSURANCE_PAIR:
+            # Still looks like auto — force into the pair.
+            classification["best_section_key"] = "insurance_policies"
+            classification["matches_requested_section"] = False
+            _ensure_additional_section(
+                classification,
+                section_key="vehicles",
+                data_summary="Vehicle details found on this insurance document.",
+            )
+
+    # If classifier already chose one of the pair, always include the partner.
+    best = classification.get("best_section_key")
+    if best in VEHICLE_INSURANCE_PAIR:
+        partner = (
+            "insurance_policies" if best == "vehicles" else "vehicles"
+        )
+        _ensure_additional_section(
+            classification,
+            section_key=partner,
+            data_summary=(
+                "Insurance policy details are also in this document."
+                if partner == "insurance_policies"
+                else "Vehicle details are also in this document."
+            ),
+        )
+        # Never keep main_residence as a sibling of an auto pair unless home signals exist.
+        if not looks_home:
+            classification["additional_sections"] = [
+                item
+                for item in (classification.get("additional_sections") or [])
+                if not (
+                    isinstance(item, dict)
+                    and item.get("section_key") == "main_residence"
+                )
+            ]
+
+    # Drop the best section from additional_sections if it leaked in.
+    best = classification.get("best_section_key")
+    classification["additional_sections"] = [
+        item
+        for item in (classification.get("additional_sections") or [])
+        if isinstance(item, dict) and item.get("section_key") not in (None, best)
+    ]
+
+    return classification
+
 
 def enforce_upload_section_first(
     classification: dict,
@@ -191,6 +346,8 @@ def enforce_upload_section_first(
     Do NOT force-match just because additional_sections exist — that caused
     overview probes (vital_information) to swallow vehicle/insurance docs.
     """
+    classification = harden_vehicle_insurance_routing(classification)
+
     best_key = classification.get("best_section_key")
     additional = list(classification.get("additional_sections") or [])
     additional_keys = {
@@ -258,18 +415,29 @@ Allowed section keys:
 
 The user is trying to autofill section key: {requested_section_key}
 
+CRITICAL SECTION ROUTING (do not violate):
+1) Auto insurance card / auto declarations / vehicle registration / VIN / license plate documents:
+   - best_section_key MUST be "insurance_policies" OR "vehicles"
+   - ALWAYS put the other one in additional_sections
+   - NEVER use main_residence, vital_information, or banking for these docs
+2) main_residence is ONLY for property/home documents (deed, mortgage, homeowners/renters policy, property tax, utility bill for the home).
+   - A vehicle / auto insurance document is NOT main_residence even if it shows a garaging address.
+3) vital_information is ONLY for personal identity / vital records (passport, driver's license ID page, birth certificate, SSN card metadata, personal contact sheet).
+   - A name printed on an insurance card does NOT make the document vital_information.
+4) Homeowners/renters insurance: best_section_key="insurance_policies" with additional_sections including main_residence (and NOT vehicles unless a vehicle is also listed).
+
 Rules:
 - The user chose to upload in section {requested_section_key}. Set matches_requested_section=true ONLY when this document clearly contains fillable data for that section.
 - Pick best_section_key={requested_section_key} when the document has useful fillable data for that section.
 - Pick a different best_section_key when the document's PRIMARY content belongs elsewhere and {requested_section_key} has little or no useful data.
-- vital_information is ONLY for personal identity / vital records (passport, driver's license ID page, birth certificate, SSN card metadata, personal contact sheet). A name printed on an insurance card, vehicle registration, bank statement, or policy does NOT make the document vital_information.
-- Auto insurance cards, declarations pages, and vehicle registrations belong to vehicles and/or insurance_policies — not vital_information.
+- Route to the section whose form fields the document can fill most completely and accurately.
 - Many documents span multiple sections. List EVERY other section with distinct fillable data in additional_sections.
 - Prefer over-including a partner section when the document clearly contains that section's facts (e.g. auto card → vehicles AND insurance_policies).
 - Do not stop at one section if the same document can responsibly fill more.
 - Examples of multi-section documents:
-  - Auto insurance card: vehicles + insurance_policies (NOT vital_information)
+  - Auto insurance card: vehicles + insurance_policies (NOT vital_information, NOT main_residence)
   - Vehicle registration: vehicles (add insurance_policies only if policy details are present)
+  - Homeowners policy: insurance_policies + main_residence (NOT vehicles)
   - Pay stub: employment_business + banking_financial_accounts
   - Mortgage statement: main_residence + banking_financial_accounts
   - Health insurance card: health_information + insurance_policies
@@ -278,7 +446,7 @@ Rules:
 - When the user uploaded in section X and X has data, set best_section_key=X and put other sections in additional_sections.
 - additional_sections must NOT include {requested_section_key}.
 - If the document is clearly only for a different section and has no useful data for {requested_section_key}, set matches_requested_section=false and set best_section_key to that other section.
-- document_summary must be one short sentence, maximum 120 characters.
+- document_summary must be one short sentence, maximum 120 characters. Mention auto/vehicle or homeowners when relevant.
 - Return JSON only.
 """
 
@@ -296,13 +464,14 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
     if not path.exists() or not path.is_file():
         raise FileNotFoundError("Document file not found")
 
-    file_bytes = path.read_bytes()
+    contents, _extract_meta = build_gemini_document_contents(
+        path=path,
+        mime_type=mime_type,
+        prompt=_build_classification_prompt(requested_section_key),
+    )
 
     response = generate_gemini_content(
-        contents=[
-            types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-            _build_classification_prompt(requested_section_key),
-        ],
+        contents=contents,
         response_mime_type="application/json",
         response_json_schema=CLASSIFICATION_SCHEMA,
         temperature=0,

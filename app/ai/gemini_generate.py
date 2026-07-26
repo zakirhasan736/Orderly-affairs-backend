@@ -27,6 +27,20 @@ def _error_status_code(error: Exception) -> int | None:
     return status_code if isinstance(status_code, int) else None
 
 
+def is_model_unavailable_error(error: Exception) -> bool:
+    """404 / retired model IDs — try the next candidate instead of failing hard."""
+    status_code = _error_status_code(error)
+    message = str(error).lower()
+    if status_code == 404:
+        return True
+    return (
+        "no longer available" in message
+        or "not found" in message
+        or "is not found" in message
+        or "not supported" in message
+    )
+
+
 def is_quota_exhausted_error(error: Exception) -> bool:
     message = str(error).lower()
     return (
@@ -97,6 +111,13 @@ def generate_gemini_content(
             except (ServerError, APIError, ClientError) as error:
                 last_error = error
 
+                if is_model_unavailable_error(error):
+                    logger.warning(
+                        "Gemini model unavailable (%s) — trying next candidate.",
+                        resolved_model,
+                    )
+                    break
+
                 if is_quota_exhausted_error(error):
                     logger.warning(
                         "Gemini quota/rate limit on %s — switching model.",
@@ -117,6 +138,13 @@ def generate_gemini_content(
 
             except Exception as error:
                 last_error = error
+                if is_model_unavailable_error(error):
+                    logger.warning(
+                        "Gemini model unavailable (%s) — trying next candidate.",
+                        resolved_model,
+                    )
+                    break
+
                 if not is_retryable_gemini_error(error):
                     raise
 

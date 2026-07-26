@@ -220,6 +220,15 @@ class MFAResetRequest(BaseModel):
     mfa_challenge_token: str | None = None
     step_up_token: str | None = None
 
+
+class DeleteAccountRequest(BaseModel):
+    """Owner must re-enter password and type DELETE to confirm wipe."""
+    password: str
+    confirm: str
+    mfa_challenge_token: str | None = None
+    step_up_token: str | None = None
+
+
 from app.auth.nextkin_schemas import NextKinCreateRequest
 
 # ---- Next-of-Kin ----
@@ -2509,6 +2518,61 @@ async def reset_mfa(
 @router.post("/owner-logout")
 async def owner_logout(request: Request, response: Response):
     return await logout_owner_session(response, request)
+
+
+@router.post("/delete-account")
+async def delete_owner_account(
+    payload: DeleteAccountRequest,
+    request: Request,
+    response: Response,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Permanently delete the owner account and all owned data:
+    Cloudinary folder (docs/images), message audio/video, letters media,
+    local AI uploads, sections, NOKs, kits, billing customer.
+    """
+    from app.auth.account_purge_service import (
+        DELETE_CONFIRM_PHRASE,
+        purge_owner_account,
+    )
+
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only owners can delete their account")
+
+    owner = await users_collection.find_one(
+        {"email": decoded["sub"], "role": "owner"},
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+
+    confirm = (payload.confirm or "").strip().upper()
+    if confirm != DELETE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Type {DELETE_CONFIRM_PHRASE} to confirm account deletion',
+        )
+
+    require_step_up_auth(
+        user=owner,
+        password=payload.password,
+        mfa_challenge_token=payload.mfa_challenge_token,
+        step_up_token=payload.step_up_token,
+    )
+
+    summary = await purge_owner_account(owner)
+
+    # End session after wipe (user row already gone — only clear cookies).
+    from app.security.cookie_auth import clear_auth_cookies
+
+    clear_auth_cookies(response, owner=True, nok=True)
+
+    return {
+        "success": True,
+        "message": "Account and all stored media deleted permanently.",
+        "summary": summary,
+    }
 
 
 @router.post("/nextkin-logout")
