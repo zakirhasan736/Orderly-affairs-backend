@@ -229,7 +229,7 @@ def _extract_sync(
     )
     usages: list[dict] = [usage_a] if usage_a else []
 
-    # Vision path removed — keep hook for compatibility (always False).
+    # Vision retry when OCR text path is empty/weak.
     if should_fallback_to_vision(remapped, extract_meta):
         remapped, extract_meta, usage_b = _run_llm_extract(
             path=path,
@@ -273,7 +273,7 @@ def _extract_sync(
             or extract_meta.get("gemini_input")
             or "text",
             "read_source": extract_meta.get("read_source") or "system",
-            "needs_vision": False,
+            "needs_vision": bool(extract_meta.get("needs_vision")),
             "result_confidence": remapped.get("confidence"),
             "llm_calls": len(usages),
             "estimated_usd": round(total_usd, 6),

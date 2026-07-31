@@ -1,16 +1,17 @@
 # app/ai/local_document_extract.py
 """
-Local-first document text extraction to reduce Gemini vision/file tokens.
+Local-first document text extraction.
 
 Pipeline:
-  TXT → read
+  TXT → decode (UTF-8 / UTF-16 / latin-1)
   PDF → embedded text (pypdf); if weak → OCR pages (PyMuPDF + Tesseract)
-  Image → OCR (Tesseract)
-  Quality gate → Gemini text-only vs Gemini vision fallback
+  Image → OCR (Tesseract with preprocessing)
+  Quality gate → if weak/empty, GPT vision multimodal fallback (images/PDF pages)
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import logging
 import os
@@ -22,10 +23,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_CHARS = 80
 MAX_OCR_PDF_PAGES = 8
+MAX_VISION_PDF_PAGES = 3
+MAX_VISION_IMAGE_BYTES = 4_500_000
 
 
 def prefer_local_text_extract() -> bool:
     raw = os.getenv("AI_PREFER_LOCAL_TEXT_EXTRACT", "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def vision_fallback_enabled() -> bool:
+    raw = os.getenv("AI_ALLOW_VISION_FALLBACK", "true").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
@@ -34,6 +42,16 @@ def local_text_min_chars() -> int:
         return max(1, int(os.getenv("AI_LOCAL_TEXT_MIN_CHARS", str(DEFAULT_MIN_CHARS))))
     except (TypeError, ValueError):
         return DEFAULT_MIN_CHARS
+
+
+def text_result_min_confidence() -> float:
+    try:
+        return max(
+            0.0,
+            min(1.0, float(os.getenv("AI_TEXT_RESULT_MIN_CONFIDENCE", "0.45"))),
+        )
+    except (TypeError, ValueError):
+        return 0.45
 
 
 def _configure_tesseract() -> bool:
@@ -73,6 +91,11 @@ def _score_text_quality(text: str, *, min_chars: int) -> tuple[float, bool]:
     words = re.findall(r"[A-Za-z0-9]{2,}", cleaned)
     word_density = len(words) / max(1.0, length / 5.0)
 
+    # UTF-16 mis-decoded as latin-1 often has many NULs / low alnum.
+    nul_ratio = cleaned.count("\x00") / float(length)
+    if nul_ratio > 0.02:
+        return 0.05, True
+
     if alnum_ratio < 0.45 or word_density < 0.15:
         return max(0.1, alnum_ratio * 0.5), True
 
@@ -82,11 +105,38 @@ def _score_text_quality(text: str, *, min_chars: int) -> tuple[float, bool]:
 
 def _extract_txt(path: Path) -> tuple[str, str]:
     raw = path.read_bytes()
-    for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+    if not raw:
+        return "", "txt"
+
+    # BOM sniff first — Notepad "Unicode" is UTF-16 LE.
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
         try:
-            return raw.decode(encoding), "txt"
+            return raw.decode("utf-16"), "txt"
+        except UnicodeDecodeError:
+            pass
+    if raw.startswith(b"\xef\xbb\xbf"):
+        try:
+            return raw.decode("utf-8-sig"), "txt"
+        except UnicodeDecodeError:
+            pass
+
+    # Heuristic: lots of NULs in even positions → UTF-16 LE without reliable BOM use
+    if len(raw) >= 4 and raw[1:2] == b"\x00" and raw[3:4] == b"\x00":
+        try:
+            return raw.decode("utf-16-le"), "txt"
+        except UnicodeDecodeError:
+            pass
+
+    for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(encoding)
         except UnicodeDecodeError:
             continue
+        # Reject latin-1 "success" that is mostly NULs / garbage from UTF-16
+        if "\x00" in text[:200] and encoding in {"latin-1", "cp1252"}:
+            continue
+        return text, "txt"
+
     return raw.decode("utf-8", errors="replace"), "txt"
 
 
@@ -116,13 +166,61 @@ def _extract_pdf_embedded(path: Path) -> tuple[str, str]:
 def _ocr_pil_image(image) -> str:
     import pytesseract
 
-    # Light preprocess: grayscale helps many phone photos.
+    try:
+        from PIL import ImageOps, ImageEnhance
+    except ImportError:
+        ImageOps = None  # type: ignore
+        ImageEnhance = None  # type: ignore
+
+    try:
+        if ImageOps is not None:
+            image = ImageOps.exif_transpose(image)
+    except Exception:
+        pass
+
     try:
         image = image.convert("L")
     except Exception:
         pass
 
-    return (pytesseract.image_to_string(image) or "").strip()
+    # Upscale small phone photos / insurance card screenshots.
+    try:
+        width, height = image.size
+        if max(width, height) < 1400:
+            scale = 2 if max(width, height) < 900 else 1.5
+            image = image.resize(
+                (int(width * scale), int(height * scale)),
+            )
+    except Exception:
+        pass
+
+    try:
+        if ImageOps is not None:
+            image = ImageOps.autocontrast(image)
+        if ImageEnhance is not None:
+            image = ImageEnhance.Contrast(image).enhance(1.35)
+    except Exception:
+        pass
+
+    configs = ("--psm 6", "--psm 4", "--psm 11", "")
+    best = ""
+    for config in configs:
+        try:
+            text = (
+                pytesseract.image_to_string(image, config=config)
+                if config
+                else pytesseract.image_to_string(image)
+            ) or ""
+            text = text.strip()
+            if len(text) > len(best):
+                best = text
+            # Good enough — stop early.
+            if len(best) >= local_text_min_chars():
+                break
+        except Exception:
+            continue
+
+    return best
 
 
 def _extract_image_ocr(path: Path) -> tuple[str, str]:
@@ -165,8 +263,8 @@ def _extract_pdf_ocr(path: Path) -> tuple[str, str]:
         page_count = min(len(doc), MAX_OCR_PDF_PAGES)
         for index in range(page_count):
             page = doc.load_page(index)
-            # ~150 DPI — enough for cards/statements without huge memory.
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            # ~150–200 DPI for cards/statements.
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
             image = Image.open(io.BytesIO(pix.tobytes("png")))
             text = _ocr_pil_image(image)
             if text:
@@ -191,7 +289,6 @@ def _extract_pdf(path: Path) -> tuple[str, str]:
     if ocr_text and len(ocr_text.strip()) > len((text or "").strip()):
         return ocr_text, ocr_method
 
-    # Keep whatever embedded text we had; caller may still need vision.
     return text, method if text else (ocr_method if ocr_method != "ocr_unavailable" else method)
 
 
@@ -214,6 +311,7 @@ def extract_document_text(
     file_path = Path(path)
     mime = (mime_type or "").strip().lower() or "application/octet-stream"
     min_chars = local_text_min_chars()
+    suffix = file_path.suffix.lower()
 
     if not file_path.exists() or not file_path.is_file():
         return {
@@ -226,17 +324,22 @@ def extract_document_text(
 
     text = ""
     method = "none"
+    is_plain_text = mime == "text/plain" or suffix == ".txt"
 
     try:
-        if mime == "text/plain" or file_path.suffix.lower() == ".txt":
+        if is_plain_text:
             text, method = _extract_txt(file_path)
-        elif mime == "application/pdf" or file_path.suffix.lower() == ".pdf":
+        elif mime == "application/pdf" or suffix == ".pdf":
             text, method = _extract_pdf(file_path)
-        elif mime.startswith("image/") or file_path.suffix.lower() in {
+        elif mime.startswith("image/") or suffix in {
             ".png",
             ".jpg",
             ".jpeg",
             ".webp",
+            ".gif",
+            ".tif",
+            ".tiff",
+            ".bmp",
         }:
             text, method = _extract_image_ocr(file_path)
             if method == "ocr_unavailable":
@@ -248,10 +351,15 @@ def extract_document_text(
                     "reader": "none",
                 }
         else:
-            try:
+            # Some clients send wrong MIME for .txt
+            if suffix in {".txt", ".csv", ".md", ".log"}:
                 text, method = _extract_txt(file_path)
-            except Exception:
-                text, method = "", "unsupported"
+                is_plain_text = True
+            else:
+                try:
+                    text, method = _extract_txt(file_path)
+                except Exception:
+                    text, method = "", "unsupported"
     except Exception as error:
         logger.warning("Local extract failed for %s: %s", file_path.name, repr(error))
         return {
@@ -264,7 +372,12 @@ def extract_document_text(
 
     quality_score, needs_vision = _score_text_quality(text, min_chars=min_chars)
 
-    if not prefer_local_text_extract():
+    # Plain text never needs vision — GPT reads the decoded string.
+    if is_plain_text and (text or "").strip() and "\x00" not in (text or "")[:500]:
+        needs_vision = False
+        quality_score = max(quality_score, 0.7)
+
+    if not prefer_local_text_extract() and not is_plain_text:
         needs_vision = True
 
     reader = "system" if (text or "").strip() and not needs_vision else "none"
@@ -278,6 +391,84 @@ def extract_document_text(
     }
 
 
+def _mime_for_path(path: Path, mime_type: str) -> str:
+    mime = (mime_type or "").strip().lower()
+    if mime.startswith("image/") or mime == "application/pdf" or mime == "text/plain":
+        return mime
+    suffix = path.suffix.lower()
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+        ".bmp": "image/bmp",
+        ".pdf": "application/pdf",
+        ".txt": "text/plain",
+    }.get(suffix, mime or "application/octet-stream")
+
+
+def _image_part_from_bytes(data: bytes, mime_type: str) -> dict[str, Any] | None:
+    if not data:
+        return None
+    if len(data) > MAX_VISION_IMAGE_BYTES:
+        # Still try — OpenAI may reject; caller can skip.
+        logger.info("Vision image large (%s bytes); sending anyway", len(data))
+    b64 = base64.b64encode(data).decode("ascii")
+    return {
+        "type": "image",
+        "mime_type": mime_type,
+        "data_b64": b64,
+    }
+
+
+def _vision_parts_for_file(path: Path, mime_type: str) -> list[dict[str, Any]]:
+    """Build OpenAI-compatible image parts for vision fallback."""
+    mime = _mime_for_path(path, mime_type)
+    parts: list[dict[str, Any]] = []
+
+    if mime.startswith("image/"):
+        try:
+            data = path.read_bytes()
+            part = _image_part_from_bytes(data, mime if mime != "image/jpg" else "image/jpeg")
+            if part:
+                parts.append(part)
+        except Exception as error:
+            logger.warning("Vision image read failed for %s: %s", path.name, repr(error))
+        return parts
+
+    if mime == "application/pdf" or path.suffix.lower() == ".pdf":
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            logger.info("PyMuPDF missing; cannot render PDF for vision fallback")
+            return parts
+
+        try:
+            doc = fitz.open(str(path))
+        except Exception as error:
+            logger.warning("PDF vision open failed for %s: %s", path.name, repr(error))
+            return parts
+
+        try:
+            page_count = min(len(doc), MAX_VISION_PDF_PAGES)
+            for index in range(page_count):
+                page = doc.load_page(index)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                png_bytes = pix.tobytes("png")
+                part = _image_part_from_bytes(png_bytes, "image/png")
+                if part:
+                    parts.append(part)
+        except Exception as error:
+            logger.warning("PDF vision render failed for %s: %s", path.name, repr(error))
+        finally:
+            doc.close()
+
+    return parts
+
+
 def build_llm_document_contents(
     *,
     path: str | Path,
@@ -287,29 +478,79 @@ def build_llm_document_contents(
     force_vision: bool = False,
 ) -> tuple[list[Any], dict[str, Any]]:
     """
-    Build text-only contents for the fill brain (gpt-4o-mini / own model).
+    Build contents for the fill brain.
 
-    Always uses local OCR/PDF text — never file bytes.
+    Always OCR/decode first. If text is empty/weak (images/PDF), attach
+    file/page images for GPT-4o-mini vision multimodal fallback.
     """
-    del force_vision  # vision path removed; kept for call-site compatibility
-
     file_path = Path(path)
-    meta = local_extract or extract_document_text(file_path, mime_type)
+    meta = dict(local_extract or extract_document_text(file_path, mime_type))
     text_block = (
         str(meta.get("text") or "").strip()
         if isinstance(meta.get("text"), str)
         else ""
     )
+    needs_vision = bool(meta.get("needs_vision")) or force_vision or not text_block
+    mime = _mime_for_path(file_path, mime_type)
+    is_plain_text = mime == "text/plain" or file_path.suffix.lower() == ".txt"
 
-    if not text_block:
+    use_vision = bool(
+        vision_fallback_enabled()
+        and not is_plain_text
+        and (needs_vision or force_vision)
+        and (mime.startswith("image/") or mime == "application/pdf")
+    )
+
+    vision_parts: list[dict[str, Any]] = []
+    if use_vision:
+        vision_parts = _vision_parts_for_file(file_path, mime)
+        if not vision_parts:
+            use_vision = False
+            logger.info(
+                "Vision fallback requested but no image parts for %s",
+                file_path.name,
+            )
+
+    if not text_block and not use_vision:
         text_block = (
-            "[Local OCR returned no usable text. "
+            "[Local OCR returned no usable text and vision fallback was unavailable. "
             "Cannot fill without document text.]"
         )
-        logger.info(
-            "LLM text-only mode: no OCR text file=%s",
-            file_path.name,
+        logger.info("LLM: no OCR text and no vision file=%s", file_path.name)
+
+    if use_vision:
+        intro = (
+            "Read the uploaded document image(s) carefully (all visible text, tables, "
+            "headers, stamps). "
         )
+        if text_block and not text_block.startswith("[Local OCR"):
+            intro += (
+                "Local OCR also produced this text — use it as a hint, but prefer "
+                "what you see in the image if they conflict:\n\n"
+                f"{text_block}\n\n"
+            )
+        else:
+            intro += (
+                "Local OCR found little or no usable text — extract all fillable "
+                "values from the image(s).\n\n"
+            )
+        contents: list[Any] = [intro, *vision_parts, prompt]
+        meta = {
+            **meta,
+            "llm_input": "vision",
+            "gemini_input": "vision",
+            "read_source": "llm",
+            "file_bytes_blocked": False,
+            "document_text": text_block,
+            "vision_parts": len(vision_parts),
+        }
+        logger.info(
+            "LLM vision fallback file=%s ocr_chars=%s parts=%s",
+            file_path.name,
+            len(text_block),
+            len(vision_parts),
+        )
+        return contents, meta
 
     contents = [
         (
@@ -322,7 +563,7 @@ def build_llm_document_contents(
     meta = {
         **meta,
         "llm_input": "text",
-        "gemini_input": "text",  # legacy key for older meta readers
+        "gemini_input": "text",
         "read_source": "system",
         "file_bytes_blocked": True,
         "document_text": text_block,
@@ -335,7 +576,7 @@ build_gemini_document_contents = build_llm_document_contents
 
 
 def extraction_result_is_empty(result: dict[str, Any] | None) -> bool:
-    """True when Gemini returned no usable patch values."""
+    """True when model returned no usable patch values."""
     if not isinstance(result, dict):
         return True
     patch = result.get("patch")
@@ -368,7 +609,6 @@ def extraction_confidence(result: dict[str, Any] | None) -> float:
     except (TypeError, ValueError):
         value = 0.0
     if value > 1.0:
-        # Some prompts return 0–100.
         value = value / 100.0
     return max(0.0, min(1.0, value))
 
@@ -377,8 +617,21 @@ def should_fallback_to_vision(
     result: dict[str, Any] | None,
     extract_meta: dict[str, Any] | None,
 ) -> bool:
-    """Vision/file-bytes path removed — always stay on OCR text."""
-    del result, extract_meta
+    """Retry with GPT vision when OCR text path produced empty/weak fill."""
+    if not vision_fallback_enabled():
+        return False
+    meta = extract_meta if isinstance(extract_meta, dict) else {}
+    if meta.get("llm_input") == "vision" or meta.get("gemini_input") == "vision":
+        return False  # already used vision
+    if meta.get("file_bytes_blocked") is False and meta.get("vision_parts"):
+        return False
+
+    if bool(meta.get("needs_vision")):
+        return True
+    if extraction_result_is_empty(result):
+        return True
+    if extraction_confidence(result) < text_result_min_confidence():
+        return True
     return False
 
 
@@ -390,6 +643,8 @@ def describe_read_source(meta: dict[str, Any] | None, *, from_cache: bool = Fals
     source = str(meta.get("read_source") or "").strip().lower()
     if source in {"system", "llm", "cache", "gemini"}:
         return "system" if source == "gemini" else source
+    if meta.get("llm_input") == "vision" or meta.get("gemini_input") == "vision":
+        return "llm"
     if meta.get("llm_input") == "text" or meta.get("gemini_input") == "text":
         return "system"
     return "llm"

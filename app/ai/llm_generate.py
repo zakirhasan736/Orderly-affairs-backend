@@ -54,6 +54,7 @@ def active_brain_info() -> dict[str, Any]:
         ),
         "notes": (
             "Local OCR/PDF text → gpt-4o-mini JSON fill. "
+            "Weak OCR on images/PDF falls back to GPT vision. "
             "Successful fills are stored as Orderly skill training JSON."
         ),
     }
@@ -88,28 +89,6 @@ def resolve_provider_and_model(
         or DEFAULT_OPENAI_MODEL
     )
     return "openai", model
-
-
-def contents_to_text_prompt(contents: list[Any]) -> str:
-    parts: list[str] = []
-    for item in contents:
-        if isinstance(item, str):
-            parts.append(item)
-            continue
-        text = getattr(item, "text", None)
-        if isinstance(text, str) and text.strip():
-            parts.append(text)
-            continue
-        if isinstance(item, dict) and item.get("text"):
-            parts.append(str(item["text"]))
-            continue
-        raise RuntimeError(
-            "Fill brain is text-only. Local OCR must provide document text."
-        )
-    joined = "\n\n".join(p for p in parts if p and str(p).strip())
-    if not joined.strip():
-        raise RuntimeError("Empty prompt for fill brain")
-    return joined
 
 
 def _base_url(provider: str) -> str:
@@ -184,16 +163,103 @@ def log_llm_call_usage(
     return usd
 
 
-def build_system_prompt() -> str:
-    return (
+def contents_to_openai_user_content(contents: list[Any]) -> str | list[dict[str, Any]]:
+    """
+    Convert mixed text + image content parts into OpenAI chat user content.
+    Returns a plain string when there are no images (cheaper / simpler).
+    """
+    text_parts: list[str] = []
+    image_parts: list[dict[str, Any]] = []
+
+    for item in contents:
+        if isinstance(item, str):
+            if item.strip():
+                text_parts.append(item)
+            continue
+
+        text = getattr(item, "text", None)
+        if isinstance(text, str) and text.strip():
+            text_parts.append(text)
+            continue
+
+        if isinstance(item, dict):
+            if item.get("text") and item.get("type") not in {"image", "image_url"}:
+                text_parts.append(str(item["text"]))
+                continue
+
+            if item.get("type") == "image" and item.get("data_b64"):
+                mime = str(item.get("mime_type") or "image/png")
+                if mime == "image/jpg":
+                    mime = "image/jpeg"
+                image_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime};base64,{item['data_b64']}",
+                        },
+                    }
+                )
+                continue
+
+            if item.get("type") == "image_url" and item.get("image_url"):
+                image_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": item["image_url"],
+                    }
+                )
+                continue
+
+        raise RuntimeError(
+            "Fill brain received unsupported content part. "
+            "OCR/vision pipeline must provide text or image parts."
+        )
+
+    if not text_parts and not image_parts:
+        raise RuntimeError("Empty prompt for fill brain")
+
+    if not image_parts:
+        return "\n\n".join(text_parts)
+
+    user_content: list[dict[str, Any]] = []
+    for text in text_parts:
+        user_content.append({"type": "text", "text": text})
+    user_content.extend(image_parts)
+    return user_content
+
+
+def contents_to_text_prompt(contents: list[Any]) -> str:
+    """Legacy text-only join."""
+    content = contents_to_openai_user_content(contents)
+    if isinstance(content, str):
+        return content
+    texts = [
+        part.get("text", "")
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "text"
+    ]
+    joined = "\n\n".join(t for t in texts if t.strip())
+    if not joined.strip():
+        raise RuntimeError("Empty prompt for fill brain")
+    return joined
+
+
+def build_system_prompt(*, vision: bool = False) -> str:
+    base = (
         "You are the Orderly Affairs document fill brain. "
-        "Read ONLY the provided document text. "
         "Map values into the exact Orderly section field keys. "
         "Prefer dedicated fields over notes. "
-        "Do not invent facts that are not in the text. "
+        "Do not invent facts that are not in the document. "
         "Do not return passwords, full SSN, or full card numbers. "
         "Reply with valid JSON only."
     )
+    if vision:
+        return (
+            base
+            + " Read the attached document image(s) carefully, including small print. "
+            "If OCR text is also provided, treat the image as the source of truth."
+        )
+    return base + " Read ONLY the provided document text."
 
 
 def generate_llm_content(
@@ -210,23 +276,46 @@ def generate_llm_content(
     # Legacy kwarg names from Gemini era
     gemini_input: str | None = None,
 ):
+    del response_mime_type  # OpenAI uses response_format json_object
+
     if gemini_input is not None:
         llm_input = gemini_input
 
     provider, resolved_model = resolve_provider_and_model(explicit_model=model)
-    if llm_input == "file_bytes":
-        raise RuntimeError("Fill brain is text-only. OCR the document first.")
 
-    prompt = contents_to_text_prompt(contents)
+    user_content = contents_to_openai_user_content(contents)
+    has_images = not isinstance(user_content, str)
+    if llm_input == "file_bytes":
+        llm_input = "vision"
+    if has_images:
+        llm_input = "vision"
+
+    prompt_for_log = (
+        user_content
+        if isinstance(user_content, str)
+        else "\n\n".join(
+            part.get("text", "")
+            for part in user_content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    )
+
     if response_json_schema:
-        prompt = (
-            f"{prompt}\n\n"
-            "Return ONLY valid JSON matching this schema intent "
+        schema_note = (
+            "\n\nReturn ONLY valid JSON matching this schema intent "
             "(keys and shapes). Do not wrap in markdown.\n"
             f"SCHEMA:\n{json.dumps(response_json_schema)[:12000]}"
         )
+        if isinstance(user_content, str):
+            user_content = f"{user_content}{schema_note}"
+            prompt_for_log = user_content
+        else:
+            user_content = list(user_content) + [
+                {"type": "text", "text": schema_note}
+            ]
+            prompt_for_log = f"{prompt_for_log}{schema_note}"
 
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(vision=has_images)
     url = f"{_base_url(provider)}/chat/completions"
     body: dict[str, Any] = {
         "model": resolved_model,
@@ -234,7 +323,7 @@ def generate_llm_content(
         "max_tokens": max_output_tokens,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user_content},
         ],
         "response_format": {"type": "json_object"},
     }
@@ -244,7 +333,7 @@ def generate_llm_content(
             url,
             headers=_auth_headers(provider),
             json=body,
-            timeout=120,
+            timeout=180 if has_images else 120,
         )
     except requests.RequestException as error:
         raise RuntimeError(f"{provider} request failed: {error}") from error
@@ -300,7 +389,7 @@ def generate_llm_content(
         "operation": operation,
         "estimated_usd": usd,
         "system_prompt": system_prompt,
-        "user_prompt": prompt[:50000],
+        "user_prompt": (prompt_for_log or "")[:50000],
     }
     return response
 

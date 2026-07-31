@@ -58,11 +58,28 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["ai-autofill"])
 
-# Prefetch only the primary + these partners — keep reads fast.
+# Prefetch insurance when filling vehicles. Do NOT auto-prefetch vehicles for
+# every insurance doc (life/home/health) — only classification/auto signals add vehicles.
 FAST_PARTNER_PREFETCH: dict[str, list[str]] = {
     "vehicles": ["insurance_policies"],
-    "insurance_policies": ["vehicles"],
 }
+
+
+def _document_text_hint(file_path: str | None, mime_type: str | None, doc: dict | None = None) -> str:
+    """OCR/text snapshot for routing hardeners (prefer upload-time extract)."""
+    if isinstance(doc, dict):
+        cached = str(doc.get("extracted_text") or "").strip()
+        if cached:
+            return cached[:20000]
+    if not file_path:
+        return ""
+    try:
+        from app.ai.local_document_extract import extract_document_text
+
+        meta = extract_document_text(file_path, mime_type)
+        return str(meta.get("text") or "")[:20000]
+    except Exception:
+        return ""
 
 
 class AutofillSectionRequest(BaseModel):
@@ -880,7 +897,8 @@ async def autofill_section(
             and reused_classification
         ):
             classification = harden_vehicle_insurance_routing(
-                dict(reused_classification)
+                dict(reused_classification),
+                document_text=_document_text_hint(file_path, mime_type, doc),
             )
             matches_requested = bool(classification.get("matches_requested_section"))
             best_section_key = classification.get("best_section_key") or payload.section
@@ -954,15 +972,20 @@ async def autofill_section(
             requested_section_key=payload.section,
         )
         # Overview classify_only must not force the probe section.
+        doc_text_hint = _document_text_hint(file_path, mime_type, doc)
         if not payload.classify_only:
             classification = enforce_upload_section_first(
-                classification, payload.section
+                classification,
+                payload.section,
+                document_text=doc_text_hint,
             )
         else:
             # Still apply vehicle/insurance pair helper when probing those sections.
             if payload.section in {"vehicles", "insurance_policies"}:
                 classification = enforce_upload_section_first(
-                    classification, payload.section
+                    classification,
+                    payload.section,
+                    document_text=doc_text_hint,
                 )
 
         matches_requested = bool(classification.get("matches_requested_section"))
@@ -970,7 +993,10 @@ async def autofill_section(
 
         if payload.classify_only:
             # Always harden auto/vehicle routing even for overview probes.
-            classification = harden_vehicle_insurance_routing(classification)
+            classification = harden_vehicle_insurance_routing(
+                classification,
+                document_text=doc_text_hint,
+            )
             # Re-read after harden — best_section may have changed.
             matches_requested = bool(classification.get("matches_requested_section"))
             best_section_key = classification.get("best_section_key") or payload.section
