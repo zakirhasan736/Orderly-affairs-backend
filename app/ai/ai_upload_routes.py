@@ -426,7 +426,30 @@ async def preview_ai_document(
         raise HTTPException(status_code=404, detail="Document file missing.")
 
     filename = doc.get("original_filename") or path.name
-    media_type = doc.get("mime_type") or "application/octet-stream"
+    media_type = (doc.get("mime_type") or "").strip() or "application/octet-stream"
+
+    # Some uploads land as octet-stream / empty — sniff from extension so
+    # image + text previews work in the browser.
+    if media_type in {"", "application/octet-stream", "binary/octet-stream"}:
+        lower = str(filename).lower()
+        if lower.endswith(".pdf"):
+            media_type = "application/pdf"
+        elif lower.endswith(".png"):
+            media_type = "image/png"
+        elif lower.endswith((".jpg", ".jpeg")):
+            media_type = "image/jpeg"
+        elif lower.endswith(".webp"):
+            media_type = "image/webp"
+        elif lower.endswith(".gif"):
+            media_type = "image/gif"
+        elif lower.endswith((".tif", ".tiff")):
+            media_type = "image/tiff"
+        elif lower.endswith(".bmp"):
+            media_type = "image/bmp"
+        elif lower.endswith((".txt", ".csv", ".md", ".log")):
+            media_type = "text/plain"
+        elif lower.endswith(".json"):
+            media_type = "application/json"
 
     return FileResponse(
         path=str(path),
