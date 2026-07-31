@@ -57,6 +57,88 @@ def test_seed_vehicles_from_insurance_copies_policy_fields():
     assert vehicle["registration_expiry"] == "2026-01-15"
 
 
+def test_seed_vehicles_from_insurance_parses_multi_vehicle_notes():
+    insurance_result = {
+        "patch": {
+            "7A": [
+                {
+                    "policy_type": "Vehicle",
+                    "policy_company": "State Farm",
+                    "policy_number": "SF-100",
+                    "policy_expiry": "2026-06-30",
+                    "notes": (
+                        "Vehicle: 2020 Honda Civic; VIN: 1HGBH41JXMN109186; Plate: ABC123; "
+                        "Vehicle: 2018 Toyota Camry; VIN: 4T1B11HK5JU123456; Plate: XYZ789"
+                    ),
+                }
+            ]
+        }
+    }
+
+    seeded = seed_vehicles_from_insurance(insurance_result)
+    assert seeded is not None
+    vehicles = seeded["patch"]["5A"]
+    assert len(vehicles) == 2
+    assert vehicles[0]["make"] == "Honda"
+    assert vehicles[0]["model"] == "Civic"
+    assert vehicles[0]["year"] == "2020"
+    assert vehicles[0]["vin"] == "1HGBH41JXMN109186"
+    assert vehicles[0]["insurance_policy"] == "SF-100"
+    assert vehicles[1]["make"] == "Toyota"
+    assert vehicles[1]["model"] == "Camry"
+    assert vehicles[1]["vin"] == "4T1B11HK5JU123456"
+    assert vehicles[1]["insurance_company"] == "State Farm"
+
+
+def test_seed_vehicles_skips_life_policies():
+    insurance_result = {
+        "patch": {
+            "7A": [
+                {
+                    "policy_type": "Life",
+                    "policy_company": "MetLife",
+                    "policy_number": "L-1",
+                    "notes": "Term life for family",
+                }
+            ]
+        }
+    }
+    assert seed_vehicles_from_insurance(insurance_result) is None
+
+
+def test_merge_seed_keeps_distinct_vehicles_on_same_policy():
+    existing = {
+        "extraction_source": "llm",
+        "patch": {
+            "5A": [
+                {
+                    "year": "2020",
+                    "make": "Honda",
+                    "model": "Civic",
+                    "insurance_policy": "SF-100",
+                }
+            ]
+        },
+    }
+    seed = {
+        "extraction_source": "cross_seed",
+        "patch": {
+            "5A": [
+                {
+                    "year": "2018",
+                    "make": "Toyota",
+                    "model": "Camry",
+                    "insurance_policy": "SF-100",
+                    "insurance_company": "State Farm",
+                }
+            ]
+        },
+    }
+    merged = merge_seed_into_cached(existing, seed, array_key="5A")
+    assert len(merged["patch"]["5A"]) == 2
+    assert merged["extraction_source"] == "llm"
+
+
 def test_semantic_aliases_and_period_end_date():
     assert resolve_concept_from_key("member_id") == "policy_number"
     assert resolve_concept_from_key("valid_through") == "policy_expiry"

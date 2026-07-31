@@ -2,12 +2,169 @@
 
 from __future__ import annotations
 
+import re
+
 from app.ai.semantic_field_map import (
     apply_concepts_to_item,
     as_plain_text,
     collect_concepts_from_item,
     flatten_detected_facts_from_result,
 )
+
+_VIN_RE = re.compile(
+    r"\b(?:VIN|vehicle\s*id(?:entification)?\s*(?:no\.?|number|#)?)\s*[:#]?\s*"
+    r"([A-HJ-NPR-Z0-9]{11,17})\b",
+    re.IGNORECASE,
+)
+_PLATE_RE = re.compile(
+    r"\b(?:license\s*plate|lic(?:ense)?\.?\s*plate|plate(?:\s*#)?|tag)\s*[:#]?\s*"
+    r"([A-Z0-9\-]{2,10})\b",
+    re.IGNORECASE,
+)
+_VEHICLE_LABELED_RE = re.compile(
+    r"(?:vehicle|auto|car|unit)\s*[:#]\s*"
+    r"(?:(?P<year>19\d{2}|20\d{2})\s+)?"
+    r"(?P<make>[A-Za-z][A-Za-z0-9\-]{1,20})"
+    r"(?:\s+(?P<model>[A-Za-z0-9][A-Za-z0-9 \-/]{0,40}?))?"
+    r"(?=\s*(?:;|,|\||$|\n|vin|plate|policy|expir))",
+    re.IGNORECASE,
+)
+_YMM_RE = re.compile(
+    r"\b(?P<year>19\d{2}|20\d{2})\s+"
+    r"(?P<make>[A-Za-z][A-Za-z0-9\-]{1,20})\s+"
+    r"(?P<model>[A-Za-z0-9][A-Za-z0-9 \-/]{1,40}?)"
+    r"(?=\s*(?:;|,|\||$|\n|vin|plate|policy|expir))",
+    re.IGNORECASE,
+)
+
+
+def _policy_blob(policy: dict) -> str:
+    parts = [
+        as_plain_text(policy.get("notes")),
+        as_plain_text(policy.get("policy_documents")),
+        as_plain_text(policy.get("premium_info")),
+        as_plain_text(policy.get("coverage_amount")),
+        as_plain_text(policy.get("beneficiaries")),
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def _is_auto_insurance_policy(policy: dict) -> bool:
+    policy_type = (as_plain_text(policy.get("policy_type")) or "").lower()
+    blob = f"{policy_type} {_policy_blob(policy)}".lower()
+    is_vehicle = (
+        policy_type in {"vehicle", "auto"}
+        or "auto" in blob
+        or "vin" in blob
+        or "license plate" in blob
+        or "vehicle" in blob
+        or bool(_YMM_RE.search(blob))
+    )
+    is_home = (
+        "homeowner" in blob
+        or "renter" in blob
+        or "dwelling" in blob
+        or "home " in f" {blob} "
+    )
+    is_life_health = (
+        policy_type in {"life", "health", "medical/dental", "disability", "long term care"}
+        or ("life insurance" in blob and "auto" not in blob and "vehicle" not in blob)
+    )
+    return bool(is_vehicle and not is_home and not is_life_health)
+
+
+def _vehicle_identity_key(vehicle: dict) -> str:
+    vin = (as_plain_text(vehicle.get("vin")) or "").upper()
+    if vin:
+        return f"vin:{vin}"
+    plate = (as_plain_text(vehicle.get("license_plate")) or "").upper().replace(" ", "")
+    year = as_plain_text(vehicle.get("year")) or ""
+    make = (as_plain_text(vehicle.get("make")) or "").lower()
+    model = (as_plain_text(vehicle.get("model")) or "").lower()
+    if year and make and model:
+        return f"ymm:{year}|{make}|{model}"
+    if plate:
+        return f"plate:{plate}"
+    if make and model:
+        return f"mm:{make}|{model}"
+    return ""
+
+
+def _parse_vehicles_from_policy_text(blob: str) -> list[dict]:
+    """Harvest year/make/model, VIN, and plate lines from insurance notes."""
+    if not blob or not str(blob).strip():
+        return []
+
+    text = str(blob)
+    vehicles: list[dict] = []
+    seen: set[str] = set()
+
+    def _push(partial: dict) -> None:
+        cleaned = {
+            key: value
+            for key, value in partial.items()
+            if as_plain_text(value)
+        }
+        if not cleaned:
+            return
+        key = _vehicle_identity_key(cleaned)
+        # Require at least one identity signal so we don't invent blank rows.
+        if not key and not (
+            cleaned.get("make") or cleaned.get("vin") or cleaned.get("license_plate")
+        ):
+            return
+        dedupe = key or f"idx:{len(vehicles)}|{cleaned.get('make')}|{cleaned.get('model')}"
+        if dedupe in seen:
+            # Merge richer fields into the earlier row.
+            for item in vehicles:
+                if _vehicle_identity_key(item) == key or (
+                    not key and item.get("make") == cleaned.get("make")
+                ):
+                    for field, value in cleaned.items():
+                        if not as_plain_text(item.get(field)):
+                            item[field] = value
+                    return
+            return
+        seen.add(dedupe)
+        vehicles.append(cleaned)
+
+    for match in _VEHICLE_LABELED_RE.finditer(text):
+        _push(
+            {
+                "year": (match.group("year") or "").strip() or None,
+                "make": (match.group("make") or "").strip() or None,
+                "model": (match.group("model") or "").strip() or None,
+            }
+        )
+
+    for match in _YMM_RE.finditer(text):
+        _push(
+            {
+                "year": (match.group("year") or "").strip() or None,
+                "make": (match.group("make") or "").strip() or None,
+                "model": (match.group("model") or "").strip() or None,
+            }
+        )
+
+    vins = [m.group(1).upper() for m in _VIN_RE.finditer(text)]
+    plates = [m.group(1).upper() for m in _PLATE_RE.finditer(text)]
+
+    # Attach VINs/plates to parsed vehicles in order; leftover VINs become rows.
+    for index, vin in enumerate(vins):
+        if index < len(vehicles):
+            if not as_plain_text(vehicles[index].get("vin")):
+                vehicles[index]["vin"] = vin
+        else:
+            _push({"vin": vin})
+
+    for index, plate in enumerate(plates):
+        if index < len(vehicles):
+            if not as_plain_text(vehicles[index].get("license_plate")):
+                vehicles[index]["license_plate"] = plate
+        else:
+            _push({"license_plate": plate})
+
+    return vehicles
 
 
 def _vehicle_items(result: dict | None) -> list[dict]:
@@ -139,7 +296,7 @@ def seed_insurance_from_vehicles(vehicle_result: dict | None) -> dict | None:
 
 
 def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
-    """Seed vehicle fields from an insurance extraction — auto/vehicle policies only."""
+    """Seed vehicle cards from auto insurance — one 5A row per distinct vehicle."""
     insurance_result = _enrich_items_in_place(
         insurance_result, "insurance_policies", "7A"
     )
@@ -147,36 +304,53 @@ def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
     if not policies:
         return None
 
-    chosen = None
+    vehicles: list[dict] = []
+    seen: set[str] = set()
+
     for policy in policies:
-        policy_type = (as_plain_text(policy.get("policy_type")) or "").lower()
-        notes = (as_plain_text(policy.get("notes")) or "").lower()
-        docs = (as_plain_text(policy.get("policy_documents")) or "").lower()
-        blob = f"{policy_type} {notes} {docs}"
-        is_vehicle = (
-            policy_type == "vehicle"
-            or "auto" in blob
-            or "vin" in blob
-            or "license plate" in blob
-            or "vehicle" in blob
-        )
-        is_home = (
-            "homeowner" in blob
-            or "renter" in blob
-            or "dwelling" in blob
-            or "home " in f" {blob} "
-        )
-        if is_vehicle and not is_home:
-            chosen = policy
-            break
+        if not _is_auto_insurance_policy(policy):
+            continue
 
-    # Do NOT fall back to life/home/health policies — that wrongly creates Vehicles rows.
-    if chosen is None:
-        return None
+        concepts = collect_concepts_from_item(policy)
+        shared = apply_concepts_to_item({}, concepts, "vehicles")
+        parsed = _parse_vehicles_from_policy_text(_policy_blob(policy))
 
-    concepts = collect_concepts_from_item(chosen)
-    vehicle = apply_concepts_to_item({}, concepts, "vehicles")
-    if not vehicle:
+        # No YMM/VIN/plate in notes → still seed one thin bridge card with policy fields.
+        rows = parsed or [{}]
+        for row in rows:
+            vehicle = dict(shared)
+            for key, value in row.items():
+                if as_plain_text(value) and not as_plain_text(vehicle.get(key)):
+                    vehicle[key] = value
+            if not vehicle:
+                continue
+            key = _vehicle_identity_key(vehicle) or (
+                f"policy:{(as_plain_text(vehicle.get('insurance_policy')) or '').lower()}"
+                f"|{len(vehicles)}"
+            )
+            # Collapse thin same-policy duplicates, keep distinct VIN/YMM rows.
+            if key in seen:
+                continue
+            # Soft: another thin row already carries this same policy with no identity.
+            identity = _vehicle_identity_key(vehicle)
+            policy_no = (
+                as_plain_text(vehicle.get("insurance_policy")) or ""
+            ).lower()
+            if not identity and policy_no:
+                already_thin = any(
+                    not _vehicle_identity_key(existing)
+                    and (
+                        as_plain_text(existing.get("insurance_policy")) or ""
+                    ).lower()
+                    == policy_no
+                    for existing in vehicles
+                )
+                if already_thin:
+                    continue
+            seen.add(key)
+            vehicles.append(vehicle)
+
+    if not vehicles:
         return None
 
     return {
@@ -185,8 +359,103 @@ def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
         "subsection": None,
         "confidence": 0.7,
         "extraction_source": "cross_seed",
-        "patch": {"5A": [vehicle]},
+        "patch": {"5A": vehicles},
     }
+
+
+def _items_look_same_vehicle(existing: dict, incoming: dict) -> bool:
+    """Identity match used when merging seed lists into cached extracts."""
+    existing_vin = (as_plain_text(existing.get("vin")) or "").upper()
+    incoming_vin = (as_plain_text(incoming.get("vin")) or "").upper()
+    if existing_vin and incoming_vin:
+        return existing_vin == incoming_vin
+    if existing_vin and incoming_vin and existing_vin != incoming_vin:
+        return False
+
+    existing_plate = (as_plain_text(existing.get("license_plate")) or "").upper()
+    incoming_plate = (as_plain_text(incoming.get("license_plate")) or "").upper()
+    if existing_plate and incoming_plate:
+        return existing_plate == incoming_plate
+
+    year_a = as_plain_text(existing.get("year")) or ""
+    year_b = as_plain_text(incoming.get("year")) or ""
+    make_a = (as_plain_text(existing.get("make")) or "").lower()
+    make_b = (as_plain_text(incoming.get("make")) or "").lower()
+    model_a = (as_plain_text(existing.get("model")) or "").lower()
+    model_b = (as_plain_text(incoming.get("model")) or "").lower()
+    if year_a and year_b and make_a and make_b and model_a and model_b:
+        return year_a == year_b and make_a == make_b and model_a == model_b
+
+    # Thin seed ↔ richer extract on the same policy number only when one side
+    # lacks vehicle identity (never collapse two distinct cars on one policy).
+    policy_a = re.sub(
+        r"[\s\-_.#]",
+        "",
+        (
+            as_plain_text(existing.get("insurance_policy"))
+            or as_plain_text(existing.get("policy_number"))
+            or ""
+        ).lower(),
+    )
+    policy_b = re.sub(
+        r"[\s\-_.#]",
+        "",
+        (
+            as_plain_text(incoming.get("insurance_policy"))
+            or as_plain_text(incoming.get("policy_number"))
+            or ""
+        ).lower(),
+    )
+    if policy_a and policy_b and policy_a == policy_b:
+        existing_identity = bool(
+            existing_vin
+            or existing_plate
+            or (year_a and make_a and model_a)
+        )
+        incoming_identity = bool(
+            incoming_vin
+            or incoming_plate
+            or (year_b and make_b and model_b)
+        )
+        if not existing_identity or not incoming_identity:
+            return True
+        # Distinct YMM on same policy = different vehicles.
+        if make_a and make_b and make_a != make_b:
+            return False
+        if model_a and model_b and model_a != model_b:
+            return False
+        if year_a and year_b and year_a != year_b:
+            return False
+        if make_a and make_b and make_a == make_b and (
+            not year_a or not year_b or year_a == year_b
+        ) and (not model_a or not model_b or model_a == model_b):
+            return True
+    return False
+
+
+def _items_look_same_policy(existing: dict, incoming: dict) -> bool:
+    def _num(item: dict) -> str:
+        return re.sub(
+            r"[\s\-_.#]",
+            "",
+            (as_plain_text(item.get("policy_number")) or "").lower(),
+        )
+
+    a = _num(existing)
+    b = _num(incoming)
+    if a and b:
+        return a == b
+    company_a = (as_plain_text(existing.get("policy_company")) or "").lower()
+    company_b = (as_plain_text(incoming.get("policy_company")) or "").lower()
+    type_a = (as_plain_text(existing.get("policy_type")) or "").lower()
+    type_b = (as_plain_text(incoming.get("policy_type")) or "").lower()
+    if company_a and company_b and type_a and type_b:
+        companies_match = company_a == company_b or company_a in company_b or company_b in company_a
+        if companies_match and type_a == type_b:
+            if a or b:
+                return True
+            return True
+    return False
 
 
 def merge_seed_into_cached(
@@ -217,16 +486,73 @@ def merge_seed_into_cached(
         merged["patch"] = merged_patch
         return merged
 
-    first = dict(existing_items[0]) if isinstance(existing_items[0], dict) else {}
-    donor = seed_items[0] if isinstance(seed_items[0], dict) else {}
-    for key, value in donor.items():
-        if first.get(key) in (None, "", [], {}):
-            first[key] = value
+    matcher = (
+        _items_look_same_vehicle
+        if array_key == "5A"
+        else _items_look_same_policy
+        if array_key == "7A"
+        else None
+    )
 
-    merged_items = [first, *existing_items[1:]]
-    for item in seed_items[1:]:
-        if isinstance(item, dict):
-            merged_items.append(item)
+    merged_items: list = [
+        dict(item) if isinstance(item, dict) else item for item in existing_items
+    ]
+    for donor in seed_items:
+        if not isinstance(donor, dict):
+            continue
+        match_index = -1
+        if matcher:
+            for index, item in enumerate(merged_items):
+                if isinstance(item, dict) and matcher(item, donor):
+                    match_index = index
+                    break
+        elif merged_items and isinstance(merged_items[0], dict):
+            match_index = 0
+
+        if match_index >= 0 and isinstance(merged_items[match_index], dict):
+            target = dict(merged_items[match_index])
+            for key, value in donor.items():
+                if target.get(key) in (None, "", [], {}):
+                    target[key] = value
+            merged_items[match_index] = target
+        elif (
+            array_key in {"5A", "7A"}
+            and len(merged_items) == 1
+            and isinstance(merged_items[0], dict)
+            and len([x for x in seed_items if isinstance(x, dict)]) == 1
+        ):
+            # Sole cached card: gap-fill empty fields from the seed unless
+            # identity numbers clearly conflict (different policies/vehicles).
+            target = dict(merged_items[0])
+            if array_key == "7A":
+                existing_num = re.sub(
+                    r"[\s\-_.#]",
+                    "",
+                    (as_plain_text(target.get("policy_number")) or "").lower(),
+                )
+                donor_num = re.sub(
+                    r"[\s\-_.#]",
+                    "",
+                    (as_plain_text(donor.get("policy_number")) or "").lower(),
+                )
+                if existing_num and donor_num and existing_num != donor_num:
+                    merged_items.append(dict(donor))
+                else:
+                    for key, value in donor.items():
+                        if target.get(key) in (None, "", [], {}):
+                            target[key] = value
+                    merged_items[0] = target
+            else:
+                # Vehicles: only gap-fill when the sole card lacks identity.
+                if not _vehicle_identity_key(target):
+                    for key, value in donor.items():
+                        if target.get(key) in (None, "", [], {}):
+                            target[key] = value
+                    merged_items[0] = target
+                else:
+                    merged_items.append(dict(donor))
+        else:
+            merged_items.append(dict(donor))
 
     merged = dict(existing)
     merged_patch = dict(existing_patch)
@@ -386,9 +712,16 @@ def sync_vehicle_insurance_shared_fields(
         vehicle_result = _enrich_items_in_place(vehicle_result, "vehicles", "5A")
         patch = dict(vehicle_result.get("patch") or {})
         items = patch.get("5A")
-        if isinstance(items, list) and items and isinstance(items[0], dict):
+        if isinstance(items, list) and items:
             items = list(items)
-            items[0] = apply_concepts_to_item(items[0], merged_concepts, "vehicles")
+            # Copy shared policy facts onto every vehicle card that still lacks them
+            # (multi-car policies share company/number/expiry).
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                items[index] = apply_concepts_to_item(
+                    item, merged_concepts, "vehicles"
+                )
             patch["5A"] = items
             next_vehicle = dict(vehicle_result)
             next_vehicle["patch"] = patch

@@ -243,6 +243,7 @@ def _vehicles_are_duplicates(existing: dict, incoming: dict) -> bool:
         return True
 
     # Soft match: thin insurance seed ↔ richer vehicle extract share a policy.
+    # Never collapse two distinct cars that share one policy number.
     def _policy(item: dict) -> str:
         raw = item.get("insurance_policy") or item.get("policy_number") or ""
         return _normalize_comparable(raw).replace("-", "").replace("_", "").replace(".", "").replace("#", "")
@@ -260,11 +261,21 @@ def _vehicles_are_duplicates(existing: dict, incoming: dict) -> bool:
             or incoming_plate
             or (year_b and make_b and model_b)
         )
+        if (
+            existing_identity
+            and incoming_identity
+            and (
+                (make_a and make_b and make_a != make_b)
+                or (model_a and model_b and model_a != model_b)
+                or (year_a and year_b and year_a != year_b)
+            )
+        ):
+            return False
         if not existing_identity or not incoming_identity:
             return True
         if make_a and make_b and make_a == make_b and (
             not year_a or not year_b or year_a == year_b
-        ):
+        ) and (not model_a or not model_b or model_a == model_b):
             return True
 
     return False

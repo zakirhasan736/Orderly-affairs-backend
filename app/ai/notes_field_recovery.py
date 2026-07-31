@@ -154,6 +154,55 @@ def recover_item_fields(item: dict, section_key: str) -> dict:
             if harvested:
                 next_item[company_target] = harvested
 
+    # Vehicle identity buried in insurance/vehicle notes
+    if section_key == "vehicles":
+        if not as_plain_text(next_item.get("vin")):
+            vin_match = re.search(
+                r"\b(?:VIN|vehicle\s*id(?:entification)?\s*(?:no\.?|number|#)?)\s*[:#]?\s*"
+                r"([A-HJ-NPR-Z0-9]{11,17})\b",
+                blob,
+                re.IGNORECASE,
+            )
+            if vin_match:
+                next_item["vin"] = vin_match.group(1).upper()
+        if not as_plain_text(next_item.get("license_plate")):
+            plate_match = re.search(
+                r"\b(?:license\s*plate|lic(?:ense)?\.?\s*plate|plate(?:\s*#)?|tag)\s*[:#]?\s*"
+                r"([A-Z0-9\-]{2,10})\b",
+                blob,
+                re.IGNORECASE,
+            )
+            if plate_match:
+                next_item["license_plate"] = plate_match.group(1).upper()
+        if not (
+            as_plain_text(next_item.get("year"))
+            and as_plain_text(next_item.get("make"))
+            and as_plain_text(next_item.get("model"))
+        ):
+            ymm = re.search(
+                r"(?:vehicle|auto|car)\s*[:#]?\s*"
+                r"(?:(?P<year>19\d{2}|20\d{2})\s+)?"
+                r"(?P<make>[A-Za-z][A-Za-z0-9\-]{1,20})"
+                r"(?:\s+(?P<model>[A-Za-z0-9][A-Za-z0-9 \-/]{0,40}?))?"
+                r"(?=\s*(?:;|,|\||$|\n|vin|plate|policy))",
+                blob,
+                re.IGNORECASE,
+            ) or re.search(
+                r"\b(?P<year>19\d{2}|20\d{2})\s+"
+                r"(?P<make>[A-Za-z][A-Za-z0-9\-]{1,20})\s+"
+                r"(?P<model>[A-Za-z0-9][A-Za-z0-9 \-/]{1,40}?)"
+                r"(?=\s*(?:;|,|\||$|\n|vin|plate|policy))",
+                blob,
+                re.IGNORECASE,
+            )
+            if ymm:
+                if not as_plain_text(next_item.get("year")) and ymm.group("year"):
+                    next_item["year"] = ymm.group("year")
+                if not as_plain_text(next_item.get("make")) and ymm.group("make"):
+                    next_item["make"] = ymm.group("make")
+                if not as_plain_text(next_item.get("model")) and ymm.group("model"):
+                    next_item["model"] = ymm.group("model").strip(" .,:;")
+
     # Date targets by section when still empty
     date_targets: list[tuple[str, str]] = []
     if section_key == "insurance_policies":

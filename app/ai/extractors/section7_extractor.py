@@ -67,6 +67,9 @@ Exact field placement (required):
 - premium_info = premium amount, payment schedule, autopay, due date, billing method, payment notes, AND full policy period text when shown.
 - policy_documents = policy document notes, card details, statement info, or where the policy documents are stored.
 - notes = any other important insurance-policy-related information clearly present that does not fit another field.
+  For Vehicle / auto policies that list insured vehicles, ALSO put each vehicle on its own concise line in notes using this exact format so Vehicles section can be filled accurately:
+  "Vehicle: YYYY Make Model; VIN: <vin>; Plate: <plate>"
+  One line per distinct vehicle. Copy shared policy_company / policy_number only in their dedicated fields (not duplicated per vehicle line).
 
 Reading tips:
 - Prefer declarations pages, ID cards, and statement headers for company + policy number.
