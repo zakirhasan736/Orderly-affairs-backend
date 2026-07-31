@@ -20,6 +20,7 @@ Important rules:
 - patch["7A"] must always be an array.
 - If the uploaded document describes one insurance policy, return exactly one object inside patch["7A"].
 - If the uploaded document describes multiple insurance policies, return one object per policy inside patch["7A"].
+- Do NOT create separate 7A objects for coverage lines, insured drivers, vehicles listed on one policy, premium rows, or agent contact blocks — keep those on the same policy object (coverage_amount, beneficiaries, premium_info, policy_contact, notes).
 - Keep keys exactly as required by schema. Never rename fields.
 - Map values into the exact schema fields below — do not put company names into notes, or policy numbers into coverage_amount.
 - Never invent policy numbers, beneficiaries, coverage amounts, premium amounts, contact details, or insurance company names.
@@ -41,6 +42,9 @@ Use one of these values if clearly supported:
 - Job Loss
 - Umbrella
 - Annuity
+- Bank/Loan
+- Mortgage
+- Credit
 - Other
 
 If the policy type is not one of these, set:

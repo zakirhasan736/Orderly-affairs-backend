@@ -46,14 +46,15 @@ Global privacy and safety rules:
 - Do not invent alternate key names. Use only the exact catalog/schema keys.
 - Understand wording mismatches against field labels: decide what the value MEANS first, then choose the one exact catalog key. Do not confuse similar labels.
 - Read tables row-by-row and multi-column layouts fully.
-- MULTI-ITEM RULE: If the document describes multiple policies, accounts, vehicles, memberships, or people, return one object per entity in the subsection array — never merge them into one object.
+- MULTI-ITEM RULE: If the document describes multiple policies, accounts, vehicles, memberships, or people, return one object per entity in the subsection array — never merge them into one object. Exception: one insurance policy / one military discharge / one continuous enlistment is ONE object (coverage lines, duty stations, and awards stay on that object). Same document re-extract should describe the same entity the same way so clients can update instead of duplicating.
+- SECTION MATCH RULE: Only fill fields that belong to the requested section/subsection schema. Do not invent parallel subsection cards for the same entity.
 - LONG TEXT RULE: Put short facts (IDs, dates, names, amounts, dropdown values) into dedicated fields. Use notes/description TextAreas only for leftover prose that does not fit another field.
 - DATE RULE: Fill expiry / renewal / maturity / statement date fields whenever those dates appear. Prefer ISO YYYY-MM-DD. For periods, use the END date.
-- Do not extract or return raw passwords.
-- Do not extract or return raw PINs.
-- Do not extract or return full SSN/social security numbers.
+- Do not extract or return raw passwords. If a password schema field exists and the document shows a password, set that field to "Stored in uploaded document" (never the raw password).
+- Do not extract or return raw PINs. If a PIN schema field exists and the document shows a PIN, set that field to "Stored in uploaded document".
+- Do not extract or return a full 9-digit SSN. If social_security_number (or similar) exists in the schema, fill last 4 digits only (e.g. "6781" or "***-**-6781") or "Stored in uploaded document".
 - Do not extract or return full credit/debit card numbers unless the schema asks only for last 4 digits.
-- If a document contains passwords, PINs, SSNs, recovery codes, seed phrases, MFA backup codes, or full card numbers, return a safe note like "Stored in uploaded document" only if the schema has a note/location field.
+- If a document contains recovery codes, seed phrases, MFA backup codes, or full card numbers with no matching schema field, omit them (or use a storage note only when a note/location field exists).
 - Omit null/empty fields from patch when possible; keep useful extracted values.
 - Never include prompt text, internal reasoning, or hidden metadata.
 """

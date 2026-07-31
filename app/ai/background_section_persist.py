@@ -143,10 +143,6 @@ def _insurance_policies_are_duplicates(existing: dict, incoming: dict) -> bool:
     if existing_policy and incoming_policy:
         return existing_policy == incoming_policy
 
-    # Different / incomplete numbers → treat as a separate policy card
-    if existing_policy or incoming_policy:
-        return False
-
     existing_company = _insurance_company(existing)
     incoming_company = _insurance_company(incoming)
     existing_type = _policy_type(existing)
@@ -158,21 +154,58 @@ def _insurance_policies_are_duplicates(existing: dict, incoming: dict) -> bool:
         incoming.get("policy_type_other") or incoming.get("type_other")
     )
 
-    if not (
+    company_and_type_match = bool(
         existing_company
         and incoming_company
         and existing_type
         and incoming_type
         and _companies_match(existing_company, incoming_company)
         and existing_type == incoming_type
-    ):
+        and not (
+            existing_type == "other"
+            and existing_other
+            and incoming_other
+            and existing_other != incoming_other
+        )
+    )
+
+    # One side has a number, the other doesn't → same policy when company+type align
+    if (existing_policy or incoming_policy) and company_and_type_match:
+        return True
+
+    if existing_policy or incoming_policy:
         return False
 
-    if existing_type == "other" and existing_other and incoming_other:
-        if existing_other != incoming_other:
-            return False
+    return company_and_type_match
 
-    return True
+
+def _named_items_are_duplicates(existing: dict, incoming: dict, keys: list[str]) -> bool:
+    for key in keys:
+        a = _normalize_comparable(existing.get(key))
+        b = _normalize_comparable(incoming.get(key))
+        if not a or not b:
+            continue
+        if a == b or a in b or b in a:
+            return True
+    return False
+
+
+_ARRAY_IDENTITY_KEYS: dict[str, list[str]] = {
+    "8A": ["organization_name", "group_name", "name"],
+    "9A": ["charity_name", "organization_name", "name"],
+    "10A": ["institution_name", "degree_type", "field_of_study", "graduation_year"],
+    "11A": ["branch_of_service", "rank_achieved", "service_dates"],
+    "12A": ["bank_name", "account_number", "account_type"],
+    "12B": ["service_name", "username", "account_email_phone", "account_name"],
+    "13A": ["service_name", "account_username", "platform", "website"],
+    "14A": ["financial_institution", "account_number", "account_type"],
+    "15B": ["provider_name", "doctor_name", "clinic_name", "name"],
+    "16A": ["card_name", "card_number", "account_number"],
+    "16B": ["creditor_name", "account_number", "debt_type"],
+    "19A": ["item_description", "item_type", "current_location"],
+    "19B": ["property_address", "property_name", "property_type"],
+    "20C": ["document_type", "document_description", "document_name", "parties_involved"],
+}
 
 
 def _vehicles_are_duplicates(existing: dict, incoming: dict) -> bool:
@@ -294,6 +327,9 @@ def _is_duplicate_for_section(array_key: str, existing: dict, incoming: dict) ->
         return _insurance_policies_are_duplicates(existing, incoming)
     if array_key == "5A":
         return _vehicles_are_duplicates(existing, incoming)
+    keys = _ARRAY_IDENTITY_KEYS.get(array_key)
+    if keys:
+        return _named_items_are_duplicates(existing, incoming, keys)
     return False
 
 
