@@ -9,10 +9,11 @@ from app.ai.field_catalog import (
     build_default_field_catalog_from_schema,
     format_field_catalog_prompt,
 )
-from app.ai.gemini_generate import generate_gemini_content
-from app.ai.json_utils import parse_gemini_json
+from app.ai.llm_generate import generate_llm_content
+from app.ai.json_utils import parse_llm_json
+from app.ai.llm_context import get_llm_settings
 from app.ai.local_document_extract import (
-    build_gemini_document_contents,
+    build_llm_document_contents,
     should_fallback_to_vision,
 )
 from app.ai.smart_field_placement import remap_extraction_result
@@ -107,7 +108,7 @@ def normalize_extraction_result(parsed: dict | None) -> dict:
     return result
 
 
-def _run_gemini_extract(
+def _run_llm_extract(
     *,
     path: Path,
     mime_type: str,
@@ -117,42 +118,33 @@ def _run_gemini_extract(
     force_vision: bool = False,
     operation: str = "extract",
 ):
-    contents, extract_meta = build_gemini_document_contents(
+    contents, extract_meta = build_llm_document_contents(
         path=path,
         mime_type=mime_type,
         prompt=final_prompt,
         force_vision=force_vision,
     )
-    gemini_input = str(extract_meta.get("gemini_input") or "unknown")
-    if gemini_input == "text":
-        logger.info(
-            "Gemini extract path=text method=%s quality=%.2f file=%s",
-            extract_meta.get("method"),
-            float(extract_meta.get("quality_score") or 0),
-            path.name,
-        )
-    elif force_vision:
-        logger.info(
-            "Gemini extract path=file_bytes reason=vision_fallback file=%s",
-            path.name,
-        )
-    else:
-        logger.info(
-            "Gemini extract path=file_bytes method=%s needs_vision=%s file=%s",
-            extract_meta.get("method"),
-            extract_meta.get("needs_vision"),
-            path.name,
-        )
+    llm_input = str(
+        extract_meta.get("llm_input")
+        or extract_meta.get("gemini_input")
+        or "text"
+    )
+    logger.info(
+        "LLM extract path=%s method=%s quality=%.2f file=%s",
+        llm_input,
+        extract_meta.get("method"),
+        float(extract_meta.get("quality_score") or 0),
+        path.name,
+    )
 
-    response = generate_gemini_content(
+    response = generate_llm_content(
         contents=contents,
         response_mime_type="application/json",
         response_json_schema=response_schema,
         temperature=0,
-        # Cap output — 32k invited huge thinking/output bills.
         max_output_tokens=8192,
         operation=operation,
-        gemini_input=gemini_input,
+        llm_input=llm_input,
         file_name=path.name,
     )
 
@@ -165,14 +157,31 @@ def _run_gemini_extract(
             raw_text = ""
 
     try:
-        parsed = parse_gemini_json(raw_text)
+        parsed = parse_llm_json(raw_text)
     except RuntimeError:
-        raise RuntimeError("Gemini returned invalid JSON")
+        raise RuntimeError("LLM returned invalid JSON")
 
     normalized = normalize_extraction_result(parsed)
     remapped = remap_extraction_result(normalized, field_catalog)
     usage = getattr(response, "_orderly_usage", None)
+    if isinstance(usage, dict):
+        extract_meta = {
+            **extract_meta,
+            "system_prompt": usage.get("system_prompt"),
+            "user_prompt": usage.get("user_prompt"),
+            "usage": {
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "candidates_tokens": usage.get("candidates_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+                "estimated_usd": usage.get("estimated_usd"),
+            },
+            "teacher_provider": usage.get("provider"),
+            "teacher_model": usage.get("model"),
+        }
     return remapped, extract_meta, usage if isinstance(usage, dict) else None
+
+
+_run_gemini_extract = _run_llm_extract
 
 
 def _extract_sync(
@@ -203,10 +212,12 @@ def _extract_sync(
     final_prompt = f"""
 {prompt}
 
+{get_llm_settings().get("few_shot_prompt") or ""}
+
 {GLOBAL_PRIVACY_EXTRACTION_RULES}
 """
 
-    remapped, extract_meta, usage_a = _run_gemini_extract(
+    remapped, extract_meta, usage_a = _run_llm_extract(
         path=path,
         mime_type=mime_type,
         final_prompt=final_prompt,
@@ -217,13 +228,9 @@ def _extract_sync(
     )
     usages: list[dict] = [usage_a] if usage_a else []
 
-    # Smart switch: empty fill or low confidence after text path → vision once.
+    # Vision path removed — keep hook for compatibility (always False).
     if should_fallback_to_vision(remapped, extract_meta):
-        logger.info(
-            "Text path weak (empty/low confidence); retrying with Gemini vision file=%s",
-            path.name,
-        )
-        remapped, extract_meta, usage_b = _run_gemini_extract(
+        remapped, extract_meta, usage_b = _run_llm_extract(
             path=path,
             mime_type=mime_type,
             final_prompt=final_prompt,
@@ -237,11 +244,15 @@ def _extract_sync(
 
     total_usd = sum(float(u.get("estimated_usd") or 0) for u in usages)
     total_tokens = sum(int(u.get("total_tokens") or 0) for u in usages)
-    inputs = ",".join(str(u.get("gemini_input") or "?") for u in usages) or str(
-        extract_meta.get("gemini_input") or "unknown"
+    inputs = ",".join(
+        str(u.get("llm_input") or u.get("gemini_input") or "?") for u in usages
+    ) or str(
+        extract_meta.get("llm_input")
+        or extract_meta.get("gemini_input")
+        or "text"
     )
     logger.info(
-        "Gemini DOC_TOTAL op=%s file=%s calls=%s gemini_input=%s total_tokens=%s ~usd=%.6f",
+        "LLM DOC_TOTAL op=%s file=%s calls=%s llm_input=%s total_tokens=%s ~usd=%.6f",
         operation,
         path.name,
         len(usages),
@@ -254,13 +265,25 @@ def _extract_sync(
         remapped["__extract_meta"] = {
             "method": extract_meta.get("method"),
             "quality_score": extract_meta.get("quality_score"),
-            "gemini_input": extract_meta.get("gemini_input"),
-            "read_source": extract_meta.get("read_source") or "gemini",
-            "needs_vision": extract_meta.get("needs_vision"),
+            "llm_input": extract_meta.get("llm_input")
+            or extract_meta.get("gemini_input")
+            or "text",
+            "gemini_input": extract_meta.get("llm_input")
+            or extract_meta.get("gemini_input")
+            or "text",
+            "read_source": extract_meta.get("read_source") or "system",
+            "needs_vision": False,
             "result_confidence": remapped.get("confidence"),
-            "gemini_calls": len(usages),
+            "llm_calls": len(usages),
             "estimated_usd": round(total_usd, 6),
             "total_tokens": total_tokens,
+            "document_text": extract_meta.get("document_text"),
+            "system_prompt": extract_meta.get("system_prompt"),
+            "user_prompt": extract_meta.get("user_prompt"),
+            "usage": extract_meta.get("usage"),
+            "teacher_provider": extract_meta.get("teacher_provider"),
+            "teacher_model": extract_meta.get("teacher_model"),
+            "field_catalog": field_catalog,
         }
 
     return remapped
@@ -312,8 +335,8 @@ def _empty_catalog_keys(result: dict | None, field_catalog: list[dict] | None) -
 
 
 def _needs_pass_b(result: dict | None, field_catalog: list[dict] | None) -> bool:
-    # Cost control: second Gemini pass is optional (GEMINI_ENABLE_PASS_B=1).
-    if (os.getenv("GEMINI_ENABLE_PASS_B") or "").strip().lower() not in {
+    # Cost control: second extract pass is optional (AI_ENABLE_PASS_B=1).
+    if (os.getenv("AI_ENABLE_PASS_B") or os.getenv("GEMINI_ENABLE_PASS_B") or "").strip().lower() not in {
         "1",
         "true",
         "yes",

@@ -47,13 +47,13 @@ def _repair_truncated_json(text: str) -> str | None:
     return candidate
 
 
-def parse_gemini_json(raw_text: str | None, fallback: dict | None = None) -> dict:
+def parse_llm_json(raw_text: str | None, fallback: dict | None = None) -> dict:
     text = _clean_jsonish(_strip_fences(raw_text or ""))
 
     if not text:
         if fallback is not None:
             return fallback
-        raise RuntimeError("Empty Gemini JSON response")
+        raise RuntimeError("Empty LLM JSON response")
 
     try:
         parsed = json.loads(text)
@@ -83,4 +83,8 @@ def parse_gemini_json(raw_text: str | None, fallback: dict | None = None) -> dic
     if fallback is not None:
         return fallback
 
-    raise RuntimeError("Invalid Gemini JSON response")
+    raise RuntimeError("Invalid LLM JSON response")
+
+
+# Compatibility alias
+parse_gemini_json = parse_llm_json

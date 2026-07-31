@@ -233,8 +233,8 @@ def merge_seed_into_cached(
     merged_patch[array_key] = merged_items
     merged["patch"] = merged_patch
     # Keep a full Gemini extraction marked as such; don't demote to seed.
-    if existing.get("extraction_source") == "gemini":
-        merged["extraction_source"] = "gemini"
+    if existing.get("extraction_source") in {"llm", "gemini", "openai"}:
+        merged["extraction_source"] = existing.get("extraction_source") or "llm"
     elif seed.get("extraction_source") == "cross_seed" and not existing.get(
         "extraction_source"
     ):
@@ -291,7 +291,7 @@ def mark_full_extraction(result: dict | None) -> dict | None:
     if result.get("extraction_source") == "cross_seed":
         return result
     next_result = dict(result)
-    next_result["extraction_source"] = "gemini"
+    next_result["extraction_source"] = "llm"
     return next_result
 
 

@@ -6,9 +6,9 @@ import re
 from pathlib import Path
 
 from app.ai.extractors.base_extractor import LOCAL_FILE_PREFIX, SUPPORTED_MIME_TYPES
-from app.ai.gemini_generate import generate_gemini_content
-from app.ai.json_utils import parse_gemini_json
-from app.ai.local_document_extract import build_gemini_document_contents
+from app.ai.llm_generate import generate_llm_content
+from app.ai.json_utils import parse_llm_json
+from app.ai.local_document_extract import build_llm_document_contents
 
 
 AI_SECTION_OPTIONS = [
@@ -464,22 +464,25 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
     if not path.exists() or not path.is_file():
         raise FileNotFoundError("Document file not found")
 
-    contents, _extract_meta = build_gemini_document_contents(
+    contents, _extract_meta = build_llm_document_contents(
         path=path,
         mime_type=mime_type,
         prompt=_build_classification_prompt(requested_section_key),
     )
-    gemini_input = str(_extract_meta.get("gemini_input") or "unknown")
+    llm_input = str(
+        _extract_meta.get("llm_input")
+        or _extract_meta.get("gemini_input")
+        or "text"
+    )
 
-    response = generate_gemini_content(
+    response = generate_llm_content(
         contents=contents,
         response_mime_type="application/json",
         response_json_schema=CLASSIFICATION_SCHEMA,
         temperature=0,
-        # Keep headroom so additional_sections arrays are not truncated.
         max_output_tokens=2048,
         operation="classify",
-        gemini_input=gemini_input,
+        llm_input=llm_input,
         file_name=path.name,
     )
 
@@ -492,7 +495,7 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
             raw_text = ""
 
     try:
-        parsed = parse_gemini_json(raw_text)
+        parsed = parse_llm_json(raw_text)
     except RuntimeError:
         # Soft fallback: prefer mismatch routing over wrongly claiming a match
         # for overview probes (especially vital_information).

@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from google.genai.errors import ClientError
 from pydantic import BaseModel, Field
 
 from app.ai.autofill_registry import SECTION_EXTRACTORS
@@ -34,15 +33,26 @@ from app.ai.field_catalog import (
     build_fast_section_previews_from_classification,
     build_section_previews_payload,
 )
-from app.ai.gemini_generate import (
-    GeminiServiceUnavailableError,
+from app.ai.llm_generate import (
+    LLMServiceUnavailableError,
     is_quota_exhausted_error,
 )
 from app.ai.ai_auth import get_current_owner, get_user_id
 from app.ai.background_section_persist import persist_cached_extractions_for_owner
+from app.ai.llm_context import clear_llm_settings, set_llm_settings
+from app.ai.llm_generate import active_brain_info
 from app.ai.local_document_extract import describe_read_source
+from app.ai.skill_memory import (
+    fetch_few_shot_examples,
+    format_few_shot_prompt,
+    learning_enabled,
+    record_successful_fill,
+)
 from app.database import ai_documents_collection
 from app.storage.vault import resolve_stored_ai_document_path
+
+# Back-compat name used in except blocks below
+GeminiServiceUnavailableError = LLMServiceUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -590,6 +600,55 @@ async def _finalize_autofill_success(
     else:
         await delete_ai_document(file_id, user_id)
 
+    # Day-to-day skill growth: remember successful OCR→JSON fills for own model.
+    if not from_cache:
+        patch = result.get("patch") if isinstance(result, dict) else None
+        doc_text = str(
+            extract_meta.get("document_text")
+            or source_doc.get("extracted_text")
+            or ""
+        )
+        try:
+            from app.ai.llm_context import get_llm_settings as _gls
+            from app.ai.skill_memory import learning_enabled as _learn_on
+
+            brain = _gls()
+            should_learn = _learn_on(brain)
+            few_shot_prompt = str(brain.get("few_shot_prompt") or "")
+            few_shot_count = few_shot_prompt.count("--- Example ")
+        except Exception:
+            brain = {}
+            should_learn = True
+            few_shot_count = 0
+        if should_learn:
+            asyncio.create_task(
+                record_successful_fill(
+                    user_id=user_id,
+                    section_key=payload.section,
+                    document_text=doc_text,
+                    patch=patch if isinstance(patch, dict) else None,
+                    confidence=(result or {}).get("confidence")
+                    if isinstance(result, dict)
+                    else None,
+                    provider=extract_meta.get("teacher_provider")
+                    or brain.get("provider"),
+                    model=extract_meta.get("teacher_model") or brain.get("model"),
+                    file_id=file_id,
+                    mime_type=source_doc.get("mime_type"),
+                    extract_meta=extract_meta,
+                    classification=classification
+                    if isinstance(classification, dict)
+                    else None,
+                    field_catalog=extract_meta.get("field_catalog")
+                    or payload.field_catalog,
+                    system_prompt=extract_meta.get("system_prompt"),
+                    user_prompt=extract_meta.get("user_prompt"),
+                    few_shot_count=few_shot_count,
+                    usage=extract_meta.get("usage"),
+                    result=result if isinstance(result, dict) else None,
+                )
+            )
+
     section_previews = build_section_previews_payload(
         filled_section_key=payload.section,
         filled_result=result,
@@ -604,12 +663,13 @@ async def _finalize_autofill_success(
         extract_meta = {
             "method": doc.get("extract_method"),
             "quality_score": doc.get("extract_quality"),
-            "needs_vision": doc.get("needs_vision"),
-            "gemini_input": "text" if not doc.get("needs_vision") else "file_bytes",
+            "needs_vision": False,
+            "llm_input": "text",
+            "gemini_input": "text",
             "read_source": (
                 "cache"
                 if from_cache or doc.get("extract_reuse")
-                else ("system" if not doc.get("needs_vision") else "gemini")
+                else "system"
             ),
         }
 
@@ -710,6 +770,18 @@ async def autofill_section(
     file_path = str(resolved) if resolved else None
     mime_type = doc.get("mime_type")
     keep_document = False
+
+    brain = {**active_brain_info(), "learning_enabled": learning_enabled()}
+    doc_text = str(doc.get("extracted_text") or "")
+    few_shot = ""
+    if brain.get("learning_enabled", True) and doc_text.strip():
+        examples = await fetch_few_shot_examples(
+            user_id=user_id,
+            section_key=payload.section,
+            document_text=doc_text,
+        )
+        few_shot = format_few_shot_prompt(examples)
+    set_llm_settings({**brain, "few_shot_prompt": few_shot})
 
     try:
         expires_at = normalize_mongo_datetime(doc.get("expires_at"))
@@ -1121,11 +1193,12 @@ async def autofill_section(
         ) from error
 
     except Exception as error:
-        if isinstance(error, ClientError) and is_quota_exhausted_error(error):
+        if is_quota_exhausted_error(error):
             await ai_documents_collection.update_one(
                 {"_id": payload.file_id, "user_id": user_id},
                 {"$set": {"status": "uploaded"}},
             )
+            keep_document = True
             raise HTTPException(
                 status_code=503,
                 detail={
@@ -1145,3 +1218,5 @@ async def autofill_section(
             status_code=500,
             detail="AI autofill failed. Please try again.",
         )
+    finally:
+        clear_llm_settings()

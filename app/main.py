@@ -61,6 +61,7 @@ from app.sections.section21_estate_planning_finalwishes.router import router as 
 
 from app.ai.ai_upload_routes import router as ai_upload_router
 from app.ai.ai_autofill_routes import router as ai_autofill_router
+# ai_brain_routes: admin-only skill export/settings — mount when admin panel exists
 from app.security.encrypt_at_rest_migration import run_encryption_migration
 from app.security.security_audit import run_security_audit
 from app.config import settings
@@ -197,6 +198,7 @@ app.include_router(onboarding_router)
 
 app.include_router(ai_upload_router)
 app.include_router(ai_autofill_router)
+# app.include_router(ai_brain_router)  # admin panel — not public
 
 @app.get("/")
 def health_check():

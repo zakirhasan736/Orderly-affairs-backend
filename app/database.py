@@ -32,6 +32,9 @@ section_data_collection = db["sections"]
 messageofnextkin_collection = db["nexrkinmessage"] 
 onboarding_progress = db["onboarding_progress"]
 ai_documents_collection = db["ai_documents"]
+# Admin-only skill corpus (silent fill logging; no owner UI yet)
+ai_brain_settings_collection = db["ai_brain_settings"]
+ai_skill_examples_collection = db["ai_skill_examples"]
 refresh_tokens_collection = db["refresh_tokens"]
 auth_rate_limits_collection = db["auth_rate_limits"]
 

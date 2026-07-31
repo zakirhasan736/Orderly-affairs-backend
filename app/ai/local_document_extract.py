@@ -278,7 +278,7 @@ def extract_document_text(
     }
 
 
-def build_gemini_document_contents(
+def build_llm_document_contents(
     *,
     path: str | Path,
     mime_type: str,
@@ -287,53 +287,51 @@ def build_gemini_document_contents(
     force_vision: bool = False,
 ) -> tuple[list[Any], dict[str, Any]]:
     """
-    Build Gemini `contents` preferring local text when quality is good.
+    Build text-only contents for the fill brain (gpt-4o-mini / own model).
 
-    Returns (contents, extract_meta).
-    Set force_vision=True to always send file bytes (vision/file path).
+    Always uses local OCR/PDF text — never file bytes.
     """
-    from google.genai import types
+    del force_vision  # vision path removed; kept for call-site compatibility
 
     file_path = Path(path)
     meta = local_extract or extract_document_text(file_path, mime_type)
-
-    use_text = (
-        not force_vision
-        and prefer_local_text_extract()
-        and not meta.get("needs_vision")
-        and isinstance(meta.get("text"), str)
-        and str(meta.get("text") or "").strip()
+    text_block = (
+        str(meta.get("text") or "").strip()
+        if isinstance(meta.get("text"), str)
+        else ""
     )
 
-    if use_text:
-        text_block = str(meta["text"]).strip()
-        contents = [
-            (
-                "Document text extracted locally from the uploaded file. "
-                "Use ONLY this text as the document contents:\n\n"
-                f"{text_block}"
-            ),
-            prompt,
-        ]
-        meta = {
-            **meta,
-            "gemini_input": "text",
-            "read_source": "system",
-        }
-        return contents, meta
+    if not text_block:
+        text_block = (
+            "[Local OCR returned no usable text. "
+            "Cannot fill without document text.]"
+        )
+        logger.info(
+            "LLM text-only mode: no OCR text file=%s",
+            file_path.name,
+        )
 
-    file_bytes = file_path.read_bytes()
     contents = [
-        types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+        (
+            "Document text extracted locally from the uploaded file. "
+            "Use ONLY this text as the document contents:\n\n"
+            f"{text_block}"
+        ),
         prompt,
     ]
     meta = {
         **meta,
-        "gemini_input": "file_bytes",
-        "forced_vision": bool(force_vision),
-        "read_source": "gemini",
+        "llm_input": "text",
+        "gemini_input": "text",  # legacy key for older meta readers
+        "read_source": "system",
+        "file_bytes_blocked": True,
+        "document_text": text_block,
     }
     return contents, meta
+
+
+# Compatibility alias
+build_gemini_document_contents = build_llm_document_contents
 
 
 def extraction_result_is_empty(result: dict[str, Any] | None) -> bool:
@@ -379,30 +377,8 @@ def should_fallback_to_vision(
     result: dict[str, Any] | None,
     extract_meta: dict[str, Any] | None,
 ) -> bool:
-    """
-    Smart switch: keep text path when quality + fill confidence are solid;
-    otherwise one Gemini vision pass.
-    """
-    meta = extract_meta or {}
-    if meta.get("gemini_input") != "text":
-        return False
-    if extraction_result_is_empty(result):
-        return True
-
-    min_conf = 0.45
-    try:
-        min_conf = float(os.getenv("AI_TEXT_RESULT_MIN_CONFIDENCE", "0.45"))
-    except (TypeError, ValueError):
-        min_conf = 0.45
-
-    conf = extraction_confidence(result)
-    quality = float(meta.get("quality_score") or 0.0)
-
-    # Low model confidence or borderline OCR/text quality → vision.
-    if conf > 0 and conf < min_conf:
-        return True
-    if quality < 0.55 and conf < 0.7:
-        return True
+    """Vision/file-bytes path removed — always stay on OCR text."""
+    del result, extract_meta
     return False
 
 
@@ -410,10 +386,10 @@ def describe_read_source(meta: dict[str, Any] | None, *, from_cache: bool = Fals
     if from_cache:
         return "cache"
     if not isinstance(meta, dict):
-        return "gemini"
+        return "llm"
     source = str(meta.get("read_source") or "").strip().lower()
-    if source in {"system", "gemini", "cache"}:
-        return source
-    if meta.get("gemini_input") == "text":
+    if source in {"system", "llm", "cache", "gemini"}:
+        return "system" if source == "gemini" else source
+    if meta.get("llm_input") == "text" or meta.get("gemini_input") == "text":
         return "system"
-    return "gemini"
+    return "llm"
