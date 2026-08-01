@@ -61,10 +61,10 @@ def render_nok_invite_email(
     pending_approval: bool,
     access_timing: str = "immediate",
 ) -> str:
-    """Paper/ink NOK invite — fluid max-width, Cloudinary logo in ink mark."""
-    from app.notifications.email_layout import brand_logo_url
+    """Paper/ink NOK invite — fluid max-width, brand logo on white tile."""
+    from app.notifications.email_layout import email_brand_mark
 
-    logo = escape(brand_logo_url())
+    brand_mark = email_brand_mark()
     owner = escape(owner_name)
     hello = escape(_first_name(recipient_name))
     headline = f"{owner_name} has named you as their next of kin."
@@ -192,13 +192,7 @@ def render_nok_invite_email(
               <table role="presentation" cellpadding="0" cellspacing="0" border="0">
                 <tr>
                   <td valign="middle" style="padding-right:11px;">
-                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="oa-logo-box" style="width:30px; height:30px; background:#132b26; border-radius:8px;">
-                      <tr>
-                        <td align="center" valign="middle" style="width:30px; height:30px;">
-                          <img class="oa-logo-img" src="{logo}" width="22" height="22" alt="Orderly Affairs" style="display:block; width:22px; height:22px; border:0; outline:none; text-decoration:none;" />
-                        </td>
-                      </tr>
-                    </table>
+                    {brand_mark}
                   </td>
                   <td valign="middle" class="oa-brand" style="font-family:{FONT_SANS}; font-size:14px; font-weight:600; color:#132b26;">
                     Orderly Affairs

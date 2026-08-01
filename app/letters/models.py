@@ -22,6 +22,7 @@ class NOKLetterIn(BaseModel):
     incomplete_kit_message: Optional[str] = None
     closing_message: Optional[str] = None
     letter_signature: Optional[str] = None
+    signer_name: Optional[str] = None
     delivery_trigger: Optional[str] = None
     delivery_status: Optional[str] = None
     scheduled_send_at: Optional[datetime] = None

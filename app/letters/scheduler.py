@@ -65,6 +65,12 @@ async def _process_due(limit: int = 50):
                 owner_name = None
 
             subject = job.get("subject") or "A letter from your loved one"
+            if (
+                not (letter.get("signer_name") or "").strip()
+                and owner_name
+                and owner_name != "Your kit owner"
+            ):
+                letter = {**letter, "signer_name": owner_name}
             html = render_email_html(letter, owner_name=owner_name)
             await send_email(to_email, subject, html)
 

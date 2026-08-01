@@ -8,6 +8,7 @@ from app.database import db, kits_collection
 from app.security.nok_letter_crypto import load_nok_letter, prepare_nok_letter_for_storage
 from app.security.nextkin_profile_crypto import load_nextkin_profile
 from app.security.token_resolver import decode_owner_or_nok_token
+from app.config import nextkin_login_url
 from .core import require_owner, require_nok
 from .models import NOKLetterIn, NOKLetterOut
 
@@ -42,6 +43,7 @@ def to_out(doc: Dict[str, Any]) -> NOKLetterOut:
         incomplete_kit_message=doc.get("incomplete_kit_message"),
         closing_message=doc.get("closing_message"),
         letter_signature=doc.get("letter_signature"),
+        signer_name=doc.get("signer_name"),
         delivery_trigger=doc.get("delivery_trigger"),
         delivery_status=doc.get("delivery_status"),
         scheduled_send_at=doc.get("scheduled_send_at"),
@@ -304,8 +306,19 @@ async def apply_autofill(owner_id: str, payload: NOKLetterIn, nok_id: Optional[s
         # store which NOK this letter was generated for (so you can have one per NOK)
         data.setdefault("nok_user_id", nok.get("_id"))
 
+    if not (data.get("signer_name") or "").strip():
+        try:
+            from app.notifications.display_names import resolve_owner_display_name
+
+            owner_doc = await users_collection.find_one({"_id": ObjectId(owner_id)})
+            owner_label = await resolve_owner_display_name(owner_doc)
+            if owner_label and owner_label != "Your kit owner":
+                data["signer_name"] = owner_label
+        except Exception:
+            pass
+
     data.setdefault("letter_greeting", "Dear")
-    data.setdefault("access_url", "https://orderly-affairs.com")
+    data.setdefault("access_url", nextkin_login_url())
     return data
 
 
@@ -464,6 +477,8 @@ async def _deliver_letter_now(doc: Dict[str, Any], owner: Dict[str, Any]) -> Dic
         )
 
     owner_name = await resolve_owner_display_name(owner)
+    if not (letter.get("signer_name") or "").strip() and owner_name and owner_name != "Your kit owner":
+        letter = {**letter, "signer_name": owner_name}
     html = render_email_html(letter, owner_name=owner_name)
     await send_email(to_email, "A letter from your loved one", html)
 

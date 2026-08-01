@@ -56,6 +56,26 @@ def brand_logo_url() -> str:
     return _DEFAULT_EMAIL_LOGO_URL
 
 
+def email_brand_mark(
+    *,
+    box: int = 30,
+    img: int = 22,
+    class_box: str = "oa-logo-box",
+    class_img: str = "oa-logo-img",
+) -> str:
+    """Brand logo on a white rounded tile (readable on paper headers)."""
+    logo = escape(brand_logo_url())
+    return f"""
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="{class_box}" style="width:{box}px; height:{box}px; background:#ffffff; border:1px solid {LINE}; border-radius:8px;">
+                      <tr>
+                        <td align="center" valign="middle" style="width:{box}px; height:{box}px;">
+                          <img class="{class_img}" src="{logo}" width="{img}" height="{img}" alt="Orderly Affairs" style="display:block; width:{img}px; height:{img}px; border:0; outline:none; text-decoration:none;" />
+                        </td>
+                      </tr>
+                    </table>
+    """.strip()
+
+
 def portal_url() -> str:
     return (settings.FRONTEND_URL or "https://portal.orderly-affairs.com").rstrip("/")
 
@@ -296,7 +316,7 @@ def render_email(
     warning: bool = False,
 ) -> str:
     """Wrap inner HTML in the branded paper / ink email shell (fluid max-width)."""
-    logo = escape(brand_logo_url())
+    brand_mark = email_brand_mark(box=36, img=28)
     safe_title = escape(title)
     safe_eyebrow = escape(eyebrow)
     safe_preheader = escape(preheader or title)
@@ -317,6 +337,8 @@ def render_email(
       .oa-pad {{ padding:20px 18px !important; }}
       .oa-title {{ font-size:20px !important; }}
       .oa-stack-cta {{ display:table !important; }}
+      .oa-logo-box {{ width:30px !important; height:30px !important; border-radius:7px !important; }}
+      .oa-logo-img {{ width:22px !important; height:22px !important; }}
     }}
   </style>
 </head>
@@ -332,8 +354,8 @@ def render_email(
             <td class="oa-pad" style="padding:18px 22px 8px 22px; border-bottom:1px solid {LINE_SOFT};">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
-                  <td valign="middle" width="44" style="padding-right:12px;">
-                    <img src="{logo}" width="36" height="36" alt="Orderly Affairs" style="display:block; width:36px; height:36px; border:0; outline:none; text-decoration:none;" />
+                  <td valign="middle" width="48" style="padding-right:12px;">
+                    {brand_mark}
                   </td>
                   <td valign="middle">
                     <p style="margin:0; font-family:{FONT_MONO}; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:{INK_MUTED}; font-weight:500;">
@@ -388,7 +410,7 @@ def render_reminder_card(
 
     Uses fluid max-width (no fixed 390/600 mock widths).
     """
-    logo = escape(brand_logo_url())
+    brand_mark = email_brand_mark(box=28, img=22)
     safe_preheader = escape(preheader or title)
     portal = escape(portal_url())
     support = escape(getattr(settings, "EMAIL_SENDER", "support@orderly-affairs.com"))
@@ -409,6 +431,8 @@ def render_reminder_card(
       .oa-title {{ font-size:20px !important; }}
       .oa-hide-desk {{ display:none !important; max-height:0 !important; overflow:hidden !important; }}
       .oa-show-mob {{ display:table !important; width:100% !important; }}
+      .oa-logo-box {{ width:26px !important; height:26px !important; border-radius:7px !important; }}
+      .oa-logo-img {{ width:18px !important; height:18px !important; }}
     }}
     @media only screen and (min-width: 621px) {{
       .oa-show-mob {{ display:none !important; max-height:0 !important; overflow:hidden !important; mso-hide:all; }}
@@ -426,7 +450,7 @@ def render_reminder_card(
               <table role="presentation" cellpadding="0" cellspacing="0" border="0">
                 <tr>
                   <td valign="middle" style="padding-right:10px;">
-                    <img src="{logo}" width="28" height="28" alt="" style="display:block; width:28px; height:28px; border:0;" />
+                    {brand_mark}
                   </td>
                   <td valign="middle" style="font-family:{FONT_MONO}; font-size:10px; font-weight:500; letter-spacing:0.14em; text-transform:uppercase; color:{INK_MUTED};">
                     Orderly Affairs

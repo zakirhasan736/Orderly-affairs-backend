@@ -575,7 +575,6 @@ async def _finalize_autofill_success(
     else:
         routed_section = source_doc.get("routed_section")
 
-    keep_document = False
     update_fields: dict = {
         "status": "uploaded",
         "consumed_sections": existing_consumed,
@@ -587,7 +586,6 @@ async def _finalize_autofill_success(
         update_fields["routed_section"] = routed_section
 
     if additional_sections:
-        keep_document = True
         pending_keys = existing_pending[:]
         for item in additional_sections:
             section_key = item["section_key"]
@@ -601,24 +599,15 @@ async def _finalize_autofill_success(
         remaining_pending = [
             key for key in existing_pending if key != payload.section
         ]
-        if remaining_pending:
-            keep_document = True
-            update_fields["pending_sections"] = remaining_pending
-        else:
-            keep_document = False
-    else:
-        # Keep the file after the first successful fill so the owner can
-        # re-open the section / press Auto-fill again without re-uploading.
-        # TTL cleanup still removes expired docs.
-        keep_document = True
+        update_fields["pending_sections"] = remaining_pending
 
-    if keep_document:
-        await ai_documents_collection.update_one(
-            {"_id": file_id, "user_id": user_id},
-            {"$set": update_fields},
-        )
-    else:
-        await delete_ai_document(file_id, user_id)
+    # Always keep vault files so owners can reopen image / PDF / TXT
+    # previews from Review inbox → Files (5GB per-owner quota).
+    keep_document = True
+    await ai_documents_collection.update_one(
+        {"_id": file_id, "user_id": user_id},
+        {"$set": update_fields},
+    )
 
     # Day-to-day skill growth: remember successful OCR→JSON fills for own model.
     if not from_cache:

@@ -52,6 +52,8 @@ def render_letter_text(doc: Dict[str, Any]) -> str:
         f"{doc.get('password_card_location') or '[Password Card Location will auto-populate]'}."
     )
 
+    signer = str(doc.get("signer_name") or doc.get("owner_name") or "").strip() or "[Your name]"
+
     return f"""{fmt_date(doc.get("letter_date"))}
 
 {doc.get("letter_greeting") or "Dear"} {doc.get("letter_to") or "[Next of Kin Name]"},
@@ -79,7 +81,7 @@ In addition to the online kit, you'll find two important physical items:
 
 {doc.get("letter_signature") or "With love,"}
 
-[Your signature]
+{signer}
 """
 
 
@@ -138,8 +140,6 @@ def _support_footer_line() -> str:
 
 def render_email_html(doc: Dict[str, Any], *, owner_name: str | None = None) -> str:
     """NOK death / scheduled letter — paper/ink design (fluid max-width)."""
-    from app.notifications.email_layout import brand_logo_url
-
     greeting = (doc.get("letter_greeting") or "Dear").strip()
     to_name = (doc.get("letter_to") or "there").strip()
     if not to_name or _is_placeholder(to_name):
@@ -181,8 +181,18 @@ def render_email_html(doc: Dict[str, Any], *, owner_name: str | None = None) -> 
         f'{_escape(close_text).replace(chr(10), "<br/>")}</p>'
     )
 
-    kit_url = doc.get("access_url") or nextkin_login_url()
+    # Always send NOK recipients to the Next-of-Kin login (not marketing site).
+    kit_url = nextkin_login_url()
     owner_label = (owner_name or doc.get("owner_name") or "").strip()
+    signer_label = (
+        (doc.get("signer_name") or owner_label or "").strip()
+    )
+    if signer_label and not _is_placeholder(signer_label):
+        body_parts.append(
+            f'<p style="margin:10px 0 0 0; font-family:{FONT_SANS}; font-size:15px; '
+            f'font-weight:600; line-height:1.4; color:#213D59;">'
+            f'{_escape(signer_label)}</p>'
+        )
     if owner_label:
         first = owner_label.split()[0]
         cta_label = f"Open {first}'s kit"
@@ -203,7 +213,9 @@ def render_email_html(doc: Dict[str, Any], *, owner_name: str | None = None) -> 
             "nothing here expires."
         )
 
-    logo = _escape(brand_logo_url())
+    from app.notifications.email_layout import email_brand_mark
+
+    brand_mark = email_brand_mark()
     support_line = _support_footer_line()
 
     return f"""<!DOCTYPE html>
@@ -252,13 +264,7 @@ def render_email_html(doc: Dict[str, Any], *, owner_name: str | None = None) -> 
               <table role="presentation" cellpadding="0" cellspacing="0" border="0">
                 <tr>
                   <td valign="middle" style="padding-right:11px;">
-                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="oa-logo-box" style="width:30px; height:30px; background:#132b26; border-radius:8px;">
-                      <tr>
-                        <td align="center" valign="middle" style="width:30px; height:30px;">
-                          <img class="oa-logo-img" src="{logo}" width="22" height="22" alt="Orderly Affairs" style="display:block; width:22px; height:22px; border:0; outline:none; text-decoration:none;" />
-                        </td>
-                      </tr>
-                    </table>
+                    {brand_mark}
                   </td>
                   <td valign="middle" class="oa-brand" style="font-family:{FONT_SANS}; font-size:14px; font-weight:600; color:#132b26;">
                     Orderly Affairs

@@ -23,6 +23,7 @@ from app.nexrkinmessage.scheduler import check_scheduled_letters
 from app.billing.webhooks import webhook_router
 from app.admin.billing import admin_billing_router
 from app.support.routes import support_router, admin_support_router
+from app.feedback.routes import feedback_router, admin_feedback_router
 from app.sections.section1_vital_information.router import (
     router as section1_router
 )
@@ -171,6 +172,8 @@ app.include_router(webhook_router)
 app.include_router(admin_billing_router)
 app.include_router(support_router)
 app.include_router(admin_support_router)
+app.include_router(feedback_router)
+app.include_router(admin_feedback_router)
 
 app.include_router(kit_router)
 app.include_router(letters_router)
