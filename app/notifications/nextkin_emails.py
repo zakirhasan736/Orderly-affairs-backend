@@ -59,6 +59,7 @@ def render_nok_invite_email(
     plain_password: str | None,
     login_url: str,
     pending_approval: bool,
+    access_timing: str = "immediate",
 ) -> str:
     """Paper/ink NOK invite — fluid max-width, Cloudinary logo in ink mark."""
     from app.notifications.email_layout import brand_logo_url
@@ -68,8 +69,30 @@ def render_nok_invite_email(
     hello = escape(_first_name(recipient_name))
     headline = f"{owner_name} has named you as their next of kin."
     subject_line = f"{owner_name} has named you as next of kin"
+    upon_death = str(access_timing or "").strip().lower() in {
+        "upon_death",
+        "upon-death",
+        "death",
+    }
 
-    if pending_approval:
+    if upon_death:
+        intro = (
+            f"{owner} keeps an Orderly Affairs Kit — one place holding the accounts, "
+            "documents, and wishes their family would need. They've named you as next of kin "
+            "for when that kit is needed."
+        )
+        pwd_hint = (
+            "This password is also printed on your Password Card. Keep the card safe — "
+            "you'll need the master password to sign in when access becomes available."
+        )
+        after_cta = (
+            "When it is time to open the kit, sign in with this email and the "
+            "<strong>master password</strong> from the Password Card. "
+            f"The kit owner will not be able to approve access — the master password is "
+            "what unlocks the kit. If you weren't expecting this, you can ignore the email."
+        )
+        cta_label = "Sign in when ready"
+    elif pending_approval:
         intro = (
             f"{owner} keeps an Orderly Affairs Kit — one place holding the accounts, "
             "documents, and wishes their family would need. They've given you a role in it."
@@ -82,6 +105,7 @@ def render_nok_invite_email(
             f"Nothing is visible to you until {owner} approves your role. If you weren't "
             "expecting this, you can ignore the email — no access is granted by doing nothing."
         )
+        cta_label = "Sign in to the kit"
     else:
         intro = (
             f"{owner} keeps an Orderly Affairs Kit — one place holding the accounts, "
@@ -94,6 +118,7 @@ def render_nok_invite_email(
             "Sign in when you're ready. If you weren't expecting this, you can ignore "
             "the email — no further access is granted by doing nothing."
         )
+        cta_label = "Sign in to the kit"
 
     password_block = ""
     if plain_password:
@@ -104,6 +129,19 @@ def render_nok_invite_email(
                     <p style="margin:0; font-family:{FONT_SANS}; font-size:12.5px; font-weight:500; color:#5c6b66;">Your temporary password</p>
                     <p class="oa-pwd" style="margin:8px 0 0 0; font-family:{FONT_MONO}; font-size:22px; font-weight:500; letter-spacing:0.08em; color:#132b26; word-break:break-all;">{escape(plain_password)}</p>
                     <p class="oa-pwd-hint" style="margin:10px 0 0 0; font-family:{FONT_SANS}; font-size:12.5px; color:#6e7c77; line-height:1.55;">{pwd_hint}</p>
+                  </td>
+                </tr>
+              </table>
+"""
+    elif upon_death:
+        password_block = f"""
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:22px 0; border:1px solid #e4e6e1; border-radius:12px; overflow:hidden;">
+                <tr>
+                  <td class="oa-pwd-pad" style="padding:20px; background:#f7f6f2;">
+                    <p style="margin:0; font-family:{FONT_SANS}; font-size:12.5px; font-weight:500; color:#5c6b66;">Master password</p>
+                    <p class="oa-pwd-hint" style="margin:10px 0 0 0; font-family:{FONT_SANS}; font-size:13px; color:#132b26; line-height:1.55;">
+                      Use the <strong>master password</strong> printed on your Password Card — it is not sent by email.
+                    </p>
                   </td>
                 </tr>
               </table>
@@ -188,7 +226,7 @@ def render_nok_invite_email(
                 <tr>
                   <td>
                     <a href="{escape(login_url)}" class="oa-cta" style="display:inline-block; padding:14px 22px; border-radius:24px; background:#132b26; color:#ffffff; font-family:{FONT_SANS}; font-size:14px; font-weight:500; text-decoration:none; line-height:1.2;">
-                      Sign in to the kit
+                      {escape(cta_label)}
                     </a>
                   </td>
                 </tr>
@@ -233,9 +271,10 @@ async def send_nextkin_email(
         html = render_nok_invite_email(
             owner_name=owner_name,
             recipient_name=nk_name,
-            plain_password=plain_password,
+            plain_password=None,  # never email credentials for upon-death create
             login_url=login,
-            pending_approval=True,
+            pending_approval=False,
+            access_timing="upon_death",
         )
 
     elif event == NextKinEmailEvent.ACCESS_APPROVED:
@@ -246,6 +285,7 @@ async def send_nextkin_email(
             plain_password=plain_password,
             login_url=login,
             pending_approval=False,
+            access_timing="immediate",
         )
 
     elif event == NextKinEmailEvent.ACCESS_REVOKED:
@@ -264,16 +304,19 @@ async def send_nextkin_email(
         )
 
     elif event == NextKinEmailEvent.PASSWORD_UPDATED:
-        subject = "Orderly Affairs – Your Login Password Was Updated"
+        subject = f"{owner_name} updated your kit password"
         html = render_nok_invite_email(
             owner_name=owner_name,
             recipient_name=nk_name,
             plain_password=plain_password,
             login_url=login,
             pending_approval=False,
+            access_timing=(
+                "immediate"
+                if nextkin.get("immediate_access")
+                else "upon_death"
+            ),
         )
-        # Prefer a clearer subject for password resets
-        subject = f"{owner_name} updated your kit password"
 
     elif event == NextKinEmailEvent.DELETED:
         subject = "Orderly Affairs – Next-of-Kin Removed"
@@ -291,7 +334,7 @@ async def send_nextkin_email(
         subject = "Orderly Affairs – Access Available"
         html = render_email(
             title="Kit access is now available",
-            preheader=f"Access is available for {owner_name}'s Orderly Affairs kit",
+            preheader=f"Use the master password to open {owner_name}'s Orderly Affairs kit",
             body_html="".join(
                 [
                     p(f"Hello {escape(nk_name)},"),
@@ -299,12 +342,17 @@ async def send_nextkin_email(
                         f"<strong>{escape(owner_name)}</strong> has passed away. "
                         "You may now access their <strong>Orderly Affairs Kit</strong>."
                     ),
+                    p(
+                        "Sign in with this email and the <strong>master password</strong> "
+                        "printed on your Password Card. The kit owner cannot approve access — "
+                        "the master password is what unlocks the kit."
+                    ),
                     email_info_rows(
                         [
                             ("Email", nextkin["email"]),
                             (
-                                "Password",
-                                "Use the password printed on your Password Card",
+                                "Master password",
+                                "Printed on your Password Card (not emailed)",
                             ),
                         ]
                     ),

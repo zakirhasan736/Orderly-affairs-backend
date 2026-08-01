@@ -1256,7 +1256,8 @@ async def create_nextkin(
             await users_collection.find_one({"_id": new_id})
         )
 
-        # ✅ CASE 1: Immediate access → approve + send ACCESS email (with password)
+        # Immediate access → email login credentials.
+        # Upon Death → notify without credentials; master password stays on the card.
         if req.immediate_access:
             await users_collection.update_one(
                 {"_id": new_id},
@@ -1275,45 +1276,13 @@ async def create_nextkin(
                 owner=owner,
                 plain_password=plain_password,
             )
-
-        # CASE 2: No immediate access → invite email with temp password
         else:
             await send_nextkin_email(
                 event=NextKinEmailEvent.CREATED,
                 nextkin=nextkin,
                 owner=owner,
-                plain_password=plain_password,
+                plain_password=None,
             )
-
-        # # 4️⃣ Email credentials (best-effort)
-        # try:
-        #     sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-        #     owner_name = owner.get("full_name") or owner["email"]
-        #     html = f"""
-        #     <div style="font-family:Arial,sans-serif;line-height:1.6">
-        #       <h3>Hello {req.full_name},</h3>
-        #       <p>You’ve been added as a <strong>Next-of-Kin</strong> by <b>{owner_name}</b> in Orderly Affairs.</p>
-        #       <p>Use these details to log in:</p>
-        #       <ul>
-        #         <li><b>Email:</b> {email}</li>
-        #         <li><b>Temporary Password:</b> {plain_password}</li>
-        #       </ul>
-        #       <p>Please log in here: <a href="{settings.FRONTEND_URL}/nextkin-login">{settings.FRONTEND_URL}/nextkin-login</a></p>
-        #       <p>After logging in, please change your password immediately.</p>
-        #       <hr />
-        #       <small>Created on {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</small>
-        #     </div>
-        #     """
-        #     message = Mail(
-        #         from_email=settings.EMAIL_SENDER,
-        #         to_emails=email,
-        #         subject="Orderly Affairs - Your Next-of-Kin Login Credentials",
-        #         html_content=html,
-        #     )
-        #     sg.send(message)
-        # except Exception as e:
-        #     # don't fail the creation just because email failed
-        #     print("⚠️ SendGrid Email Error:", e)
 
         return {
             "id": str(new_id),
@@ -1323,6 +1292,7 @@ async def create_nextkin(
             "status": "ok",
             "message": f"Next-of-Kin '{req.full_name}' created successfully.",
             "master_password": plain_password,
+            "temp_password_sent": bool(req.immediate_access),
         }
 
     # 5️⃣ Handle single or bulk payloads with SAME endpoint
@@ -1366,7 +1336,7 @@ async def create_nextkin(
         "relationship": payload.relationship,
         "owner": owner.get("full_name") or owner["email"],
         "id": res["id"],
-        "temp_password_sent": True,
+        "temp_password_sent": bool(res.get("temp_password_sent")),
         "master_password": res.get("master_password") or "",
     }
 
@@ -1494,7 +1464,8 @@ async def update_nextkin(
         updated_nextkin = load_nextkin_profile(
             await users_collection.find_one({"_id": ObjectId(nextkin_id)})
         )
-        if updated_nextkin:
+        # Only email password changes to people who already have immediate access.
+        if updated_nextkin and updated_nextkin.get("immediate_access"):
             await send_nextkin_email(
                 event=NextKinEmailEvent.PASSWORD_UPDATED,
                 nextkin=updated_nextkin,

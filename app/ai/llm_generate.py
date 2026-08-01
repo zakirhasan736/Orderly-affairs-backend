@@ -342,7 +342,7 @@ def generate_llm_content(
         detail = resp.text[:500]
         if resp.status_code in {429, 500, 503, 504}:
             raise LLMServiceUnavailableError(
-                "AI is temporarily busy. Please wait a moment and try Auto-fill again.",
+                "Our AI is finishing other documents right now. Please wait about a minute, then try again. Your upload is saved — nothing is wrong with your file.",
                 status_code=resp.status_code,
             )
         raise RuntimeError(f"{provider} error {resp.status_code}: {detail}")

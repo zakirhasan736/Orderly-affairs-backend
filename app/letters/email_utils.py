@@ -16,6 +16,22 @@ FONT_SANS = (
 FONT_SERIF = "'Instrument Serif',Georgia,'Times New Roman',serif"
 FONT_MONO = "'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace"
 
+DOCUMENTS_BAG_DEFAULT = (
+    "• The Documents Bag: Please keep this safe. It contains originals of the essential documents "
+    "that you may need to refer to it even after everything has been settled. It is located"
+)
+LEGACY_DOCUMENTS_BAG_INFO = (
+    "• The Documents Bag: Please keep this safe. It contains original documents and space to store "
+    "items such as death certificates. You may need to refer to it even after everything has been settled. It is located"
+)
+
+
+def _documents_bag_info(doc: Dict[str, Any]) -> str:
+    value = str(doc.get("documents_bag_info") or "").strip()
+    if not value or value == LEGACY_DOCUMENTS_BAG_INFO:
+        return DOCUMENTS_BAG_DEFAULT
+    return value
+
 
 def render_letter_text(doc: Dict[str, Any]) -> str:
     def fmt_date(v):
@@ -55,7 +71,7 @@ In addition to the online kit, you'll find two important physical items:
 
 {doc.get("key_bag_info") or "• The Key Bag: This contains important keys and a guide to what each is for. It may include house keys, PO box keys, or vehicle keys. It is located"} {doc.get("key_bag_location") or "[Key Bag Location]"}.
 
-{doc.get("documents_bag_info") or "• The Documents Bag: Please keep this safe. It contains original documents and space to store items such as death certificates. You may need to refer to it even after everything has been settled. It is located"} {doc.get("documents_bag_location") or "[Documents Bag Location]"}.
+{_documents_bag_info(doc)} {doc.get("documents_bag_location") or "[Documents Bag Location]"}.
 
 {doc.get("incomplete_kit_message") or "If any part of the kit is incomplete, please don't worry. Even the unfinished parts can still help you stay organized. I've done my best to make sure you won't be left searching through drawers or wondering where things are."}
 

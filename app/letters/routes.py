@@ -445,3 +445,81 @@ async def update_my_nok_letter(
     doc = await nok_letters_collection.find_one({"_id": existing["_id"]})
     doc = await sync_letter_delivery(doc)
     return to_out(load_nok_letter(doc))
+
+
+async def _deliver_letter_now(doc: Dict[str, Any], owner: Dict[str, Any]) -> Dict[str, Any]:
+    """Email the letter immediately and mark it sent."""
+    from app.notifications.display_names import resolve_owner_display_name
+    from .email_utils import render_email_html, send_email
+
+    letter = load_nok_letter(doc) or doc
+    if letter.get("delivery_status") == "sent":
+        return letter
+
+    to_email = (letter.get("nok_email") or "").strip()
+    if not to_email:
+        raise HTTPException(
+            status_code=400,
+            detail="Next of Kin email is missing. Add it in Access Management first.",
+        )
+
+    owner_name = await resolve_owner_display_name(owner)
+    html = render_email_html(letter, owner_name=owner_name)
+    await send_email(to_email, "A letter from your loved one", html)
+
+    now = datetime.now(timezone.utc)
+    letter_id = str(letter["_id"])
+    await scheduled_letters_collection.update_many(
+        {"letter_id": letter_id, "status": {"$in": ["scheduled", "processing"]}},
+        {"$set": {"status": "cancelled", "updated_at": now}},
+    )
+    await nok_letters_collection.update_one(
+        {"_id": letter["_id"]},
+        {
+            "$set": {
+                "delivery_trigger": "manual",
+                "delivery_status": "sent",
+                "scheduled_send_at": None,
+                "sent_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    refreshed = await nok_letters_collection.find_one({"_id": letter["_id"]})
+    return load_nok_letter(refreshed) or refreshed
+
+
+@router.post("/send-now", response_model=NOKLetterOut)
+async def send_nok_letter_now(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    nok_id: Optional[str] = Query(None, description="Target NOK user _id"),
+):
+    """Owner action: email the letter to the next of kin right now."""
+    owner = await require_owner(request, authorization)
+    owner_id = str(owner["_id"])
+
+    match: Dict[str, Any] = {"owner_id": owner_id}
+    if nok_id:
+        nok = await fetch_nok_by_id(owner_id, nok_id)
+        if not nok:
+            # Fall back: letter may exist even if flags changed
+            match["nok_user_id"] = nok_id
+        else:
+            match["nok_user_id"] = nok["_id"]
+
+    doc = await nok_letters_collection.find_one(match)
+    if not doc and nok_id:
+        doc = await nok_letters_collection.find_one(
+            {"owner_id": owner_id, "nok_user_id": nok_id}
+        )
+    if not doc and not nok_id:
+        doc = await nok_letters_collection.find_one({"owner_id": owner_id})
+    if not doc:
+        raise HTTPException(
+            status_code=404,
+            detail="Save the letter first, then send it.",
+        )
+
+    sent = await _deliver_letter_now(doc, owner)
+    return to_out(sent)

@@ -138,7 +138,11 @@ CLASSIFICATION_SCHEMA = {
         },
         "document_summary": {
             "type": "string",
-            "description": "Short plain-language description of what the document appears to be.",
+            "description": (
+                "Owner-facing AI summary of what this upload is (2–5 sentences). "
+                "Include document type, key people/institutions, important numbers "
+                "or dates, and what it appears useful for. Plain language, no markdown."
+            ),
         },
         "matches_requested_section": {
             "type": "boolean",
@@ -530,7 +534,9 @@ Rules:
 - When the user uploaded in section X and X has data, set best_section_key=X and put other sections in additional_sections.
 - additional_sections must NOT include {requested_section_key}.
 - If the document is clearly only for a different section and has no useful data for {requested_section_key}, set matches_requested_section=false and set best_section_key to that other section.
-- document_summary must be one short sentence, maximum 120 characters. Mention auto/vehicle or homeowners when relevant.
+- document_summary is shown to the owner on a review screen. Write 2–5 clear sentences (about 80–500 characters) that summarize what was uploaded:
+  document type (e.g. bank statement, auto insurance card, DD-214), who/what institution it is from, key people named, important account/policy/VIN numbers when clearly shown, date range or expiry when shown, and what the vault can fill from it.
+  Do NOT invent facts. Prefer concrete details from the document over vague wording. No markdown, no bullet lists — flowing prose only.
 - Return JSON only.
 """
 

@@ -90,6 +90,9 @@ class AutofillSectionRequest(BaseModel):
     use_routed_cache: bool = False
     # Dashboard overview: classify only — do not extract into the probe section.
     classify_only: bool = False
+    # Overview review inbox: extract + return patch, but do not vault-write yet.
+    # Client persists after the owner Accepts edited fields.
+    defer_persist: bool = False
 
 
 def utc_now_naive():
@@ -721,16 +724,17 @@ async def _finalize_autofill_success(
         ):
             partner_results[partner_key] = partner_result
 
-    # Persist PRIMARY only. Partner sections are filled+persisted sequentially
-    # by the overview runner — writing partners here duplicated vehicle rows.
-    persist_keys = [payload.section]
-    asyncio.create_task(
-        persist_cached_extractions_for_owner(
-            owner_id=user_id,
-            cached_extractions=cached_extractions,
-            section_keys=persist_keys,
+    # Persist PRIMARY only when the client is not holding for Accept review.
+    # Overview inbox sets defer_persist=true so owners can edit before save.
+    if not payload.defer_persist:
+        persist_keys = [payload.section]
+        asyncio.create_task(
+            persist_cached_extractions_for_owner(
+                owner_id=user_id,
+                cached_extractions=cached_extractions,
+                section_keys=persist_keys,
+            )
         )
-    )
 
     return {
         "success": True,
@@ -746,6 +750,7 @@ async def _finalize_autofill_success(
         "file_kept": keep_document,
         "from_cache": from_cache,
         "document_deleted": not keep_document,
+        "deferred_persist": bool(payload.defer_persist),
         "read_source": read_source,
         "extract_method": extract_meta.get("method"),
         "extract_meta": extract_meta,
@@ -1229,7 +1234,7 @@ async def autofill_section(
                 status_code=503,
                 detail={
                     "code": "ai_service_unavailable",
-                    "message": "AI quota is busy. Please wait a minute and try Auto-fill again.",
+                    "message": "Our AI is finishing other documents right now. Please wait about a minute, then try again. Your upload is saved — nothing is wrong with your file.",
                 },
             ) from error
 
