@@ -348,16 +348,8 @@ async def _get_owner_nok_letter(owner_id: str, nok_id: Optional[str]) -> NOKLett
         doc = await sync_letter_delivery(doc)
         return to_out(load_nok_letter(doc))
 
-    # No doc yet -> build and insert
-    merged = await apply_autofill(owner_id, NOKLetterIn(), nok_id)
-    now = datetime.utcnow()
-    new_doc = prepare_nok_letter_for_storage(
-        {**merged, "owner_id": owner_id, "created_at": now, "updated_at": now},
-    )
-    res = await nok_letters_collection.insert_one(new_doc)
-    new_doc["_id"] = res.inserted_id
-    new_doc = await sync_letter_delivery(new_doc)
-    return to_out(load_nok_letter(new_doc))
+    # Do not auto-create on GET — empty stubs were marking section 3 complete.
+    raise HTTPException(status_code=404, detail="Letter not found")
 
 
 @router.get("", response_model=NOKLetterOut)

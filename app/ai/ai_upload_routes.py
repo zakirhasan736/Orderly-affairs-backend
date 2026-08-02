@@ -423,7 +423,21 @@ async def preview_ai_document(
 
     path = resolve_stored_ai_document_path(doc)
     if not path:
-        raise HTTPException(status_code=404, detail="Document file missing.")
+        # Content-hash reuse may point at an earlier upload that still has bytes.
+        reused_id = doc.get("reused_from_file_id")
+        if reused_id and str(reused_id) != str(file_id):
+            prior = await ai_documents_collection.find_one(
+                {"_id": reused_id, "user_id": user_id},
+            )
+            if prior:
+                path = resolve_stored_ai_document_path(prior)
+                if path:
+                    doc = prior
+    if not path:
+        raise HTTPException(
+            status_code=404,
+            detail="Document file missing on disk. Re-upload the file to preview it.",
+        )
 
     filename = doc.get("original_filename") or path.name
     media_type = (doc.get("mime_type") or "").strip() or "application/octet-stream"

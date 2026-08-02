@@ -52,7 +52,10 @@ class Settings(BaseSettings):
     STRIPE_SECRET_KEY: str
     STRIPE_PRICE_MONTHLY: str
     STRIPE_PRICE_YEARLY: str
-    TRIAL_DAYS: int = 15
+    # Annual signup tiers (Advantage sale price $199). Blank → YEARLY fallback.
+    STRIPE_PRICE_ESSENTIALS: str | None = None
+    STRIPE_PRICE_ADVANTAGE: str | None = None
+    TRIAL_DAYS: int = 14
 
     # === SMS (Twilio) ===
     TWILIO_ACCOUNT_SID: str

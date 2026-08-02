@@ -135,8 +135,132 @@ def _companies_match(a: str, b: str) -> bool:
     return a in b or b in a
 
 
+def _insurance_detail_score(item: dict) -> int:
+    detail_keys = (
+        "policy_number",
+        "coverage_amount",
+        "premium_info",
+        "beneficiaries",
+        "policy_contact",
+        "notes",
+        "additional_notes",
+        "effective_date",
+        "expiration_date",
+        "renewal_date",
+        "policy_documents",
+        "policy_documents_life",
+        "policy_name",
+        "named_insured",
+        "insured_name",
+    )
+    return sum(1 for key in detail_keys if _as_text(item.get(key)))
+
+
+def _is_thin_insurance_card(item: dict) -> bool:
+    return _insurance_detail_score(item) <= 1
+
+
+_VEHICLE_BRAND_RE = re.compile(
+    r"\b(toyota|honda|jeep|ford|chevrolet|chevy|bmw|mercedes|nissan|hyundai|kia|"
+    r"subaru|mazda|lexus|gmc|ram|dodge|volkswagen|vw|audi|tesla|chrysler|buick|"
+    r"cadillac|acura|infiniti|lincoln|volvo|porsche|mini|mitsubishi)\b",
+    re.I,
+)
+
+
+def _insurance_display_name(item: dict) -> str:
+    return _normalize_comparable(
+        item.get("policy_name")
+        or item.get("named_insured")
+        or item.get("insured_name")
+        or item.get("policy_title")
+        or item.get("account_name")
+    )
+
+
+def _insurance_notes(item: dict) -> str:
+    return _normalize_comparable(
+        item.get("notes")
+        or item.get("additional_notes")
+        or item.get("additional_note")
+        or item.get("comments")
+    )
+
+
+def _insurance_vehicle_fingerprint(item: dict) -> str:
+    vin = _normalize_comparable(
+        item.get("vin") or item.get("vehicle_vin") or item.get("insured_vin")
+    )
+    if vin:
+        return f"vin:{vin}"
+
+    make = _normalize_comparable(
+        item.get("make") or item.get("vehicle_make") or item.get("insured_vehicle_make")
+    )
+    model = _normalize_comparable(
+        item.get("model")
+        or item.get("vehicle_model")
+        or item.get("insured_vehicle_model")
+    )
+    year = _normalize_comparable(
+        item.get("year") or item.get("vehicle_year") or item.get("insured_vehicle_year")
+    )
+    if make or model or year:
+        return f"ymm:{year}|{make}|{model}"
+
+    blob = " ".join(
+        part
+        for part in (
+            _insurance_notes(item),
+            _insurance_display_name(item),
+            _normalize_comparable(item.get("vehicle_description")),
+            _normalize_comparable(item.get("description")),
+            _normalize_comparable(item.get("policy_type_other")),
+        )
+        if part
+    )
+    match = _VEHICLE_BRAND_RE.search(blob)
+    if match:
+        return f"brand:{match.group(1).lower()}"
+    return ""
+
+
+def _insurance_identity_conflicts(existing: dict, incoming: dict) -> bool:
+    vehicle_a = _insurance_vehicle_fingerprint(existing)
+    vehicle_b = _insurance_vehicle_fingerprint(incoming)
+    if vehicle_a and vehicle_b and vehicle_a != vehicle_b:
+        return True
+
+    name_a = _insurance_display_name(existing)
+    name_b = _insurance_display_name(incoming)
+    if (
+        name_a
+        and name_b
+        and name_a != name_b
+        and name_a not in name_b
+        and name_b not in name_a
+    ):
+        return True
+
+    notes_a = _insurance_notes(existing)
+    notes_b = _insurance_notes(incoming)
+    if (
+        notes_a
+        and notes_b
+        and notes_a != notes_b
+        and notes_a not in notes_b
+        and notes_b not in notes_a
+    ):
+        return True
+
+    return False
+
+
 def _insurance_policies_are_duplicates(existing: dict, incoming: dict) -> bool:
     """Match frontend insurancePoliciesAreDuplicates — renew same policy, else add."""
+    if _insurance_identity_conflicts(existing, incoming):
+        return False
+
     existing_policy = _normalize_policy_number(existing.get("policy_number"))
     incoming_policy = _normalize_policy_number(incoming.get("policy_number"))
 
@@ -169,14 +293,12 @@ def _insurance_policies_are_duplicates(existing: dict, incoming: dict) -> bool:
         )
     )
 
-    # One side has a number, the other doesn't → same policy when company+type align
-    if (existing_policy or incoming_policy) and company_and_type_match:
-        return True
-
-    if existing_policy or incoming_policy:
+    if not company_and_type_match:
         return False
 
-    return company_and_type_match
+    # One-sided policy number or no numbers: only thin seed ↔ fuller extract.
+    # Two full Vehicle policies (Honda / Jeep / Toyota) stay separate.
+    return _is_thin_insurance_card(existing) or _is_thin_insurance_card(incoming)
 
 
 def _named_items_are_duplicates(existing: dict, incoming: dict, keys: list[str]) -> bool:
@@ -262,17 +384,18 @@ def _vehicles_are_duplicates(existing: dict, incoming: dict) -> bool:
             or (year_b and make_b and model_b)
         )
         if (
-            existing_identity
-            and incoming_identity
-            and (
-                (make_a and make_b and make_a != make_b)
-                or (model_a and model_b and model_a != model_b)
-                or (year_a and year_b and year_a != year_b)
-            )
+            (make_a and make_b and make_a != make_b)
+            or (model_a and model_b and model_a != model_b)
+            or (year_a and year_b and year_a != year_b)
         ):
             return False
-        if not existing_identity or not incoming_identity:
+        # Thin↔thin OK; enrich thin with full. Never absorb thin into a full card.
+        if not existing_identity and not incoming_identity:
             return True
+        if not existing_identity and incoming_identity:
+            return True
+        if existing_identity and not incoming_identity:
+            return False
         if make_a and make_b and make_a == make_b and (
             not year_a or not year_b or year_a == year_b
         ) and (not model_a or not model_b or model_a == model_b):

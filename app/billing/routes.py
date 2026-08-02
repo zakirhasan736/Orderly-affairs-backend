@@ -14,7 +14,7 @@ class ApplyCouponRequest(BaseModel):
     code: str
 
 class ChangePlanRequest(BaseModel):
-    plan: Literal["monthly", "yearly"]
+    plan: Literal["monthly", "yearly", "essentials", "advantage"]
 
 
 class PauseRequest(BaseModel):
@@ -24,6 +24,27 @@ class PauseRequest(BaseModel):
 # ============================================================
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
+
+
+def resolve_stripe_price_id(plan: str) -> str:
+    """
+    Map plan id → Stripe Price id.
+    Essentials / Advantage are annual signup tiers.
+    Set STRIPE_PRICE_ESSENTIALS / STRIPE_PRICE_ADVANTAGE when ready;
+    until then both fall back to STRIPE_PRICE_YEARLY.
+    """
+    essentials = (settings.STRIPE_PRICE_ESSENTIALS or "").strip() or settings.STRIPE_PRICE_YEARLY
+    advantage = (settings.STRIPE_PRICE_ADVANTAGE or "").strip() or settings.STRIPE_PRICE_YEARLY
+    mapping = {
+        "essentials": essentials,
+        "yearly": settings.STRIPE_PRICE_YEARLY,
+        "advantage": advantage,
+        "monthly": settings.STRIPE_PRICE_MONTHLY,
+    }
+    price_id = mapping.get(plan)
+    if not price_id:
+        raise HTTPException(400, "Invalid plan")
+    return price_id
 
 # ============================================================
 # ROUTER
@@ -57,7 +78,7 @@ async def get_owner_from_token(request: Request, authorization: str | None = Non
 # ============================================================
 
 class StartSubscriptionRequest(BaseModel):
-    plan: Literal["monthly", "yearly"]
+    plan: Literal["monthly", "yearly", "essentials", "advantage"]
     is_trial: bool = False
     # cardless = no card now; card_on_file = verify card now, charge after trial
     trial_mode: Literal["cardless", "card_on_file"] | None = None
@@ -182,20 +203,20 @@ async def start_subscription(
     if not billing.get("customer_id"):
         raise HTTPException(400, "Create a Stripe customer first")
 
-    price_id = (
-        settings.STRIPE_PRICE_MONTHLY
-        if payload.plan == "monthly"
-        else settings.STRIPE_PRICE_YEARLY
-    )
+    price_id = resolve_stripe_price_id(payload.plan)
 
-    subscription = stripe.Subscription.create(
-        customer=billing["customer_id"],
-        items=[{"price": price_id}],
-        trial_period_days=settings.TRIAL_DAYS if payload.is_trial else None,
-        payment_settings={"save_default_payment_method": "on_subscription"},
-        # Auto-renew on by default; user can turn off from settings later
-        cancel_at_period_end=False,
-    )
+    try:
+        subscription = stripe.Subscription.create(
+            customer=billing["customer_id"],
+            items=[{"price": price_id}],
+            trial_period_days=settings.TRIAL_DAYS if payload.is_trial else None,
+            payment_settings={"save_default_payment_method": "on_subscription"},
+            # Auto-renew on by default; user can turn off from settings later
+            cancel_at_period_end=False,
+        )
+    except stripe.error.InvalidRequestError as exc:
+        # Return a proper HTTP error (with CORS) instead of an unhandled 500.
+        raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
     await send_billing_email(
             user=user,
             event=BillingEmailEvent.WELCOME
@@ -324,11 +345,7 @@ async def change_plan(
     if not billing.get("subscription_id"):
         raise HTTPException(400, "No active subscription")
 
-    new_price_id = (
-        settings.STRIPE_PRICE_MONTHLY
-        if payload.plan == "monthly"
-        else settings.STRIPE_PRICE_YEARLY
-    )
+    new_price_id = resolve_stripe_price_id(payload.plan)
 
     # 🔥 ONE atomic Stripe call
     stripe.Subscription.modify(
