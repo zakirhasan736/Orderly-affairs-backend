@@ -126,6 +126,11 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+def family_dashboard_login_url() -> str:
+    """Family collaborator sign-in — separate session from the owner; lands on owner dashboard."""
+    return f"{settings.FRONTEND_URL.rstrip('/')}/family/login"
+
+
 def nextkin_login_url() -> str:
     """Public Next-of-Kin sign-in page (frontend route)."""
     return f"{settings.FRONTEND_URL.rstrip('/')}/next-kin"

@@ -9,6 +9,7 @@ from app.sections.section1_vital_information.schemas import Section1VitalInforma
 from app.security.section_crypto import encrypt_section_data, decrypt_section_data
 from app.security.token_resolver import decode_owner_or_nok_token
 from app.security.access_control import assert_section_read_access
+from app.security.section_write import require_section_write
 
 router = APIRouter(
     prefix="/sections/section1-vital-information",
@@ -26,20 +27,17 @@ async def save_section1(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    decoded = decode_owner_or_nok_token(request, authorization)
-
-    if decoded["role"] != "owner":
-        raise HTTPException(status_code=403)
-
-    owner = await users_collection.find_one({
-        "email": decoded["sub"],
-        "role": "owner",
-    })
+    owner, actor = await require_section_write(
+        request, authorization, SECTION_ID
+    )
+    if not owner:
+        raise HTTPException(status_code=401)
 
     encrypted = encrypt_section_data(str(owner["_id"]), SECTION_ID, payload.dict())
 
     await SectionRepository.upsert(
         owner_id=str(owner["_id"]),
+        actor=actor,
         section_id=SECTION_ID,
         section_key=SECTION_KEY,
         encrypted_data=encrypted,

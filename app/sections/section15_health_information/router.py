@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Header, HTTPException, Request
 from bson import ObjectId
 from app.security.access_control import assert_section_read_access
+from app.security.section_write import require_section_write
 from app.database import users_collection
 from app.repositories.section_repository import SectionRepository
 from app.security.section_crypto import encrypt_section_data, decrypt_section_data
@@ -27,15 +28,11 @@ async def save_section15(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    decoded = decode_owner_or_nok_token(request, authorization)
-
-    if decoded["role"] != "owner":
-        raise HTTPException(status_code=403)
-
-    owner = await users_collection.find_one({
-        "email": decoded["sub"],
-        "role": "owner",
-    })
+    owner, actor = await require_section_write(
+        request, authorization, SECTION_ID
+    )
+    if not owner:
+        raise HTTPException(status_code=401)
 
     raw_data = payload.root
 
@@ -58,6 +55,7 @@ async def save_section15(
 
     await SectionRepository.upsert(
         owner_id=str(owner["_id"]),
+        actor=actor,
         section_id=SECTION_ID,
         section_key=SECTION_KEY,
         encrypted_data=encrypted_payload,

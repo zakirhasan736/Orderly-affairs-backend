@@ -6,6 +6,7 @@ from bson import ObjectId
 from app.database import users_collection
 from app.repositories.section_repository import SectionRepository
 from app.security.access_control import assert_section_read_access
+from app.security.section_write import require_section_write
 from app.security.section_crypto import encrypt_section_data, decrypt_section_data
 from app.security.token_resolver import decode_owner_or_nok_token
 from app.security.section_file_cleanup import process_section_deleted_files
@@ -29,15 +30,11 @@ async def save_section6(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    decoded = decode_owner_or_nok_token(request, authorization)
-
-    if decoded["role"] != "owner":
-        raise HTTPException(status_code=403)
-
-    owner = await users_collection.find_one({
-        "email": decoded["sub"],
-        "role": "owner",
-    })
+    owner, actor = await require_section_write(
+        request, authorization, SECTION_ID
+    )
+    if not owner:
+        raise HTTPException(status_code=401)
 
     raw = payload.root  # ✅ FIXED
 
@@ -53,6 +50,7 @@ async def save_section6(
 
     await SectionRepository.upsert(
         owner_id=str(owner["_id"]),
+        actor=actor,
         section_id="6",
         section_key="section6_main_residence",
         encrypted_data=encrypted_payload,

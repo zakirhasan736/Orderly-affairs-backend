@@ -230,6 +230,7 @@ class DeleteAccountRequest(BaseModel):
 
 
 from app.auth.nextkin_schemas import NextKinCreateRequest
+from app.auth.family_schemas import FamilyCreateRequest, FamilyUpdateRequest
 
 # ---- Next-of-Kin ----
 class NextKinUpdateRequest(BaseModel):
@@ -239,6 +240,7 @@ class NextKinUpdateRequest(BaseModel):
     phone_number: str | None = None
     access_level: str | None = None
     authorized_sections: list[str] | None = None
+    portal_role: str | None = None
     immediate_access: bool | None = None
     nok_letter_received: bool | None = None
     master_password: str | None = None
@@ -1175,15 +1177,26 @@ async def create_nextkin(
     """Create one or many Next-of-Kin users. Same endpoint handles single or list payloads."""
 
     decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only owners can create Next-of-Kin")
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
 
-    owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
-    if not owner:
-        raise HTTPException(status_code=403, detail="Only owners can create Next-of-Kin")
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ with Section 2 access can create Next-of-Kin",
+    )
+
+    from app.auth.access_types import (
+        ACCESS_TYPE_NEXTKIN,
+        NEXTKIN_ACCESS_MONGO_FILTER,
+        validate_nok_authorized_sections,
+    )
+
     count = await users_collection.count_documents({
         "owner_id": str(owner["_id"]),
         "role": "nextkin",
+        "$and": [NEXTKIN_ACCESS_MONGO_FILTER],
     })
 
     enforce_usage(owner, "nextkin", count)
@@ -1191,13 +1204,39 @@ async def create_nextkin(
     async def _create_one(req: NextKinCreateRequest):
         from app.auth.nextkin_validation import prepare_nextkin_create_fields
 
+        # Re-check cap for bulk creates
+        current = await users_collection.count_documents({
+            "owner_id": str(owner["_id"]),
+            "role": "nextkin",
+            "$and": [NEXTKIN_ACCESS_MONGO_FILTER],
+        })
+        try:
+            enforce_usage(owner, "nextkin", current)
+        except HTTPException as exc:
+            return {
+                "email": str(getattr(req, "email", "") or "").lower(),
+                "status": "error",
+                "error": exc.detail,
+            }
+
         try:
             normalized = prepare_nextkin_create_fields(req)
+            sections = validate_nok_authorized_sections(
+                normalized["access_level"],
+                normalized.get("authorized_sections"),
+            )
+            normalized["authorized_sections"] = sections
         except ValueError as exc:
             return {
                 "email": str(getattr(req, "email", "") or "").lower(),
                 "status": "error",
                 "error": str(exc),
+            }
+        except HTTPException as exc:
+            return {
+                "email": str(getattr(req, "email", "") or "").lower(),
+                "status": "error",
+                "error": exc.detail,
             }
 
         email = normalized["email"]
@@ -1222,6 +1261,7 @@ async def create_nextkin(
 
             "access_level": normalized["access_level"],
             "authorized_sections": normalized["authorized_sections"] or [],
+            "access_type": ACCESS_TYPE_NEXTKIN,
             "immediate_access": False,
             "access_timing": "immediate" if req.immediate_access else "upon_death",
             "access_revoked": False,
@@ -1351,13 +1391,23 @@ async def get_my_nextkin(
     authorization: str | None = Header(default=None),
 ):
     decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only owners can view next-kin")
-    owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
-    if not owner:
-        raise HTTPException(status_code=404, detail="Owner not found")
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
 
-    nextkins = users_collection.find({"owner_id": str(owner["_id"]), "role": "nextkin"})
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ with Section 2 access can view Next-of-Kin",
+    )
+
+    from app.auth.access_types import NEXTKIN_ACCESS_MONGO_FILTER
+
+    nextkins = users_collection.find({
+        "owner_id": str(owner["_id"]),
+        "role": "nextkin",
+        "$and": [NEXTKIN_ACCESS_MONGO_FILTER],
+    })
     results = []
     async for nk in nextkins:
         nk = load_nextkin_profile(nk)
@@ -1370,6 +1420,7 @@ async def get_my_nextkin(
 
             "access_level": nk.get("access_level"),
             "authorized_sections": nk.get("authorized_sections", []),
+            "access_type": "nextkin",
             "immediate_access": nk.get("immediate_access", False),
             "nok_letter_received": nk.get("nok_letter_received", False),
 
@@ -1390,6 +1441,58 @@ async def get_my_nextkin(
         })
 
     return results
+
+
+@router.get("/portal-roles")
+async def list_portal_roles(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Role catalog for owner Access Management UI."""
+    decode_access_token(request, authorization)
+    from app.auth.portal_roles import list_portal_roles_for_api
+
+    return {"roles": list_portal_roles_for_api()}
+
+
+@router.get("/section-footprints")
+async def get_section_footprints(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    limit: int = 50,
+    section_id: str | None = None,
+):
+    """Audit trail: who last updated vehicles, insurance, etc."""
+    decoded = decode_access_token(request, authorization)
+    from app.auth.vault_actor import require_owner_or_family_reader
+
+    _, owner = await require_owner_or_family_reader(
+        decoded,
+        detail="Only the owner or family collaborators can view footprints",
+    )
+
+    from app.repositories.section_repository import SectionRepository
+
+    owner_id = str(owner["_id"])
+    history = await SectionRepository.list_footprints(
+        owner_id, limit=limit, section_id=section_id
+    )
+    latest = await SectionRepository.latest_by_section(owner_id)
+    latest_subsections = await SectionRepository.latest_by_subsection(owner_id)
+    if section_id:
+        sid = str(section_id)
+        latest_subsections = [
+            row
+            for row in latest_subsections
+            if str(row.get("section_id") or "") == sid
+        ]
+    return {
+        "latest": latest,
+        "latest_subsections": latest_subsections,
+        "history": history,
+    }
+
+
 # ============================================================
 # 13️⃣ UPDATE NEXT-OF-KIN (Owner only)
 # ============================================================
@@ -1401,12 +1504,15 @@ async def update_nextkin(
     authorization: str | None = Header(default=None),
 ):
     decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only owners can update Next-of-Kin")
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
 
-    owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
-    if not owner:
-        raise HTTPException(status_code=404, detail="Owner not found")
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ with Section 2 access can update Next-of-Kin",
+    )
 
     nextkin = await users_collection.find_one(
         {"_id": ObjectId(nextkin_id), "role": "nextkin", "owner_id": str(owner["_id"])}
@@ -1414,11 +1520,36 @@ async def update_nextkin(
     if not nextkin:
         raise HTTPException(status_code=404, detail="Next-of-Kin not found or not linked to this owner")
 
+    from app.auth.access_types import (
+        is_nextkin_collaborator,
+        validate_nok_authorized_sections,
+    )
+
+    if not is_nextkin_collaborator(nextkin):
+        raise HTTPException(
+            status_code=400,
+            detail="This person is a family collaborator — manage them in Vault Settings",
+        )
+
     current_profile = load_nextkin_profile(dict(nextkin)) or dict(nextkin)
     previous_password = current_profile.get("master_password")
 
     # ✅ Only update provided fields
     update_data = {k: v for k, v in payload.dict().items() if v is not None}
+
+    # NOK never stores write portal roles
+    update_data.pop("portal_role", None)
+    update_data["access_type"] = "nextkin"
+
+    if "authorized_sections" in update_data or "access_level" in update_data:
+        level = update_data.get("access_level") or current_profile.get("access_level")
+        sections = update_data.get(
+            "authorized_sections",
+            current_profile.get("authorized_sections"),
+        )
+        update_data["authorized_sections"] = validate_nok_authorized_sections(
+            level, sections
+        )
 
     if update_data.get("immediate_access") is True:
         update_data["nok_letter_received"] = False
@@ -1437,6 +1568,7 @@ async def update_nextkin(
 
     merged_profile = dict(current_profile)
     merged_profile.update(update_data)
+    merged_profile.pop("portal_role", None)
     merged_profile["owner_id"] = str(owner["_id"])
     merged_profile["_id"] = nextkin["_id"]
     stored_profile = prepare_nextkin_profile_for_storage(merged_profile)
@@ -1453,9 +1585,9 @@ async def update_nextkin(
         if key in nextkin
     }
 
-    update_doc: dict = {"$set": stored_profile}
+    update_doc: dict = {"$set": stored_profile, "$unset": {"portal_role": ""}}
     if unset:
-        update_doc["$unset"] = unset
+        update_doc["$unset"].update(unset)
 
     await users_collection.update_one({"_id": ObjectId(nextkin_id)}, update_doc)
 
@@ -1494,13 +1626,15 @@ async def delete_nextkin(
     Allows an owner to delete a Next-of-Kin they created.
     """
     decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only owners can delete Next-of-Kin")
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
 
-    # 2️⃣ Find owner
-    owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
-    if not owner:
-        raise HTTPException(status_code=404, detail="Owner not found")
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ with Section 2 access can delete Next-of-Kin",
+    )
 
     # 3️⃣ Find and delete nextkin
     nextkin = await users_collection.find_one(
@@ -1508,6 +1642,14 @@ async def delete_nextkin(
     )
     if not nextkin:
         raise HTTPException(status_code=404, detail="Next-of-Kin not found or not linked to this owner")
+
+    from app.auth.access_types import is_nextkin_collaborator
+
+    if not is_nextkin_collaborator(nextkin):
+        raise HTTPException(
+            status_code=400,
+            detail="This person is a family collaborator — manage them in Vault Settings",
+        )
 
     await users_collection.delete_one({"_id": ObjectId(nextkin_id)})
 
@@ -1546,6 +1688,60 @@ async def delete_nextkin(
         "message": f"Next-of-Kin '{nextkin.get('full_name') or nextkin['email']}' deleted successfully.",
         "deleted_id": nextkin_id,
     }
+
+
+# ============================================================
+# FAMILY COLLABORATORS (Vault Settings — separate from Section 2)
+# ============================================================
+@router.post("/create-family")
+async def create_family(
+    payload: FamilyCreateRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    from app.auth.family_routes import create_family_member
+
+    return await create_family_member(
+        payload,
+        request,
+        authorization,
+        generate_password=generate_temp_password,
+    )
+
+
+@router.get("/my-family")
+async def get_my_family(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    from app.auth.family_routes import list_family_members
+
+    return await list_family_members(request, authorization)
+
+
+@router.put("/update-family/{family_id}")
+async def update_family(
+    family_id: str,
+    payload: FamilyUpdateRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    from app.auth.family_routes import update_family_member
+
+    return await update_family_member(family_id, payload, request, authorization)
+
+
+@router.delete("/delete-family/{family_id}")
+async def delete_family(
+    family_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    from app.auth.family_routes import delete_family_member
+
+    return await delete_family_member(family_id, request, authorization)
+
+
 # app/auth/routes.py  (ADD THIS NEW ENDPOINT ANYWHERE AFTER THE ROUTER IS CREATED)
 
 
@@ -1605,6 +1801,12 @@ async def get_nextkin_access(
         "full_access": full_access,
         "authorized_sections": "all" if full_access else nextkin.get("authorized_sections", []),
         "access_level": access_level,
+        "access_type": nextkin.get("access_type") or "nextkin",
+        "portal_role": (
+            (nextkin.get("portal_role") or "viewer")
+            if (nextkin.get("access_type") == "family")
+            else None
+        ),
         "immediate_access": True,
         "access_timing": nextkin.get("access_timing"),
         "nok_letter_received": nextkin.get("nok_letter_received", False),
@@ -1629,14 +1831,15 @@ async def approve_nextkin_access(
     authorization: str | None = Header(default=None),
 ):
     decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only owners can approve access")
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
 
-    owner = await users_collection.find_one(
-        {"email": decoded["sub"], "role": "owner"}
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ with Section 2 access can approve Next-of-Kin",
     )
-    if not owner:
-        raise HTTPException(status_code=404, detail="Owner not found")
 
     nextkin = await users_collection.find_one(
         {
@@ -1647,6 +1850,14 @@ async def approve_nextkin_access(
     )
     if not nextkin:
         raise HTTPException(status_code=404, detail="Next-of-Kin not found")
+
+    from app.auth.access_types import is_nextkin_collaborator
+
+    if not is_nextkin_collaborator(nextkin):
+        raise HTTPException(
+            status_code=400,
+            detail="Family collaborators are always active — manage them in Vault Settings",
+        )
 
     nextkin_profile = load_nextkin_profile(dict(nextkin)) or dict(nextkin)
     await _approve_and_notify_if_needed(
@@ -1669,14 +1880,17 @@ async def approve_all_nextkin_access(
     authorization: str | None = Header(default=None),
 ):
     decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only owners can approve access")
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
 
-    owner = await users_collection.find_one(
-        {"email": decoded["sub"], "role": "owner"}
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ with Section 2 access can approve Next-of-Kin",
     )
-    if not owner:
-        raise HTTPException(status_code=404, detail="Owner not found")
+
+    from app.auth.access_types import NEXTKIN_ACCESS_MONGO_FILTER, is_nextkin_collaborator
 
     cursor = users_collection.find(
         {
@@ -1684,10 +1898,13 @@ async def approve_all_nextkin_access(
             "owner_id": str(owner["_id"]),
             "immediate_access": False,
             "access_revoked": {"$ne": True},
+            "$and": [NEXTKIN_ACCESS_MONGO_FILTER],
         }
     )
     approved = 0
     async for nextkin in cursor:
+        if not is_nextkin_collaborator(nextkin):
+            continue
         nextkin_profile = load_nextkin_profile(dict(nextkin)) or dict(nextkin)
         await _approve_and_notify_if_needed(
             nextkin_profile,
@@ -1712,13 +1929,15 @@ async def revoke_nextkin_access(
     authorization: str | None = Header(default=None),
 ):
     decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only owners can manage Next-of-Kin access")
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
 
-    # owner
-    owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
-    if not owner:
-        raise HTTPException(status_code=404, detail="Owner not found")
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ with Section 2 access can revoke Next-of-Kin",
+    )
 
     # target nextkin
     nextkin = await users_collection.find_one(
@@ -1726,6 +1945,14 @@ async def revoke_nextkin_access(
     )
     if not nextkin:
         raise HTTPException(status_code=404, detail="Next-of-Kin not found or not linked to this owner")
+
+    from app.auth.access_types import is_nextkin_collaborator
+
+    if not is_nextkin_collaborator(nextkin):
+        raise HTTPException(
+            status_code=400,
+            detail="Family collaborators are managed in Vault Settings",
+        )
 
     await _approve_and_notify_if_needed(nextkin, owner, approved=False)
 
@@ -1744,15 +1971,24 @@ async def revoke_all_nextkin_access(
     authorization: str | None = Header(default=None),
 ):
     decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only owners can manage Next-of-Kin access")
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
 
-    owner = await users_collection.find_one({"email": decoded["sub"], "role": "owner"})
-    if not owner:
-        raise HTTPException(status_code=404, detail="Owner not found")
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ with Section 2 access can revoke Next-of-Kin",
+    )
 
-    cursor = users_collection.find({"role": "nextkin", "owner_id": str(owner["_id"])})
-    nextkins = [nk async for nk in cursor]
+    from app.auth.access_types import NEXTKIN_ACCESS_MONGO_FILTER, is_nextkin_collaborator
+
+    cursor = users_collection.find({
+        "role": "nextkin",
+        "owner_id": str(owner["_id"]),
+        "$and": [NEXTKIN_ACCESS_MONGO_FILTER],
+    })
+    nextkins = [nk async for nk in cursor if is_nextkin_collaborator(nk)]
 
     if not nextkins:
         return {"message": "No Next-of-Kin found for this owner", "updated": 0, "emailed": 0}
@@ -1760,7 +1996,11 @@ async def revoke_all_nextkin_access(
     # bulk update in DB first
     now = datetime.utcnow()
     bulk_res = await users_collection.update_many(
-        {"role": "nextkin", "owner_id": str(owner["_id"])},
+        {
+            "role": "nextkin",
+            "owner_id": str(owner["_id"]),
+            "$and": [NEXTKIN_ACCESS_MONGO_FILTER],
+        },
         {"$set": {"immediate_access": False, "updated_at": now}},
     )
 
@@ -2314,6 +2554,26 @@ async def get_session(request: Request):
             "email": user.get("email"),
             "owner_id": str(user.get("owner_id") or user.get("_id")),
         }
+        if role == "nextkin":
+            from app.auth.access_types import resolve_access_type
+            from app.auth.portal_roles import (
+                resolve_dashboard_permissions,
+                role_label,
+            )
+
+            access_type = resolve_access_type(user)
+            payload["access_type"] = access_type
+            if access_type == "family":
+                payload["portal_role"] = user.get("portal_role") or "viewer"
+                payload["portal_role_label"] = role_label(user.get("portal_role"))
+                payload["dashboard_permissions"] = resolve_dashboard_permissions(
+                    user
+                )
+                payload["authorized_sections"] = user.get(
+                    "authorized_sections"
+                ) or []
+                payload["access_level"] = user.get("access_level")
+                payload["full_name"] = user.get("full_name")
         if role == "owner":
             from app.billing.access import billing_session_flags
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
-from app.config import nextkin_login_url, settings
+from app.config import family_dashboard_login_url, nextkin_login_url, settings
 from app.notifications.display_names import (
     resolve_nextkin_display_name,
     resolve_owner_display_name,
@@ -60,6 +60,8 @@ def render_nok_invite_email(
     login_url: str,
     pending_approval: bool,
     access_timing: str = "immediate",
+    portal_role_label: str | None = None,
+    access_summary: str | None = None,
 ) -> str:
     """Paper/ink NOK invite — fluid max-width, brand logo on white tile."""
     from app.notifications.email_layout import email_brand_mark
@@ -67,8 +69,9 @@ def render_nok_invite_email(
     brand_mark = email_brand_mark()
     owner = escape(owner_name)
     hello = escape(_first_name(recipient_name))
-    headline = f"{owner_name} has named you as their next of kin."
-    subject_line = f"{owner_name} has named you as next of kin"
+    role_line = escape(portal_role_label or "Viewer")
+    access_line = escape(access_summary or "Sections granted by the kit owner")
+    subject_line = f"{owner_name} has shared kit access with you"
     upon_death = str(access_timing or "").strip().lower() in {
         "upon_death",
         "upon-death",
@@ -109,16 +112,30 @@ def render_nok_invite_email(
     else:
         intro = (
             f"{owner} keeps an Orderly Affairs Kit — one place holding the accounts, "
-            "documents, and wishes their family would need. They've given you a role in it."
+            "documents, and wishes their family would need. They've invited you to help "
+            f"with a <strong>{role_line}</strong> role."
         )
         pwd_hint = (
             "Use it once with this email address. You'll set your own password on first sign-in."
         )
         after_cta = (
+            f"Your access: <strong>{role_line}</strong> · {access_line}. "
             "Sign in when you're ready. If you weren't expecting this, you can ignore "
             "the email — no further access is granted by doing nothing."
         )
         cta_label = "Sign in to the kit"
+
+    access_block = f"""
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0; border:1px solid #e4e6e1; border-radius:12px; overflow:hidden;">
+                <tr>
+                  <td style="padding:16px 20px; background:#f7f6f2;">
+                    <p style="margin:0; font-family:{FONT_SANS}; font-size:12.5px; font-weight:500; color:#5c6b66;">Your access</p>
+                    <p style="margin:8px 0 0 0; font-family:{FONT_SANS}; font-size:15px; font-weight:600; color:#132b26;">{role_line}</p>
+                    <p style="margin:6px 0 0 0; font-family:{FONT_SANS}; font-size:13px; color:#6e7c77; line-height:1.5;">{access_line}</p>
+                  </td>
+                </tr>
+              </table>
+"""
 
     password_block = ""
     if plain_password:
@@ -147,6 +164,7 @@ def render_nok_invite_email(
               </table>
 """
 
+    headline = f"{owner_name} shared kit access with you"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -214,6 +232,7 @@ def render_nok_invite_email(
                 {intro}
               </p>
 
+              {access_block}
               {password_block}
 
               <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0; width:100%;">
@@ -260,6 +279,20 @@ async def send_nextkin_email(
     nk_name = resolve_nextkin_display_name(nextkin)
     login = nextkin_login_url()
 
+    from app.auth.portal_roles import role_label
+
+    portal_role_label = role_label(nextkin.get("portal_role"))
+    access_level = nextkin.get("access_level") or "Full Kit Access"
+    if access_level == "Full Kit Access":
+        access_summary = "Full kit access"
+    else:
+        sections = nextkin.get("authorized_sections") or []
+        access_summary = (
+            f"Selected sections ({len(sections)})"
+            if sections
+            else "Selected sections"
+        )
+
     if event == NextKinEmailEvent.CREATED:
         subject = f"{owner_name} has named you as next of kin"
         html = render_nok_invite_email(
@@ -269,10 +302,12 @@ async def send_nextkin_email(
             login_url=login,
             pending_approval=False,
             access_timing="upon_death",
+            portal_role_label=portal_role_label,
+            access_summary=access_summary,
         )
 
     elif event == NextKinEmailEvent.ACCESS_APPROVED:
-        subject = f"{owner_name} has named you as next of kin"
+        subject = f"{owner_name} shared kit access with you"
         html = render_nok_invite_email(
             owner_name=owner_name,
             recipient_name=nk_name,
@@ -280,6 +315,8 @@ async def send_nextkin_email(
             login_url=login,
             pending_approval=False,
             access_timing="immediate",
+            portal_role_label=portal_role_label,
+            access_summary=access_summary,
         )
 
     elif event == NextKinEmailEvent.ACCESS_REVOKED:
@@ -310,6 +347,8 @@ async def send_nextkin_email(
                 if nextkin.get("immediate_access")
                 else "upon_death"
             ),
+            portal_role_label=portal_role_label,
+            access_summary=access_summary,
         )
 
     elif event == NextKinEmailEvent.DELETED:
@@ -374,6 +413,97 @@ async def send_nextkin_email(
         sg.send(message)
     except Exception as e:
         print(f"NextKin email failed ({event}):", e)
+
+
+async def send_family_invite_email(
+    *,
+    family: dict,
+    owner: dict,
+    plain_password: str | None = None,
+    password_only: bool = False,
+):
+    """Invite a family collaborator to the owner dashboard (separate session)."""
+    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
+    owner_name = await resolve_owner_display_name(owner)
+    recipient = resolve_nextkin_display_name(family)
+    login = family_dashboard_login_url()
+
+    from app.auth.portal_roles import role_label, resolve_dashboard_permissions
+
+    role = role_label(family.get("portal_role"))
+    perms = resolve_dashboard_permissions(family)
+    access_level = family.get("access_level") or "Full Kit Access"
+    if access_level == "Full Kit Access":
+        areas = "Full owner dashboard (all vault sections + granted management areas)"
+    else:
+        sections = family.get("authorized_sections") or []
+        areas = f"Selected dashboard areas ({len(sections)})"
+
+    capability_bits = []
+    if perms.get("can_upload"):
+        capability_bits.append("document uploads")
+    if perms.get("can_manage_family_access"):
+        capability_bits.append("manage family access")
+    if perms.get("can_manage_nextkin"):
+        capability_bits.append("manage Next of Kin (Section 2)")
+    if perms.get("can_manage_billing"):
+        capability_bits.append("view billing")
+    capabilities = (
+        ", ".join(capability_bits) if capability_bits else "view granted areas only"
+    )
+
+    pwd_block = ""
+    if plain_password:
+        pwd_block = email_callout(
+            f"<strong>Temporary password:</strong> "
+            f"<code style='font-size:16px;letter-spacing:0.06em'>"
+            f"{escape(plain_password)}</code>",
+            tone="info",
+        )
+
+    if password_only:
+        subject = f"{owner_name} updated your dashboard password"
+        title = "Password updated"
+        intro = (
+            f"<b>{escape(owner_name)}</b> updated your family collaborator "
+            "password for the owner dashboard."
+        )
+    else:
+        subject = f"{owner_name} invited you to their Orderly Affairs dashboard"
+        title = "Family dashboard access"
+        intro = (
+            f"<b>{escape(owner_name)}</b> invited you as a family collaborator "
+            f"with the <b>{escape(role)}</b> role. This is a separate login from "
+            "the owner — you must sign in with your own email and password. "
+            "Signing in as the owner does not open your session."
+        )
+
+    html = render_simple_email(
+        title=title,
+        greeting_name=recipient,
+        paragraphs=[
+            intro,
+            f"<b>Role:</b> {escape(role)} · <b>Access:</b> {escape(areas)}",
+            f"<b>Capabilities:</b> {escape(capabilities)}",
+            "Use the button below to open the family collaborator sign-in page "
+            "and access the owner dashboard areas you were granted.",
+        ],
+        callout_html=pwd_block or None,
+        cta_url=login,
+        cta_label="Sign in to the dashboard",
+        preheader="Your family collaborator dashboard invite",
+    )
+
+    message = Mail(
+        from_email=settings.EMAIL_SENDER,
+        to_emails=family["email"],
+        subject=subject,
+        html_content=html,
+    )
+    try:
+        sg.send(message)
+    except Exception as e:
+        print("Family invite email failed:", e)
 
 
 async def send_message_email(*, to: str, subject: str, html: str):

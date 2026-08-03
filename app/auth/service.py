@@ -68,20 +68,33 @@ async def grant_upon_death_access(owner_ref: str) -> int:
     now = datetime.now(timezone.utc)
     granted = 0
 
+    from app.auth.access_types import (
+        ACCESS_TYPE_FAMILY,
+        NEXTKIN_ACCESS_MONGO_FILTER,
+        resolve_access_type,
+    )
+
     cursor = users_collection.find(
         {
             "role": "nextkin",
             "owner_id": owner_id,
             "immediate_access": False,
             "access_revoked": {"$ne": True},
-            "$or": [
-                {"access_timing": "upon_death"},
-                {"access_timing": {"$exists": False}},
+            "$and": [
+                NEXTKIN_ACCESS_MONGO_FILTER,
+                {
+                    "$or": [
+                        {"access_timing": "upon_death"},
+                        {"access_timing": {"$exists": False}},
+                    ]
+                },
             ],
         }
     )
 
     async for nk in cursor:
+        if resolve_access_type(nk) == ACCESS_TYPE_FAMILY:
+            continue
         if nk.get("access_timing") == "immediate":
             continue
 

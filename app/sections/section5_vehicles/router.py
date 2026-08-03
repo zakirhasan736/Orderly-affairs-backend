@@ -8,6 +8,7 @@ from app.sections.section5_vehicles.schemas import Section5VehiclesPayload
 from app.security.token_resolver import decode_owner_or_nok_token
 from app.security.section_file_cleanup import process_section_deleted_files
 from app.security.access_control import assert_section_read_access
+from app.security.section_write import require_section_write
 
 router = APIRouter(
     prefix="/sections/section5-vehicles",
@@ -24,15 +25,11 @@ async def save_section5(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    decoded = decode_owner_or_nok_token(request, authorization)
-
-    if decoded["role"] != "owner":
-        raise HTTPException(status_code=403)
-
-    owner = await users_collection.find_one({
-        "email": decoded["sub"],
-        "role": "owner",
-    })
+    owner, actor = await require_section_write(
+        request, authorization, SECTION_ID
+    )
+    if not owner:
+        raise HTTPException(status_code=401)
 
     raw_data = payload.root
 
@@ -54,6 +51,7 @@ async def save_section5(
 
     await SectionRepository.upsert(
         owner_id=str(owner["_id"]),
+        actor=actor,
         section_id=SECTION_ID,
         section_key=SECTION_KEY,
         encrypted_data=encrypted_payload,  # 🔐 ENCRYPTED

@@ -15,6 +15,8 @@ class NextKinCreateRequest(BaseModel):
     phone_number: str | None = None
     access_level: str = "Full Kit Access"
     authorized_sections: list[str] | None = []
+    # Ignored for Next-of-Kin (always read-only). Kept optional for older clients.
+    portal_role: str | None = None
     immediate_access: bool | None = False
     nok_letter_received: bool | None = False
     master_password: str | None = None

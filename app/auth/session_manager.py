@@ -28,6 +28,9 @@ def _refresh_max_age() -> int:
 
 
 async def issue_owner_session(response: Response, user: dict) -> dict:
+    # Owner and family/NOK sessions must never share cookies.
+    clear_auth_cookies(response, owner=False, nok=True)
+
     access = create_access_token(user)
     refresh_plain, _ = await create_refresh_token(
         user_id=str(user["_id"]),
@@ -69,6 +72,9 @@ async def issue_owner_session(response: Response, user: dict) -> dict:
 
 
 async def issue_nok_session(response: Response, user: dict) -> dict:
+    # Family/NOK login clears owner cookies so sessions stay isolated.
+    clear_auth_cookies(response, owner=True, nok=False)
+
     access = create_access_token(user)
     refresh_plain, _ = await create_refresh_token(
         user_id=str(user["_id"]),
@@ -89,12 +95,33 @@ async def issue_nok_session(response: Response, user: dict) -> dict:
         max_age_seconds=_refresh_max_age(),
     )
 
+    from app.auth.access_types import resolve_access_type
+    from app.auth.portal_roles import resolve_dashboard_permissions, role_label
+
+    access_type = resolve_access_type(user)
     return {
         "authenticated": True,
         "role": "nextkin",
+        "access_type": access_type,
+        "portal_role": user.get("portal_role") if access_type == "family" else None,
+        "portal_role_label": (
+            role_label(user.get("portal_role")) if access_type == "family" else None
+        ),
+        "dashboard_permissions": (
+            resolve_dashboard_permissions(user) if access_type == "family" else None
+        ),
+        "authorized_sections": (
+            user.get("authorized_sections") or [] if access_type == "family" else None
+        ),
+        "access_level": user.get("access_level") if access_type == "family" else None,
+        "full_name": user.get("full_name"),
         "owner_id": str(user.get("owner_id")),
         "email": user.get("email"),
-        "message": "Next-of-Kin login successful",
+        "message": (
+            "Family collaborator login successful"
+            if access_type == "family"
+            else "Next-of-Kin login successful"
+        ),
     }
 
 

@@ -41,6 +41,7 @@ auth_rate_limits_collection = db["auth_rate_limits"]
 support_threads_collection = db["support_threads"]
 support_messages_collection = db["support_messages"]
 feedback_collection = db["feedback"]
+section_footprints_collection = db["section_footprints"]
 
 if settings.APP_ENV == "development":
     print("MongoDB connected successfully")

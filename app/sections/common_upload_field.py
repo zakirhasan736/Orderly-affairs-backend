@@ -7,6 +7,10 @@ class UploadedFile(BaseModel):
     url: str
     public_id: str
     version: Optional[int] = 1
+    uploaded_by_name: Optional[str] = None
+    uploaded_by_email: Optional[str] = None
+    uploaded_by_role: Optional[str] = None  # owner | family | nextkin
+    uploaded_at: Optional[str] = None
     model_config = {"extra": "ignore"}
 
 

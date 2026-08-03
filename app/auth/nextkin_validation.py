@@ -12,6 +12,7 @@ from typing import Any
 
 FULL_KIT_ACCESS = "Full Kit Access"
 SECTION_SPECIFIC_ACCESS = "Section-Specific Access"
+MAX_NOK_AUTHORIZED_SECTIONS = 5
 
 
 def _is_blank(value: Any) -> bool:
@@ -59,6 +60,11 @@ def validate_nextkin_required_fields(
     sections = [s for s in (authorized_sections or []) if str(s).strip()]
     if level == SECTION_SPECIFIC_ACCESS and not sections:
         return "Select at least one section for section-specific access"
+    if level == SECTION_SPECIFIC_ACCESS and len(sections) > MAX_NOK_AUTHORIZED_SECTIONS:
+        return (
+            f"Select at most {MAX_NOK_AUTHORIZED_SECTIONS} sections "
+            "for Next-of-Kin section-specific access"
+        )
 
     if require_password and _is_blank(master_password):
         return "Master password is required"
