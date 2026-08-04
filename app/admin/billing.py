@@ -5,22 +5,16 @@ import stripe
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 
-from app.billing.access import compute_comp_end, default_billing_fields, get_comp
+from app.admin.deps import require_admin
+from app.admin.permissions import user_can_clear_rate_limits
+from app.admin.users import apply_complimentary_grant
+from app.billing.access import get_comp
 from app.config import settings
 from app.database import users_collection
-from app.notifications.comp_emails import CompEmailEvent, send_comp_email
-from app.security.token_resolver import decode_access_token
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
 admin_billing_router = APIRouter(prefix="/admin/billing", tags=["admin-billing"])
-
-
-def require_admin(request: Request, authorization: str | None):
-    decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "admin":
-        raise HTTPException(403, "Admin only")
-    return decoded
 
 
 class GrantCompRequest(BaseModel):
@@ -53,7 +47,7 @@ async def billing_overview(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    require_admin(request, authorization)
+    await require_admin(request, authorization)
 
     pipeline = [
         {"$group": {
@@ -71,7 +65,7 @@ async def billing_users(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    require_admin(request, authorization)
+    await require_admin(request, authorization)
 
     cursor = users_collection.find(
         {"role": "owner"},
@@ -116,69 +110,24 @@ async def grant_complimentary(
     - lifetime: full free access, no reminder emails, never auto-expires
     - duration: free until ends_at; reminders at ~30d / 7d / 1d before end
     """
-    admin = require_admin(request, authorization)
+    admin = await require_admin(request, authorization)
     email = payload.email.lower().strip()
-    now = datetime.utcnow()
 
     user = await users_collection.find_one({"email": email, "role": "owner"})
     if not user:
         raise HTTPException(404, "Owner account not found")
 
-    ends_at = compute_comp_end(
+    return await apply_complimentary_grant(
+        user=user,
         kind=payload.kind,
         duration_days=payload.duration_days,
         duration_months=payload.duration_months,
         duration_years=payload.duration_years,
-        starts_at=now,
+        note=payload.note,
+        send_email=payload.send_email,
+        cancel_stripe_subscription=payload.cancel_stripe_subscription,
+        granted_by=admin.get("sub") or admin.get("email"),
     )
-
-    billing = user.get("billing") or default_billing_fields()
-    sub_id = billing.get("subscription_id")
-
-    if payload.cancel_stripe_subscription and sub_id:
-        try:
-            stripe.Subscription.delete(sub_id)
-        except Exception as exc:
-            print(f"grant-comp: could not cancel Stripe sub {sub_id}: {exc}")
-
-    update = {
-        "billing.status": "complimentary",
-        "billing.is_trial": False,
-        "billing.plan": "complimentary",
-        "billing.subscription_id": None if payload.cancel_stripe_subscription else sub_id,
-        "billing.lock_reason": None,
-        "billing.locked_at": None,
-        "billing.comp.enabled": True,
-        "billing.comp.kind": payload.kind,
-        "billing.comp.starts_at": now,
-        "billing.comp.ends_at": ends_at,
-        "billing.comp.granted_by": admin.get("sub") or admin.get("email"),
-        "billing.comp.granted_at": now,
-        "billing.comp.note": payload.note,
-        "billing.comp.reminders_sent": [],
-        "updated_at": now,
-    }
-
-    await users_collection.update_one({"_id": user["_id"]}, {"$set": update})
-
-    if payload.send_email:
-        updated = await users_collection.find_one({"_id": user["_id"]})
-        try:
-            await send_comp_email(
-                user=updated or user,
-                event=CompEmailEvent.GRANTED,
-                ends_at=ends_at,
-            )
-        except Exception as exc:
-            print(f"grant-comp email failed for {email}: {exc}")
-
-    return {
-        "message": "Complimentary access granted",
-        "email": email,
-        "kind": payload.kind,
-        "ends_at": ends_at,
-        "status": "complimentary",
-    }
 
 
 @admin_billing_router.post("/revoke-complimentary")
@@ -187,7 +136,7 @@ async def revoke_complimentary(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    require_admin(request, authorization)
+    await require_admin(request, authorization)
     email = payload.email.lower().strip()
     now = datetime.utcnow()
 
@@ -228,7 +177,9 @@ async def clear_rate_limits(
     Unstick a user blocked by inflated rate-limit timers.
     Clears auth_rate_limits docs (and optionally recent OTP send logs).
     """
-    require_admin(request, authorization)
+    admin = await require_admin(request, authorization)
+    if not user_can_clear_rate_limits(admin):
+        raise HTTPException(403, "Not allowed to clear rate limits")
     from app.database import auth_rate_limits_collection, otp_fraud_logs_collection
 
     deleted_auth = 0
@@ -266,7 +217,7 @@ async def admin_mrr(
     authorization: str | None = Header(default=None),
 ):
     """Platform-wide Stripe MRR — admin only."""
-    require_admin(request, authorization)
+    await require_admin(request, authorization)
 
     invoices = stripe.Invoice.list(status="paid", limit=100)
     mrr: dict[str, float] = {}
@@ -280,3 +231,126 @@ async def admin_mrr(
         [{"month": k, "revenue": v} for k, v in mrr.items()],
         key=lambda x: x["month"],
     )
+
+
+@admin_billing_router.get("/report")
+async def billing_report(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Monthly transaction report + recent invoice ledger from Stripe."""
+    await require_admin(request, authorization)
+
+    months: dict[str, dict] = {}
+    transactions: list[dict] = []
+    disputes = 0
+    failed = 0
+    current_mrr = 0.0
+    current_month = datetime.utcnow().strftime("%Y-%m")
+
+    try:
+        paid = stripe.Invoice.list(status="paid", limit=100)
+        for inv in paid.data:
+            month = datetime.utcfromtimestamp(inv.created).strftime("%Y-%m")
+            bucket = months.setdefault(
+                month,
+                {
+                    "month": month,
+                    "txns": 0,
+                    "gross": 0.0,
+                    "refunds": 0.0,
+                    "net": 0.0,
+                    "mrr": 0.0,
+                },
+            )
+            amount = (inv.amount_paid or 0) / 100
+            bucket["txns"] += 1
+            bucket["gross"] += amount
+            bucket["net"] += amount
+            bucket["mrr"] += amount
+
+            if len(transactions) < 50:
+                transactions.append(
+                    {
+                        "date": datetime.utcfromtimestamp(inv.created).isoformat(),
+                        "customer": inv.customer_email or "Unknown",
+                        "invoice": inv.number or inv.id,
+                        "method": "Card",
+                        "amount": amount,
+                        "status": "paid",
+                        "currency": (inv.currency or "usd").upper(),
+                    }
+                )
+    except Exception as exc:
+        print(f"billing report paid invoices: {exc}")
+
+    try:
+        open_inv = stripe.Invoice.list(status="open", limit=30)
+        for inv in open_inv.data:
+            failed += 1
+            if len(transactions) < 80:
+                transactions.append(
+                    {
+                        "date": datetime.utcfromtimestamp(inv.created).isoformat(),
+                        "customer": inv.customer_email or "Unknown",
+                        "invoice": inv.number or inv.id,
+                        "method": "Card",
+                        "amount": (inv.amount_due or 0) / 100,
+                        "status": "failed",
+                        "currency": (inv.currency or "usd").upper(),
+                    }
+                )
+    except Exception as exc:
+        print(f"billing report open invoices: {exc}")
+
+    try:
+        # Stripe Dispute list if available
+        if hasattr(stripe, "Dispute"):
+            for d in stripe.Dispute.list(limit=20).data:
+                disputes += 1
+                if len(transactions) < 100:
+                    transactions.append(
+                        {
+                            "date": datetime.utcfromtimestamp(d.created).isoformat(),
+                            "customer": "Disputed charge",
+                            "invoice": d.charge or d.id,
+                            "method": "Card",
+                            "amount": (d.amount or 0) / 100,
+                            "status": "disputed",
+                            "currency": (d.currency or "usd").upper(),
+                        }
+                    )
+    except Exception as exc:
+        print(f"billing report disputes: {exc}")
+
+    report_rows = []
+    sorted_months = sorted(months.keys(), reverse=True)[:6]
+    prev_net = None
+    for month in reversed(sorted_months):
+        row = months[month]
+        row["gross"] = round(row["gross"], 2)
+        row["refunds"] = round(row["refunds"], 2)
+        row["net"] = round(row["net"], 2)
+        row["mrr"] = round(row["mrr"], 2)
+        if prev_net and prev_net > 0:
+            row["delta_pct"] = round(((row["net"] - prev_net) / prev_net) * 100, 1)
+        else:
+            row["delta_pct"] = None
+        prev_net = row["net"]
+        report_rows.append(row)
+        if month == current_month:
+            current_mrr = row["mrr"]
+
+    if not current_mrr and report_rows:
+        current_mrr = report_rows[-1]["mrr"]
+
+    transactions.sort(key=lambda t: t["date"], reverse=True)
+
+    return {
+        "mrr": current_mrr,
+        "net_month": current_mrr,
+        "failed": failed,
+        "disputes": disputes,
+        "monthly": list(reversed(report_rows)),
+        "transactions": transactions[:40],
+    }

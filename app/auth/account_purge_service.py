@@ -89,14 +89,16 @@ async def _cancel_stripe_for_owner(owner: dict) -> dict:
 
 
 async def _purge_ai_documents(owner: dict) -> int:
+    from app.ai.ai_document_storage import destroy_ai_document_assets
+
     owner_id = str(owner["_id"])
     deleted = 0
     cursor = ai_documents_collection.find({"user_id": owner_id})
     async for doc in cursor:
-        _safe_delete_path(doc.get("path"))
+        destroy_ai_document_assets(doc)
         await ai_documents_collection.delete_one({"_id": doc["_id"]})
         deleted += 1
-    # Remove the whole vault folder (covers orphans + uuid layout).
+    # Remove the whole vault folder (covers legacy orphans + uuid layout).
     await purge_owner_vault_dir(owner)
     return deleted
 

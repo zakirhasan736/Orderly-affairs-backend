@@ -476,6 +476,132 @@ async def apply_coupon(
 
     return {"message": "Coupon applied"}
 
+
+class RedeemAccessCouponRequest(BaseModel):
+    code: str
+
+
+@billing_router.post("/redeem-access-coupon")
+async def redeem_access_coupon(
+    payload: RedeemAccessCouponRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Redeem a platform admin coupon (trial days or lifetime complimentary).
+    Distinct from Stripe subscription coupons via /apply-coupon.
+    """
+    from app.admin.users import apply_complimentary_grant
+    from app.billing.access import default_billing_fields
+    from app.database import admin_coupons_collection
+
+    user = await get_owner_from_token(request, authorization)
+    code = (payload.code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "Coupon code required")
+
+    now = datetime.utcnow()
+    coupon = await admin_coupons_collection.find_one(
+        {
+            "code": {"$regex": f"^{code}$", "$options": "i"},
+            "status": "unused",
+        }
+    )
+    if not coupon:
+        raise HTTPException(404, "Invalid or already used coupon")
+
+    expires_at = coupon.get("expires_at")
+    if expires_at is not None:
+        if getattr(expires_at, "tzinfo", None) is not None:
+            expires_at = expires_at.replace(tzinfo=None)
+        if expires_at <= now:
+            raise HTTPException(400, "Coupon has expired")
+
+    kind = coupon.get("kind")
+    if kind not in ("lifetime", "duration"):
+        raise HTTPException(400, "Invalid coupon kind")
+
+    duration_days = coupon.get("duration_days")
+    if kind == "duration" and not duration_days:
+        raise HTTPException(400, "Coupon is misconfigured")
+
+    # Mark redeemed first (optimistic lock)
+    claim = await admin_coupons_collection.find_one_and_update(
+        {"_id": coupon["_id"], "status": "unused"},
+        {
+            "$set": {
+                "status": "redeemed",
+                "redeemed_at": now,
+                "redeemed_by": user.get("email"),
+                "redeemed_user_id": str(user["_id"]),
+            }
+        },
+    )
+    if not claim:
+        raise HTTPException(409, "Coupon already redeemed")
+
+    if kind == "lifetime":
+        result = await apply_complimentary_grant(
+            user=user,
+            kind="lifetime",
+            note=f"Coupon {coupon.get('code')}",
+            send_email=True,
+            cancel_stripe_subscription=True,
+            granted_by=f"coupon:{coupon.get('code')}",
+        )
+        return {
+            "message": "Lifetime complimentary access applied",
+            "kind": "lifetime",
+            "code": coupon.get("code"),
+            **{k: v for k, v in result.items() if k != "message"},
+        }
+
+    # Duration: extend trial OR grant complimentary for duration_days
+    billing = user.get("billing") or default_billing_fields()
+    status = billing.get("status") or "pending"
+
+    if status == "trialing" and billing.get("trial_end"):
+        trial_end = billing["trial_end"]
+        if getattr(trial_end, "tzinfo", None) is not None:
+            trial_end = trial_end.replace(tzinfo=None)
+        base = trial_end if trial_end > now else now
+        new_end = base + timedelta(days=int(duration_days))
+        await users_collection.update_one(
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "billing.trial_end": new_end,
+                    "billing.is_trial": True,
+                    "billing.status": "trialing",
+                    "updated_at": now,
+                }
+            },
+        )
+        return {
+            "message": "Trial extended",
+            "kind": "duration",
+            "duration_days": duration_days,
+            "trial_end": new_end,
+            "code": coupon.get("code"),
+        }
+
+    result = await apply_complimentary_grant(
+        user=user,
+        kind="duration",
+        duration_days=int(duration_days),
+        note=f"Coupon {coupon.get('code')}",
+        send_email=True,
+        cancel_stripe_subscription=True,
+        granted_by=f"coupon:{coupon.get('code')}",
+    )
+    return {
+        "message": "Complimentary access applied",
+        "kind": "duration",
+        "duration_days": duration_days,
+        "code": coupon.get("code"),
+        **{k: v for k, v in result.items() if k != "message"},
+    }
+
 @billing_router.post("/pause")
 async def pause_subscription(
     request: Request,

@@ -3,6 +3,7 @@
 from fastapi import Header, HTTPException, Request
 
 from app.security.cookie_auth import (
+    ADMIN_ACCESS_COOKIE,
     NOK_ACCESS_COOKIE,
     OWNER_ACCESS_COOKIE,
     extract_access_token,
@@ -26,6 +27,18 @@ def decode_access_token(
     if not decoded:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return decoded
+
+
+def decode_admin_token(
+    request: Request,
+    authorization: str | None = None,
+) -> dict:
+    """Prefer the isolated admin cookie; Bearer fallback still allowed."""
+    return decode_access_token(
+        request,
+        authorization,
+        access_cookie=ADMIN_ACCESS_COOKIE,
+    )
 
 
 def decode_owner_or_nok_token(

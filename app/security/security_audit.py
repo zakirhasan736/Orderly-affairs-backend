@@ -43,10 +43,19 @@ async def _audit_collection(name: str, audit_fn) -> dict:
 async def audit_vault_sections() -> dict:
     checked = 0
     failed = 0
+    e2ee = 0
     async for section in section_data_collection.find({}):
         owner_id = str(section.get("owner_id") or "")
         section_id = str(section.get("section_id") or "")
         encrypted = section.get("encrypted_data")
+        if int(section.get("encryption_version") or 0) == 3:
+            # Client E2EE — server must not decrypt
+            if encrypted:
+                e2ee += 1
+                checked += 1
+            else:
+                failed += 1
+            continue
         if not encrypted:
             failed += 1
             continue
@@ -55,7 +64,7 @@ async def audit_vault_sections() -> dict:
             checked += 1
         except Exception:
             failed += 1
-    return {"checked": checked, "failed": failed}
+    return {"checked": checked, "failed": failed, "e2ee_opaque": e2ee}
 
 
 async def audit_messages() -> dict:

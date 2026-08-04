@@ -7,8 +7,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.uploads.routes import router as upload_router
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth.routes import router as auth_router
+from app.security.e2ee_routes import e2ee_router
+from app.sections.e2ee_vault_gateway import e2ee_vault_router
 
 from app.auth.inactivity_scheduler import start_owner_inactivity_scheduler
+from app.backup.scheduler import start_backup_scheduler
 from app.billing.trial_scheduler import start_trial_scheduler
 from app.kits.routes_core import router as kit_router
 from app.letters.routes import router as letters_router
@@ -16,12 +19,24 @@ from app.letters.scheduler import start_scheduler as start_nok_letter_scheduler
 from app.notifications.section_expiry_scheduler import (
     start_section_expiry_scheduler,
 )
+from app.security.weekly_monitor import start_weekly_security_scheduler
 from app.sections.section_meta_routes import router as section_meta_router
 from app.billing.routes import billing_router
 from app.nexrkinmessage.routes import router as message_of_nextkin_letters_router
 from app.nexrkinmessage.scheduler import check_scheduled_letters
 from app.billing.webhooks import webhook_router
 from app.admin.billing import admin_billing_router
+from app.admin.auth import admin_auth_router
+from app.admin.users import admin_users_router
+from app.admin.coupons import admin_coupons_router
+from app.admin.notifications import admin_notifications_router
+from app.admin.overview import admin_overview_router
+from app.admin.roles import admin_roles_router
+from app.admin.dsar import admin_dsar_router
+from app.admin.legacy import admin_legacy_router
+from app.admin.security import admin_security_router
+from app.admin.backups import admin_backups_router
+from app.admin.analytics import admin_analytics_router
 from app.support.routes import support_router, admin_support_router
 from app.feedback.routes import feedback_router, admin_feedback_router
 from app.sections.section1_vital_information.router import (
@@ -68,6 +83,7 @@ from app.security.security_audit import run_security_audit
 from app.config import settings
 from app.security.https_redirect import HTTPSRedirectMiddleware
 from app.security.security_headers import SecurityHeadersMiddleware
+from app.security.csrf import CsrfMiddleware
 from app.security.api_rate_limit import VaultApiRateLimitMiddleware
 from app.security.error_handlers import (
     http_exception_handler,
@@ -90,6 +106,7 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(VaultApiRateLimitMiddleware)
+app.add_middleware(CsrfMiddleware)
 
 # Trailing slash mismatch breaks exact-origin CORS checks
 _frontend = (settings.FRONTEND_URL or "").rstrip("/")
@@ -108,9 +125,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-CSRF-Token"],
 )
 @app.on_event("startup")
 async def startup():
+    from app.admin.seed_admin import seed_default_admin
     from app.auth.otp_security import ensure_otp_send_lock_index
     from app.auth.phone import ensure_owner_phone_index
     from app.database import users_collection
@@ -121,6 +140,11 @@ async def startup():
     except Exception as exc:
         if settings.APP_ENV == "development":
             print("Owner phone unique index warning:", exc)
+
+    try:
+        await seed_default_admin()
+    except Exception as exc:
+        print("Default admin seed warning:", exc)
 
     # 1️⃣ Start APScheduler-based NOK LETTERS
     start_nok_letter_scheduler()
@@ -138,6 +162,12 @@ async def startup():
     from app.notifications.kit_review_emails import start_kit_review_scheduler
 
     start_kit_review_scheduler()
+
+    # 6️⃣ Daily encrypted Mongo user-data backup (local + optional S3)
+    start_backup_scheduler()
+
+    # 7️⃣ Weekly security monitoring + logging (audit → admin alerts)
+    start_weekly_security_scheduler()
     
     # 2️⃣ Start simple async loop for messages
     async def message_scheduler_loop():
@@ -167,9 +197,22 @@ async def startup():
 
 app.include_router(upload_router)
 app.include_router(auth_router)
+app.include_router(e2ee_router)
+app.include_router(e2ee_vault_router)
 app.include_router(billing_router)
 app.include_router(webhook_router)
 app.include_router(admin_billing_router)
+app.include_router(admin_auth_router)
+app.include_router(admin_users_router)
+app.include_router(admin_coupons_router)
+app.include_router(admin_notifications_router)
+app.include_router(admin_overview_router)
+app.include_router(admin_roles_router)
+app.include_router(admin_dsar_router)
+app.include_router(admin_legacy_router)
+app.include_router(admin_security_router)
+app.include_router(admin_backups_router)
+app.include_router(admin_analytics_router)
 app.include_router(support_router)
 app.include_router(admin_support_router)
 app.include_router(feedback_router)

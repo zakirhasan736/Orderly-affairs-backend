@@ -1,8 +1,12 @@
 from fastapi import APIRouter, UploadFile, File, Header, HTTPException, Request
 from app.security.token_resolver import decode_access_token
-from app.security.cloudinary_service import upload_file, delete_file
+from app.security.cloudinary_service import (
+    signed_media_delivery_url,
+    upload_file,
+)
 
 router = APIRouter(prefix="/message/media", tags=["Message Media"])
+
 
 @router.post("")
 async def upload_letter_media(
@@ -20,13 +24,28 @@ async def upload_letter_media(
 
     uploaded = upload_file(
         file.file,
-        folder="letters/media"
+        folder="letters/media",
+        access_mode="authenticated",
+        type="authenticated",
     )
 
+    public_id = uploaded.get("public_id")
+    delivery = uploaded.get("secure_url")
+    if public_id:
+        try:
+            delivery = signed_media_delivery_url(
+                str(public_id),
+                resource_type=uploaded.get("resource_type"),
+            ) or delivery
+        except Exception:
+            pass
+
     return {
-        "url": uploaded["secure_url"],
-        "public_id": uploaded["public_id"],
+        "url": delivery,
+        "public_id": public_id,
         "type": uploaded["resource_type"],
         "format": uploaded.get("format"),
         "size": uploaded.get("bytes"),
+        "access_mode": "authenticated",
+        "url_expires_in": 3600,
     }

@@ -10,6 +10,7 @@ so folder paths are not guessable from user ids.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import uuid
 from pathlib import Path
@@ -147,6 +148,14 @@ def resolve_stored_ai_document_path(doc: dict | None) -> Path | None:
             )
         except HTTPException:
             pass
+        # Any extension for this file_id (path/env drift, renamed ext).
+        try:
+            directory = owner_vault_dir(str(folder_uuid))
+            if directory.is_dir():
+                for match in directory.glob(f"{file_id}.*"):
+                    candidates.append(match)
+        except HTTPException:
+            pass
 
     seen: set[str] = set()
     for path in candidates:
@@ -159,6 +168,111 @@ def resolve_stored_ai_document_path(doc: dict | None) -> Path | None:
                 return path.resolve()
         except OSError:
             continue
+    return None
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+async def recover_ai_document_path(doc: dict | None) -> Path | None:
+    """
+    Locate bytes for an AI document even when the stored absolute path is from
+    another host (e.g. VPS path while running locally) or the row was reused.
+
+    Strategy:
+      1) Normal resolve (vault-relative first)
+      2) reused_from_file_id sibling
+      3) Other same-user docs with the same content_hash
+      4) Scan the owner vault for an orphan file with the same content_hash
+         and restore it to the expected stored_filename
+    """
+    if not isinstance(doc, dict):
+        return None
+
+    path = resolve_stored_ai_document_path(doc)
+    if path:
+        return path
+
+    user_id = str(doc.get("user_id") or "")
+    file_id = str(doc.get("_id") or "")
+    content_hash = str(doc.get("content_hash") or "").strip()
+    folder_uuid = doc.get("folder_uuid")
+    stored = doc.get("stored_filename")
+
+    reused_id = doc.get("reused_from_file_id")
+    if reused_id and str(reused_id) != file_id and user_id:
+        prior = await ai_documents_collection.find_one(
+            {"_id": reused_id, "user_id": user_id},
+        )
+        if prior:
+            path = resolve_stored_ai_document_path(prior)
+            if path:
+                return path
+
+    if content_hash and user_id:
+        cursor = ai_documents_collection.find(
+            {"user_id": user_id, "content_hash": content_hash},
+            {"_id": 1, "path": 1, "folder_uuid": 1, "stored_filename": 1, "mime_type": 1},
+        )
+        async for sibling in cursor:
+            if str(sibling.get("_id") or "") == file_id:
+                continue
+            path = resolve_stored_ai_document_path(sibling)
+            if path:
+                return path
+
+    # Orphan scan: file left on disk after a Mongo row was replaced/deleted.
+    if content_hash and folder_uuid:
+        try:
+            directory = owner_vault_dir(str(folder_uuid))
+        except HTTPException:
+            directory = None
+        if directory and directory.is_dir():
+            for candidate in directory.iterdir():
+                if not candidate.is_file():
+                    continue
+                if file_id and candidate.stem == file_id:
+                    return candidate.resolve()
+                digest = _sha256_file(candidate)
+                if digest != content_hash:
+                    continue
+                # Restore to the expected vault name so future resolves are cheap.
+                if stored:
+                    try:
+                        target = resolve_vault_file_path(str(folder_uuid), str(stored))
+                    except HTTPException:
+                        target = candidate
+                    if target != candidate and not target.exists():
+                        try:
+                            shutil.copy2(candidate, target)
+                            candidate = target
+                        except OSError:
+                            pass
+                try:
+                    await ai_documents_collection.update_one(
+                        {"_id": doc.get("_id"), "user_id": user_id},
+                        {
+                            "$set": {
+                                "path": str(candidate.resolve()),
+                                "stored_filename": candidate.name,
+                            }
+                        },
+                    )
+                except Exception:
+                    pass
+                return candidate.resolve()
+
     return None
 
 

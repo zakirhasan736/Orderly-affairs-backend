@@ -7,6 +7,7 @@ from app.database import users_collection
 from app.repositories.section_repository import SectionRepository
 from app.sections.section1_vital_information.schemas import Section1VitalInformationPayload
 from app.security.section_crypto import encrypt_section_data, decrypt_section_data
+from app.security.section_e2ee import present_section_for_api
 from app.security.token_resolver import decode_owner_or_nok_token
 from app.security.access_control import assert_section_read_access
 from app.security.section_write import require_section_write
@@ -94,10 +95,7 @@ async def get_section1(
     if not section:
         return {}
 
-    return {
-        "section_key": SECTION_KEY,
-        "data": decrypt_section_data(owner_id, SECTION_ID, section["encrypted_data"]),
-    }
+    return present_section_for_api(owner_id, SECTION_ID, SECTION_KEY, section)
 
 
 @router.delete("")

@@ -1,11 +1,15 @@
 from datetime import datetime, timezone
+import time
 
 from fastapi import APIRouter, UploadFile, File, Header, HTTPException, Request
 from bson import ObjectId
 
 from app.security.token_resolver import decode_access_token
 from app.security.section_file_cleanup import delete_owned_file
-from app.security.cloudinary_service import upload_file
+from app.security.cloudinary_service import (
+    signed_delivery_url,
+    upload_file,
+)
 from cloudinary.exceptions import Error as CloudinaryError
 from app.security.file_validation import validate_upload
 from app.database import users_collection
@@ -13,6 +17,9 @@ from app.auth.portal_roles import can_upload_documents
 from app.auth.access_types import is_family_collaborator, resolve_access_type
 
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
+
+# Short-lived signed delivery for vault section attachments.
+SIGNED_URL_TTL_SECONDS = 60 * 60  # 1 hour
 
 
 async def _actor_stamp(decoded: dict) -> dict:
@@ -55,6 +62,37 @@ async def _actor_stamp(decoded: dict) -> dict:
     }
 
 
+async def _owner_folder_prefix(decoded: dict) -> str:
+    """Return the Cloudinary folder prefix this actor may access."""
+    if decoded.get("role") == "owner":
+        return f"orderly_affairs/{decoded['sub']}/"
+
+    user = None
+    try:
+        user = await users_collection.find_one(
+            {"_id": ObjectId(str(decoded["sub"])), "role": "nextkin"}
+        )
+    except Exception:
+        user = None
+    if not user or not user.get("owner_id"):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    owner = await users_collection.find_one(
+        {"_id": ObjectId(str(user["owner_id"])), "role": "owner"}
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+    return f"orderly_affairs/{owner.get('email')}/"
+
+
+def _signed_url(public_id: str, resource_type: str | None = None) -> str:
+    expires_at = int(time.time()) + SIGNED_URL_TTL_SECONDS
+    return signed_delivery_url(
+        public_id,
+        resource_type=resource_type,
+        expires_at=expires_at,
+    )
+
+
 @router.post("")
 async def upload_asset(
     request: Request,
@@ -89,6 +127,8 @@ async def upload_asset(
         result = upload_file(
             file.file,
             folder=f"orderly_affairs/{folder_key}",
+            access_mode="authenticated",
+            type="authenticated",
         )
     except CloudinaryError:
         raise HTTPException(
@@ -96,15 +136,66 @@ async def upload_asset(
             detail="File failed security scan and was rejected",
         )
 
+    public_id = result.get("public_id")
+    resource_type = result.get("resource_type")
+    delivery = ""
+    if public_id:
+        try:
+            delivery = _signed_url(str(public_id), resource_type)
+        except Exception:
+            delivery = str(result.get("secure_url") or "")
+
     return {
         "name": file.filename,
-        "url": result["secure_url"],
-        "public_id": result["public_id"],
-        "type": result["resource_type"],
+        "url": delivery or result.get("secure_url"),
+        "public_id": public_id,
+        "type": resource_type,
         "format": result.get("format"),
         "size": result.get("bytes"),
+        "access_mode": "authenticated",
+        "url_expires_in": SIGNED_URL_TTL_SECONDS,
         "scan_status": "clean",
         **stamp,
+    }
+
+
+@router.post("/signed-url")
+async def refresh_signed_upload_url(
+    data: dict,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Return a fresh signed Cloudinary URL for an authenticated vault attachment."""
+    decoded = decode_access_token(request, authorization)
+    public_id = str(data.get("public_id") or "").strip()
+    if not public_id:
+        raise HTTPException(status_code=400, detail="public_id required")
+
+    prefix = await _owner_folder_prefix(decoded)
+    if not public_id.startswith(prefix.rstrip("/")) and not public_id.startswith(
+        prefix
+    ):
+        # Allow exact folder match without trailing slash quirks
+        if not public_id.startswith("orderly_affairs/"):
+            raise HTTPException(status_code=403, detail="Not authorized for this file")
+        # Owner prefix is email-based; reject if not under allowed owner folder
+        allowed = prefix.rstrip("/")
+        if not (public_id == allowed or public_id.startswith(allowed + "/")):
+            raise HTTPException(status_code=403, detail="Not authorized for this file")
+
+    resource_type = data.get("resource_type") or data.get("type")
+    try:
+        url = _signed_url(public_id, resource_type)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Could not sign delivery URL: {exc}"
+        ) from exc
+
+    return {
+        "public_id": public_id,
+        "url": url,
+        "access_mode": "authenticated",
+        "url_expires_in": SIGNED_URL_TTL_SECONDS,
     }
 
 

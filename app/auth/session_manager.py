@@ -1,9 +1,13 @@
 """Issue and revoke HttpOnly cookie sessions (access + refresh tokens)."""
 
+from datetime import timedelta
+
 from fastapi import Request, Response
 
 from app.config import settings
 from app.security.cookie_auth import (
+    ADMIN_ACCESS_COOKIE,
+    ADMIN_REFRESH_COOKIE,
     NOK_ACCESS_COOKIE,
     NOK_REFRESH_COOKIE,
     OWNER_ACCESS_COOKIE,
@@ -27,9 +31,37 @@ def _refresh_max_age() -> int:
     return settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
 
 
+def is_full_kit_access(user: dict) -> bool:
+    """True for Full Kit NOK or Full Dashboard family collaborators."""
+    level = str(user.get("access_level") or "").strip()
+    if level in ("Area-Specific Access", "Section-Specific Access"):
+        return False
+    if level in (
+        "Full Kit Access",
+        "Full Dashboard Access",
+        "full",
+        "full_kit",
+        "full_dashboard",
+        "",
+    ):
+        return True
+    sections = user.get("authorized_sections")
+    return sections == "all" or sections == ["all"]
+
+
+def _nok_access_minutes(user: dict) -> int:
+    if is_full_kit_access(user):
+        return max(1, int(settings.NOK_FULL_KIT_ACCESS_TOKEN_EXPIRE_MINUTES))
+    return max(1, int(settings.NOK_ACCESS_TOKEN_EXPIRE_MINUTES))
+
+
+def _nok_access_max_age(user: dict) -> int:
+    return _nok_access_minutes(user) * 60
+
+
 async def issue_owner_session(response: Response, user: dict) -> dict:
     # Owner and family/NOK sessions must never share cookies.
-    clear_auth_cookies(response, owner=False, nok=True)
+    clear_auth_cookies(response, owner=False, nok=True, admin=True)
 
     access = create_access_token(user)
     refresh_plain, _ = await create_refresh_token(
@@ -72,10 +104,14 @@ async def issue_owner_session(response: Response, user: dict) -> dict:
 
 
 async def issue_nok_session(response: Response, user: dict) -> dict:
-    # Family/NOK login clears owner cookies so sessions stay isolated.
-    clear_auth_cookies(response, owner=True, nok=False)
+    # Family/NOK login clears owner + admin cookies so sessions stay isolated.
+    clear_auth_cookies(response, owner=True, nok=False, admin=True)
 
-    access = create_access_token(user)
+    access_minutes = _nok_access_minutes(user)
+    access = create_access_token(
+        user,
+        expires_delta=timedelta(minutes=access_minutes),
+    )
     refresh_plain, _ = await create_refresh_token(
         user_id=str(user["_id"]),
         role="nextkin",
@@ -86,7 +122,7 @@ async def issue_nok_session(response: Response, user: dict) -> dict:
         response,
         name=NOK_ACCESS_COOKIE,
         value=access,
-        max_age_seconds=_access_max_age(),
+        max_age_seconds=_nok_access_max_age(user),
     )
     set_auth_cookie(
         response,
@@ -117,11 +153,58 @@ async def issue_nok_session(response: Response, user: dict) -> dict:
         "full_name": user.get("full_name"),
         "owner_id": str(user.get("owner_id")),
         "email": user.get("email"),
+        "access_ttl_minutes": access_minutes,
         "message": (
             "Family collaborator login successful"
             if access_type == "family"
             else "Next-of-Kin login successful"
         ),
+    }
+
+
+async def issue_admin_session(response: Response, user: dict) -> dict:
+    """Isolated admin panel session (JWT role=admin; DB role stays owner)."""
+    clear_auth_cookies(response, owner=True, nok=True, admin=False)
+
+    from app.admin.deps import resolve_admin_role
+    from app.admin.permissions import resolve_areas_for_role
+
+    admin_role = resolve_admin_role(user)
+    token_user = {**user, "admin_role": admin_role}
+    access = create_access_token(token_user, role="admin")
+    refresh_plain, _ = await create_refresh_token(
+        user_id=str(user["_id"]),
+        role="admin",
+        email=user["email"],
+    )
+
+    set_auth_cookie(
+        response,
+        name=ADMIN_ACCESS_COOKIE,
+        value=access,
+        max_age_seconds=_access_max_age(),
+    )
+    set_auth_cookie(
+        response,
+        name=ADMIN_REFRESH_COOKIE,
+        value=refresh_plain,
+        max_age_seconds=_refresh_max_age(),
+    )
+
+    return {
+        "authenticated": True,
+        "role": "admin",
+        "admin_role": admin_role,
+        "admin_areas": resolve_areas_for_role(
+            admin_role,
+            user.get("admin_areas")
+            if isinstance(user.get("admin_areas"), list)
+            else None,
+        ),
+        "email": user["email"],
+        "full_name": user.get("full_name") or user.get("name"),
+        "mfa_required": False,
+        "message": "Admin login successful",
     }
 
 
@@ -147,7 +230,7 @@ async def logout_owner_session(
                     role="owner",
                 )
 
-    clear_auth_cookies(response, owner=True, nok=False)
+    clear_auth_cookies(response, owner=True, nok=False, admin=False)
     return {"message": "Owner logged out"}
 
 
@@ -173,8 +256,34 @@ async def logout_nok_session(
             except (InvalidId, KeyError, TypeError):
                 pass
 
-    clear_auth_cookies(response, owner=False, nok=True)
+    clear_auth_cookies(response, owner=False, nok=True, admin=False)
     return {"message": "Next-of-Kin logged out"}
+
+
+async def logout_admin_session(
+    response: Response,
+    request: Request,
+) -> dict:
+    refresh = request.cookies.get(ADMIN_REFRESH_COOKIE)
+    if refresh:
+        await revoke_refresh_token(refresh)
+
+    access = request.cookies.get(ADMIN_ACCESS_COOKIE)
+    if access:
+        from app.security.jwt_handler import verify_token
+
+        decoded = verify_token(access) or {}
+        sub = decoded.get("sub")
+        if sub and decoded.get("role") == "admin":
+            user = await _find_owner_by_sub(sub)
+            if user:
+                await revoke_all_user_refresh_tokens(
+                    str(user["_id"]),
+                    role="admin",
+                )
+
+    clear_auth_cookies(response, owner=False, nok=False, admin=True)
+    return {"message": "Admin logged out"}
 
 
 async def _find_owner_by_sub(sub: str):
@@ -191,10 +300,15 @@ async def refresh_session_from_cookie(
 ) -> dict:
     from app.security.refresh_tokens import resolve_user_from_id, rotate_refresh_token
 
-    refresh_cookie = (
-        OWNER_REFRESH_COOKIE if role == "owner" else NOK_REFRESH_COOKIE
-    )
-    access_cookie = OWNER_ACCESS_COOKIE if role == "owner" else NOK_ACCESS_COOKIE
+    if role == "admin":
+        refresh_cookie = ADMIN_REFRESH_COOKIE
+        access_cookie = ADMIN_ACCESS_COOKIE
+    elif role == "owner":
+        refresh_cookie = OWNER_REFRESH_COOKIE
+        access_cookie = OWNER_ACCESS_COOKIE
+    else:
+        refresh_cookie = NOK_REFRESH_COOKIE
+        access_cookie = NOK_ACCESS_COOKIE
 
     plain = request.cookies.get(refresh_cookie)
     if not plain:
@@ -206,6 +320,7 @@ async def refresh_session_from_cookie(
             response,
             owner=role == "owner",
             nok=role == "nextkin",
+            admin=role == "admin",
         )
         raise ValueError("invalid_refresh")
 
@@ -214,12 +329,31 @@ async def refresh_session_from_cookie(
     if not user:
         raise ValueError("user_not_found")
 
-    access = create_access_token(user)
+    if role == "admin":
+        from app.admin.deps import resolve_admin_role
+
+        admin_role = resolve_admin_role(user)
+        access = create_access_token(
+            {**user, "admin_role": admin_role},
+            role="admin",
+        )
+        access_max_age = _access_max_age()
+    elif role == "nextkin":
+        access_minutes = _nok_access_minutes(user)
+        access = create_access_token(
+            user,
+            expires_delta=timedelta(minutes=access_minutes),
+        )
+        access_max_age = access_minutes * 60
+    else:
+        access = create_access_token(user)
+        access_max_age = _access_max_age()
+
     set_auth_cookie(
         response,
         name=access_cookie,
         value=access,
-        max_age_seconds=_access_max_age(),
+        max_age_seconds=access_max_age,
     )
     set_auth_cookie(
         response,

@@ -49,7 +49,11 @@ from app.ai.skill_memory import (
     record_successful_fill,
 )
 from app.database import ai_documents_collection
-from app.storage.vault import resolve_stored_ai_document_path
+from app.ai.ai_document_storage import (
+    destroy_ai_document_assets,
+    materialize_ai_document_file,
+)
+from app.ai.ai_extract_crypto import read_extracted_text
 
 # Back-compat name used in except blocks below
 GeminiServiceUnavailableError = LLMServiceUnavailableError
@@ -68,7 +72,7 @@ FAST_PARTNER_PREFETCH: dict[str, list[str]] = {
 def _document_text_hint(file_path: str | None, mime_type: str | None, doc: dict | None = None) -> str:
     """OCR/text snapshot for routing hardeners (prefer upload-time extract)."""
     if isinstance(doc, dict):
-        cached = str(doc.get("extracted_text") or "").strip()
+        cached = read_extracted_text(doc).strip()
         if cached:
             return cached[:20000]
     if not file_path:
@@ -124,11 +128,11 @@ def safe_delete_file(path_value: str | None):
 async def delete_ai_document(file_id: str, user_id: str):
     doc = await ai_documents_collection.find_one(
         {"_id": file_id, "user_id": user_id},
-        {"path": 1},
+        {"path": 1, "public_id": 1, "resource_type": 1},
     )
 
     if doc:
-        safe_delete_file(doc.get("path"))
+        destroy_ai_document_assets(doc)
 
     await ai_documents_collection.delete_one({"_id": file_id, "user_id": user_id})
 
@@ -614,7 +618,7 @@ async def _finalize_autofill_success(
         patch = result.get("patch") if isinstance(result, dict) else None
         doc_text = str(
             extract_meta.get("document_text")
-            or source_doc.get("extracted_text")
+            or read_extracted_text(source_doc)
             or ""
         )
         try:
@@ -777,13 +781,13 @@ async def autofill_section(
             },
         )
 
-    resolved = resolve_stored_ai_document_path(doc)
+    resolved = await materialize_ai_document_file(doc)
     file_path = str(resolved) if resolved else None
     mime_type = doc.get("mime_type")
     keep_document = False
 
     brain = {**active_brain_info(), "learning_enabled": learning_enabled()}
-    doc_text = str(doc.get("extracted_text") or "")
+    doc_text = read_extracted_text(doc)
     few_shot = ""
     if brain.get("learning_enabled", True) and doc_text.strip():
         examples = await fetch_few_shot_examples(
@@ -824,8 +828,11 @@ async def autofill_section(
                 },
             )
 
-        # Heal stale absolute paths after VAULT_ROOT / cwd changes.
-        if str(doc.get("path") or "") != file_path:
+        # Heal stale absolute paths after VAULT_ROOT / cwd changes (vault only).
+        if (
+            str(doc.get("storage") or "") != "cloudinary"
+            and str(doc.get("path") or "") != file_path
+        ):
             await ai_documents_collection.update_one(
                 {"_id": payload.file_id, "user_id": user_id},
                 {"$set": {"path": file_path, "updated_at": utc_now_naive()}},

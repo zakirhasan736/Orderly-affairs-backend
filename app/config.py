@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "RS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # NOK / family access tokens (shorter than owner).
+    NOK_ACCESS_TOKEN_EXPIRE_MINUTES: int = 10
+    # Full Kit NOK / full dashboard family — tighter live session window.
+    NOK_FULL_KIT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 5
     # Target interval for RS256 key rotation (calendar/process; see app/security/KEY_ROTATION.md).
     JWT_KEY_ROTATION_DAYS: int = 90
     # Target interval for AES-256-GCM at-rest key rotation (annual or per policy).
@@ -19,7 +23,7 @@ class Settings(BaseSettings):
 
     # === Auth rate limiting ===
     # Short windows — never multi-hour locks for login / OTP
-    AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 40
+    AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 10
     AUTH_RATE_LIMIT_WINDOW_MINUTES: int = 15
     # Absolute ceiling for any Retry-After (OTP / auth / verify)
     AUTH_RATE_LIMIT_MAX_LOCK_SECONDS: int = 1800  # 30 minutes
@@ -28,6 +32,11 @@ class Settings(BaseSettings):
     # Load keys from either .env or /keys folder
     JWT_PRIVATE_KEY: str | None = None
     JWT_PUBLIC_KEY: str | None = None
+    # Previous RS256 public key kept during JWT rotation overlap (verify-only).
+    JWT_PREVIOUS_PUBLIC_KEY: str | None = None
+    # Optional previous AES key (base64) for decrypt during rotation overlap.
+    # Prefer env AES_256_KEY_PREVIOUS (read in crypto.py); this mirrors config docs.
+    AES_256_KEY_PREVIOUS: str | None = None
 
     # === Email ===
     SENDGRID_API_KEY: str
@@ -88,10 +97,18 @@ class Settings(BaseSettings):
     # Optional shared cookie domain, e.g. .orderly-affairs.com
     # (so portal middleware can read cookies set by api.*)
     COOKIE_DOMAIN: str | None = None
+    # Double-submit CSRF for cookie-authenticated mutating API calls.
+    CSRF_PROTECTION_ENABLED: bool = True
 
-    # Comma-separated owner emails allowed to use /admin/support inbox
-    # (in addition to JWT role=admin).
+    # Comma-separated owner emails allowed into System Owner Admin (/admin/login).
     ADMIN_EMAILS: str = ""
+    # Optional first-boot bootstrap only. Leave unset — never ship a default password.
+    # If both are set and the email is missing, creates that admin once (does not reset).
+    ADMIN_DEFAULT_EMAIL: str | None = None
+    ADMIN_DEFAULT_PASSWORD: str | None = None
+    # When True, admin-flagged owner cookies can hit /admin APIs.
+    # Default: allowed only in development. Set true/false to override.
+    ADMIN_ALLOW_OWNER_COOKIE_FALLBACK: bool | None = None
 
     # === Document vault (AI autofill uploads on VPS disk) ===
     # Production: /var/storage/vault  |  Local: storage/vault (project-relative)
@@ -104,6 +121,37 @@ class Settings(BaseSettings):
     AI_UPLOAD_MAX_MB: float = 15.0
     # 0 = keep forever (vault). >0 = expire uploads after N minutes.
     AI_UPLOAD_TTL_MINUTES: int = 0
+
+    # === Weekly security monitoring ===
+    WEEKLY_SECURITY_MONITOR_ENABLED: bool = True
+    # APScheduler day_of_week: mon..sun
+    WEEKLY_SECURITY_MONITOR_DAY: str = "sun"
+    WEEKLY_SECURITY_MONITOR_HOUR: int = 4
+    WEEKLY_SECURITY_MONITOR_MINUTE: int = 30
+
+    # === Client-side E2EE for vault sections (encryption_version 3) ===
+    # When true: clients may store opaque ciphertext; server cannot decrypt v3.
+    E2EE_ENABLED: bool = True
+
+    # === Daily encrypted backups (Mongo user data as stored ciphertext) ===
+    BACKUP_ENABLED: bool = True
+    # Local directory for daily packages (gitignored under /storage/).
+    BACKUP_ROOT: str = "storage/backups"
+    BACKUP_CRON_HOUR: int = 3
+    BACKUP_CRON_MINUTE: int = 0
+    BACKUP_RETENTION_DAYS: int = 14
+    # Include on-disk VAULT_ROOT files in the package (can be large).
+    BACKUP_INCLUDE_VAULT_FILES: bool = False
+    # Separate 32-byte key (base64). If unset, falls back to AES_256_KEY.
+    # Prefer a dedicated offline key for disaster recovery.
+    BACKUP_ENCRYPTION_KEY: str | None = None
+    # Optional AWS S3 upload (enable bucket versioning in AWS console).
+    BACKUP_S3_ENABLED: bool = False
+    BACKUP_S3_BUCKET: str | None = None
+    BACKUP_S3_PREFIX: str = "orderly-affairs/backups"
+    BACKUP_S3_REGION: str = "us-east-1"
+    AWS_ACCESS_KEY_ID: str | None = None
+    AWS_SECRET_ACCESS_KEY: str | None = None
 
     class Config:
         env_file = ".env"
@@ -120,6 +168,19 @@ class Settings(BaseSettings):
     @property
     def AI_UPLOAD_MAX_BYTES(self) -> int:
         return int(float(self.AI_UPLOAD_MAX_MB) * (1024**2))
+
+    @property
+    def allow_owner_cookie_admin_fallback(self) -> bool:
+        """
+        Allow admin-flagged owner sessions to call /admin APIs.
+
+        Production default: False (admin cookie / admin Bearer only).
+        Development default: True (legacy convenience).
+        Override with ADMIN_ALLOW_OWNER_COOKIE_FALLBACK=true|false.
+        """
+        if self.ADMIN_ALLOW_OWNER_COOKIE_FALLBACK is not None:
+            return bool(self.ADMIN_ALLOW_OWNER_COOKIE_FALLBACK)
+        return self.APP_ENV == "development"
 
 
 # --- Initialize Settings ---
@@ -144,10 +205,14 @@ SEND_RETRY_BACKOFF = timedelta(minutes=10)
 # If PEM files exist, load them (preferred for clean .env)
 private_key_path = Path("keys/private.pem")
 public_key_path = Path("keys/public.pem")
+previous_public_key_path = Path("keys/public.previous.pem")
 
 if private_key_path.exists() and public_key_path.exists():
     settings.JWT_PRIVATE_KEY = private_key_path.read_text()
     settings.JWT_PUBLIC_KEY = public_key_path.read_text()
+
+if not settings.JWT_PREVIOUS_PUBLIC_KEY and previous_public_key_path.exists():
+    settings.JWT_PREVIOUS_PUBLIC_KEY = previous_public_key_path.read_text()
 
 # Print to confirm (optional debug)
 if settings.APP_ENV == "development":

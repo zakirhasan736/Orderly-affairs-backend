@@ -7,6 +7,8 @@ OWNER_ACCESS_COOKIE = "auth_token"
 OWNER_REFRESH_COOKIE = "oa_refresh_token"
 NOK_ACCESS_COOKIE = "nok_auth_token"
 NOK_REFRESH_COOKIE = "oa_nok_refresh_token"
+ADMIN_ACCESS_COOKIE = "oa_admin_auth_token"
+ADMIN_REFRESH_COOKIE = "oa_admin_refresh_token"
 
 
 def cookie_secure() -> bool:
@@ -70,12 +72,20 @@ def set_auth_cookie(
     response.set_cookie(**kwargs)
 
 
-def clear_auth_cookies(response, *, owner: bool = True, nok: bool = False) -> None:
+def clear_auth_cookies(
+    response,
+    *,
+    owner: bool = True,
+    nok: bool = False,
+    admin: bool = False,
+) -> None:
     names: list[str] = []
     if owner:
         names.extend([OWNER_ACCESS_COOKIE, OWNER_REFRESH_COOKIE])
     if nok:
         names.extend([NOK_ACCESS_COOKIE, NOK_REFRESH_COOKIE])
+    if admin:
+        names.extend([ADMIN_ACCESS_COOKIE, ADMIN_REFRESH_COOKIE])
 
     domain = cookie_domain()
     for name in names:
@@ -134,5 +144,17 @@ def require_nok_access_token(
         request,
         authorization,
         access_cookie=NOK_ACCESS_COOKIE,
+        required=True,
+    )
+
+
+def require_admin_access_token(
+    request: Request,
+    authorization: str | None = None,
+) -> str:
+    return extract_access_token(
+        request,
+        authorization,
+        access_cookie=ADMIN_ACCESS_COOKIE,
         required=True,
     )

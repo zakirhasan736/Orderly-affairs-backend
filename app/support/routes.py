@@ -5,14 +5,12 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.admin.deps import require_admin
 from app.auth.dependencies import get_current_user
-from app.config import settings
 from app.database import (
     support_messages_collection,
     support_threads_collection,
-    users_collection,
 )
-from app.security.token_resolver import decode_access_token
 
 support_router = APIRouter(prefix="/support", tags=["support-chat"])
 admin_support_router = APIRouter(prefix="/admin/support", tags=["admin-support"])
@@ -32,13 +30,6 @@ def _utc_now() -> datetime:
 
 def _owner_id(user: dict) -> str:
     return str(user.get("_id") or user.get("id") or "")
-
-
-def _admin_email_set() -> set[str]:
-    raw = (settings.ADMIN_EMAILS or "").strip()
-    if not raw:
-        return set()
-    return {part.strip().lower() for part in raw.split(",") if part.strip()}
 
 
 def _serialize_message(doc: dict) -> dict:
@@ -105,29 +96,6 @@ async def _get_or_create_owner_thread(user: dict) -> dict:
         }
     )
     return doc
-
-
-async def require_admin(request: Request, authorization: str | None):
-    """Allow JWT role=admin, or owner accounts flagged/listed as staff."""
-    decoded = decode_access_token(request, authorization)
-    if decoded.get("role") == "admin":
-        return decoded
-
-    if decoded.get("role") == "owner":
-        email = str(decoded.get("sub") or "").strip().lower()
-        if email and email in _admin_email_set():
-            return {**decoded, "role": "admin", "email": email}
-
-        user = await users_collection.find_one({"email": email, "role": "owner"})
-        if user and (user.get("is_admin") is True or user.get("role_admin") is True):
-            return {
-                **decoded,
-                "role": "admin",
-                "email": email,
-                "sub": email,
-            }
-
-    raise HTTPException(403, "Admin only")
 
 
 @support_router.get("/thread")

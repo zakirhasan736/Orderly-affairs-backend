@@ -199,7 +199,8 @@ async def list_family_members(request: Request, authorization: str | None):
                 "has_master_password": bool(
                     nk.get("password_hash") or nk.get("master_password")
                 ),
-                "master_password": nk.get("master_password") or "",
+                # Never list plaintext — use reveal endpoint when needed.
+                "master_password": "",
                 "created_at": nk.get("created_at"),
                 "updated_at": nk.get("updated_at"),
             }

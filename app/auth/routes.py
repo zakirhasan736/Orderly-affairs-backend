@@ -363,6 +363,22 @@ async def get_authorized_owner_for_email(
     authorization: str | None,
     request: Request | None = None,
 ) -> dict | None:
+    return await get_authorized_user_for_email(
+        email,
+        authorization,
+        request=request,
+        roles=("owner",),
+    )
+
+
+async def get_authorized_user_for_email(
+    email: str,
+    authorization: str | None,
+    request: Request | None = None,
+    *,
+    roles: tuple[str, ...] = ("owner", "nextkin"),
+) -> dict | None:
+    """Return the signed-in user when the session matches the email (owner or NOK)."""
     if request is None:
         return None
 
@@ -371,14 +387,51 @@ async def get_authorized_owner_for_email(
     except HTTPException:
         return None
 
-    owner = await users_collection.find_one({
-        "email": decoded["sub"],
-        "role": "owner"
-    })
-    if not owner or owner.get("email") != email:
+    role = decoded.get("role") or "owner"
+    if role not in roles:
         return None
 
-    return owner
+    user = None
+    if role == "nextkin":
+        try:
+            user = await users_collection.find_one(
+                {"_id": ObjectId(decoded["sub"]), "role": "nextkin"}
+            )
+        except Exception:
+            user = None
+        if not user:
+            # fallback if older tokens used email as sub
+            user = await users_collection.find_one(
+                {"email": decoded.get("email") or decoded["sub"], "role": "nextkin"}
+            )
+    else:
+        user = await users_collection.find_one(
+            {
+                "email": decoded["sub"],
+                "role": role if role in roles else "owner",
+            }
+        )
+
+    if not user:
+        return None
+
+    session_email = (user.get("email") or "").lower().strip()
+    if session_email != email.lower().strip():
+        return None
+
+    return user
+
+
+async def issue_session_for_user(response: Response, user: dict) -> dict:
+    """Issue owner or NOK/family cookie session based on role."""
+    role = user.get("role")
+    if role == "nextkin":
+        await record_nextkin_last_login(str(user["_id"]))
+        return await issue_nok_session(response, user)
+    if role == "owner":
+        await record_owner_last_login(user["email"])
+        return await issue_owner_session(response, user)
+    raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
 
 async def require_login_mfa_proof(
@@ -393,12 +446,12 @@ async def require_login_mfa_proof(
     if pending:
         return
 
-    authorized_owner = await get_authorized_owner_for_email(
+    authorized = await get_authorized_user_for_email(
         email,
         authorization,
         request=request,
     )
-    if authorized_owner:
+    if authorized:
         return
 
     if not verify_mfa_challenge_token(mfa_challenge_token, email):
@@ -418,7 +471,12 @@ def require_step_up_auth(
     """Sensitive actions require recent password proof or a short-lived step-up token."""
     email = user["email"]
 
-    if password and verify_password(password, user.get("password", "")):
+    stored = (
+        user.get("password")
+        or user.get("password_hash")
+        or ""
+    )
+    if password and stored and verify_password(password, stored):
         return
 
     if verify_mfa_challenge_token(mfa_challenge_token, email):
@@ -1155,9 +1213,144 @@ async def nextkin_login(request: Request, response: Response):
     if owner:
         await notify_owner_nextkin_login(owner=owner, nextkin=user)
 
+    # Step-up MFA for NOK / family (email OTP and/or authenticator).
+    # Every NOK session requires a second factor. If no MFA method is enrolled,
+    # force email OTP (and encourage enrollment). Full Kit keeps the same path.
+    from app.auth.session_manager import is_full_kit_access
+
+    methods = normalize_mfa_methods(user)
+    has_mfa = bool(user.get("mfa_enabled") or any(methods.values()))
+    force_email_mfa = not any(methods.values())
+    force_full_kit_mfa = is_full_kit_access(user) and force_email_mfa
+
+    if has_mfa or force_email_mfa:
+        if has_mfa and not any(methods.values()):
+            await users_collection.update_one(
+                {"_id": user["_id"]},
+                {
+                    "$set": {
+                        "mfa_enabled": False,
+                        "primary_mfa": None,
+                        "mfa_methods": {
+                            "email": False,
+                            "authenticator": False,
+                            "sms": False,
+                        },
+                        "updated_at": datetime.utcnow(),
+                    }
+                },
+            )
+            # Cleared broken MFA flags — still require email OTP for all NOK.
+            has_mfa = False
+
+        billing = (owner or {}).get("billing", {}) if owner else {}
+        if force_email_mfa:
+            mfa_response = {
+                "message": "Password verified",
+                "mfa_required": True,
+                "mfa_setup_recommended": True,
+                "method": "email",
+                "methods": ["email"],
+                "mfa_methods": {
+                    "email": True,
+                    "authenticator": False,
+                    "sms": False,
+                },
+                "email": email,
+                "phone": user.get("phone"),
+                "otp_sent": False,
+            }
+            preferred = "email"
+        else:
+            mfa_response = mfa_login_response(user, billing)
+            preferred = mfa_response.get("method")
+
+        mfa_response["mfa_challenge_token"] = create_mfa_challenge_token(email)
+        mfa_response["step_up_token"] = create_step_up_token(email)
+        mfa_response["portal"] = "nextkin"
+        if force_full_kit_mfa:
+            mfa_response["full_kit_mfa_required"] = True
+        elif force_email_mfa:
+            mfa_response["nok_mfa_required"] = True
+
+        otp_sent, cooldown_seconds, otp_error = await _trigger_login_mfa_otp(
+            request=request,
+            user=user,
+            method=preferred,
+            email=email,
+        )
+        mfa_response["otp_sent"] = otp_sent
+        if cooldown_seconds is not None:
+            mfa_response["cooldown_seconds"] = cooldown_seconds
+        if otp_error:
+            mfa_response["otp_error"] = otp_error
+
+        return mfa_response
+
     await record_nextkin_last_login(str(user["_id"]))
 
     return await issue_nok_session(response, user)
+
+
+@router.post("/reveal-nextkin-password/{nextkin_id}")
+async def reveal_nextkin_password(
+    nextkin_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Owner (or family Admin+) one-shot reveal of a NOK/family master password.
+
+    List endpoints no longer return plaintext. Call this when printing a card
+    or showing the eye toggle — rate-limited per owner.
+    """
+    decoded = decode_access_token(request, authorization)
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
+
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ can reveal Next-of-Kin passwords",
+    )
+
+    await enforce_auth_rate_limit(
+        request,
+        key=f"reveal-nok-pw:{owner['_id']}",
+    )
+
+    try:
+        oid = ObjectId(nextkin_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid Next-of-Kin id") from exc
+
+    nk = await users_collection.find_one(
+        {
+            "_id": oid,
+            "role": "nextkin",
+            "owner_id": str(owner["_id"]),
+        }
+    )
+    if not nk:
+        raise HTTPException(status_code=404, detail="Next-of-Kin not found")
+
+    profile = load_nextkin_profile(dict(nk)) or dict(nk)
+    password = str(profile.get("master_password") or "").strip()
+    if not password:
+        raise HTTPException(
+            status_code=404,
+            detail="No master password on file. Edit the person to set a new one.",
+        )
+
+    return {
+        "success": True,
+        "nextkin_id": str(nk["_id"]),
+        "email": nk.get("email"),
+        "master_password": password,
+        "message": "Show this password privately, then clear it from the screen.",
+    }
+
 
 # ============================================================
 # 4️⃣ OWNER CREATES NEXT-OF-KIN ACCOUNT (FINAL VERSION)
@@ -1428,9 +1621,9 @@ async def get_my_nextkin(
             "has_master_password": bool(
                 nk.get("password_hash") or nk.get("master_password")
             ),
-            # Owner-only: return plaintext so Access Management cards / print
-            # card can show the existing login password with the eye toggle.
-            "master_password": nk.get("master_password") or "",
+            # Do not return plaintext master_password on list.
+            # Owner reveals via POST /auth/reveal-nextkin-password/{id}.
+            "master_password": "",
             "card_storage_location": nk.get("card_storage_location"),
             "key_bag_location": nk.get("key_bag_location"),
             "documents_bag_location": nk.get("documents_bag_location"),
@@ -2068,9 +2261,7 @@ async def verify_totp(
     )
 
     updated_user = await users_collection.find_one({"email": email})
-    if updated_user.get("role") == "owner":
-        await record_owner_last_login(updated_user["email"])
-    return await issue_owner_session(response, updated_user)
+    return await issue_session_for_user(response, updated_user)
 
 
 # ============================================================
@@ -2090,12 +2281,12 @@ async def generate_mfa(
     if user.get("mfa_linked") and methods["authenticator"]:
         raise HTTPException(status_code=400, detail="Authenticator already linked")
 
-    authorized_owner = await get_authorized_owner_for_email(
+    authorized = await get_authorized_user_for_email(
         email,
         authorization,
         request=request,
     )
-    if not authorized_owner:
+    if not authorized:
         raise HTTPException(
             status_code=403,
             detail="Sign in and enable authenticator MFA from Vault Settings."
@@ -2151,12 +2342,12 @@ async def link_authenticator(
     if not user:
         raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
-    authorized_owner = await get_authorized_owner_for_email(
+    authorized = await get_authorized_user_for_email(
         email,
         authorization,
         request=request,
     )
-    if not authorized_owner:
+    if not authorized:
         raise HTTPException(
             status_code=403,
             detail="Sign in and enable authenticator MFA from Vault Settings."
@@ -2219,21 +2410,27 @@ async def send_email_otp(
         )
 
     if not pending:
-        user = await users_collection.find_one({"email": email, "role": "owner"})
+        user = await users_collection.find_one(
+            {"email": email, "role": {"$in": ["owner", "nextkin"]}}
+        )
         if not user:
             raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
         methods = normalize_mfa_methods(user)
-        authorized_owner = await get_authorized_owner_for_email(
+        authorized = await get_authorized_user_for_email(
             email, authorization, request=request
         )
-        if not methods["email"] and not authorized_owner:
+        challenge_ok = verify_mfa_challenge_token(
+            payload.mfa_challenge_token, email
+        )
+        # Linked email MFA, authenticated settings, or password-proven login challenge.
+        if not methods["email"] and not authorized and not challenge_ok:
             raise HTTPException(
                 status_code=403,
                 detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
             )
 
-        if not authorized_owner:
+        if not authorized:
             await require_login_mfa_proof(
                 email=email,
                 mfa_challenge_token=payload.mfa_challenge_token,
@@ -2444,21 +2641,21 @@ async def verify_email_code(
             session_id=payload.otp_session_id,
         )
 
-    user = await users_collection.find_one({
-        "email": email,
-        "role": "owner"
-    })
+    user = await users_collection.find_one(
+        {"email": email, "role": {"$in": ["owner", "nextkin"]}}
+    )
 
     if not user:
         raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
     methods = normalize_mfa_methods(user)
-    authorized_owner = await get_authorized_owner_for_email(
+    authorized = await get_authorized_user_for_email(
         email,
         authorization,
         request=request,
     )
-    if not methods["email"] and not authorized_owner:
+    challenge_ok = verify_mfa_challenge_token(payload.mfa_challenge_token, email)
+    if not methods["email"] and not authorized and not challenge_ok:
         raise HTTPException(
             status_code=403,
             detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
@@ -2487,9 +2684,7 @@ async def verify_email_code(
     )
 
     updated_user = await users_collection.find_one({"_id": user["_id"]})
-    if updated_user.get("role") == "owner":
-        await record_owner_last_login(updated_user["email"])
-    return await issue_owner_session(response, updated_user)
+    return await issue_session_for_user(response, updated_user)
 # ============================================================
 # 🔟 REFRESH TOKEN
 # ============================================================
@@ -2497,6 +2692,17 @@ async def verify_email_code(
 async def refresh_token(request: Request, response: Response):
     owner_refresh = request.cookies.get("oa_refresh_token")
     nok_refresh = request.cookies.get("oa_nok_refresh_token")
+    admin_refresh = request.cookies.get("oa_admin_refresh_token")
+
+    if admin_refresh:
+        try:
+            return await refresh_session_from_cookie(
+                response,
+                request,
+                role="admin",
+            )
+        except ValueError:
+            pass
 
     if owner_refresh:
         try:
@@ -2655,10 +2861,25 @@ async def disable_mfa_method(
 
     decoded = decode_access_token(request, authorization)
 
-    user = await users_collection.find_one({
-        "email": decoded["sub"],
-        "role": "owner"
-    })
+    role = decoded.get("role") or "owner"
+    if role == "nextkin":
+        try:
+            user = await users_collection.find_one(
+                {"_id": ObjectId(decoded["sub"]), "role": "nextkin"}
+            )
+        except Exception:
+            user = None
+        if not user:
+            user = await users_collection.find_one(
+                {
+                    "email": decoded.get("email") or decoded["sub"],
+                    "role": "nextkin",
+                }
+            )
+    else:
+        user = await users_collection.find_one(
+            {"email": decoded["sub"], "role": "owner"}
+        )
     if not user:
         raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
@@ -3110,7 +3331,14 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
         {
             "$set": {
                 "password": hashed_password,
-                "updated_at": datetime.utcnow()
+                "updated_at": datetime.utcnow(),
+                # Force new E2EE envelope on next login (old wrap is password-bound).
+                # Pre-existing v3 ciphertext needs a backup restore if the DEK was lost.
+                "e2ee": {
+                    "password_reset_at": datetime.utcnow(),
+                    "needs_setup": True,
+                    "version": 1,
+                },
             }
         }
     )
@@ -3126,7 +3354,13 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
     await reset_auth_rate_limit(request, key=f"reset-password:{email}")
 
     return {
-        "message": "Password reset successful"
+        "message": "Password reset successful",
+        "e2ee_needs_setup": True,
+        "e2ee_note": (
+            "Vault encryption keys must be re-created on next sign-in. "
+            "Sections already saved with E2EE (v3) require a backup restore "
+            "if you no longer have the previous decryption key."
+        ),
     }
 
 # ============================================================
@@ -3236,23 +3470,24 @@ async def start_email_mfa(
 ):
     email = payload.email.lower().strip()
 
-    user = await users_collection.find_one({"email": email, "role": "owner"})
+    user = await users_collection.find_one(
+        {"email": email, "role": {"$in": ["owner", "nextkin"]}}
+    )
     if not user:
         raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
     methods = normalize_mfa_methods(user)
-    authorized_owner = await get_authorized_owner_for_email(
+    authorized = await get_authorized_user_for_email(
         email,
         authorization,
         request=request,
     )
-    if not methods["email"] and not authorized_owner:
+    skip_captcha = verify_mfa_challenge_token(payload.mfa_challenge_token, email)
+    if not methods["email"] and not authorized and not skip_captcha:
         raise HTTPException(
             status_code=403,
             detail="Email MFA is not linked. Sign in and enable it from Vault Settings."
         )
-
-    skip_captcha = verify_mfa_challenge_token(payload.mfa_challenge_token, email)
 
     try:
         result = await send_email_otp_secure(

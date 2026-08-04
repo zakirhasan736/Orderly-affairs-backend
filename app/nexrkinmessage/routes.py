@@ -11,6 +11,8 @@ from app.security.cloudinary_service import (
     MESSAGE_MEDIA_MAX_BYTES,
     delete_file,
     generate_message_media_upload_signature,
+    signed_media_delivery_url,
+    upload_file as cloudinary_upload_file,
     upload_media_file,
     validate_message_media_size,
 )
@@ -283,6 +285,88 @@ async def get_message_media_upload_signature(
     return generate_message_media_upload_signature(resource_type=normalized)
 
 
+async def _caller_owns_message_media(owner_id: str, public_id: str) -> bool:
+    """True only when this owner's messages/letters reference the public_id."""
+    from app.database import letters_collection
+
+    msg = await messageofnextkin_collection.find_one(
+        {
+            "owner_id": owner_id,
+            "media.public_id": public_id,
+            "is_deleted": {"$ne": True},
+        },
+        {"_id": 1},
+    )
+    if msg:
+        return True
+
+    letter = await letters_collection.find_one(
+        {
+            "owner_id": owner_id,
+            "media.public_id": public_id,
+        },
+        {"_id": 1},
+    )
+    if letter:
+        return True
+
+    from app.database import db
+
+    nok_letters = db["nok_letters"]
+    nok = await nok_letters.find_one(
+        {
+            "owner_id": owner_id,
+            "$or": [
+                {"media.public_id": public_id},
+                {"attachment.public_id": public_id},
+            ],
+        },
+        {"_id": 1},
+    )
+    return bool(nok)
+
+
+@router.post("/media/signed-url")
+async def refresh_message_media_signed_url(
+    data: dict,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Fresh signed URL for authenticated letter/message media (owner-scoped)."""
+    user = decode_access_token(request, authorization)
+    owner_id = str(user.get("owner_id") or user.get("sub") or "").strip()
+    public_id = str(data.get("public_id") or "").strip()
+    if not public_id:
+        raise HTTPException(status_code=400, detail="public_id required")
+    if not owner_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this media")
+    if not (
+        public_id.startswith(MESSAGE_MEDIA_FOLDER.rstrip("/"))
+        or public_id.startswith("letters/media")
+    ):
+        raise HTTPException(status_code=403, detail="Not authorized for this media")
+    if not await _caller_owns_message_media(owner_id, public_id):
+        raise HTTPException(status_code=403, detail="Not authorized for this media")
+
+    resource_type = data.get("resource_type") or data.get("type") or "video"
+    try:
+        url = signed_media_delivery_url(
+            public_id,
+            resource_type=str(resource_type),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Could not sign media URL: {exc}"
+        ) from exc
+
+    return {
+        "public_id": public_id,
+        "url": url,
+        "access_mode": "authenticated",
+        "url_expires_in": 3600,
+    }
+
+
 @router.post("/media")
 async def upload_message_media(
     request: Request,
@@ -313,22 +397,40 @@ async def upload_message_media(
     )
 
     if is_image:
-        from app.security.cloudinary_service import upload_file as cloudinary_upload_file
-
-        uploaded = cloudinary_upload_file(file.file, folder=MESSAGE_MEDIA_FOLDER)
+        uploaded = cloudinary_upload_file(
+            file.file,
+            folder=MESSAGE_MEDIA_FOLDER,
+            access_mode="authenticated",
+            type="authenticated",
+        )
     else:
         uploaded = upload_media_file(
             file.file,
             folder=MESSAGE_MEDIA_FOLDER,
         )
 
+    public_id = uploaded.get("public_id")
+    resource_type = uploaded.get("resource_type")
+    delivery = uploaded.get("secure_url")
+    if public_id:
+        try:
+            delivery = signed_media_delivery_url(
+                str(public_id),
+                resource_type=resource_type,
+            ) or delivery
+        except Exception:
+            pass
+
     return {
-        "url": uploaded["secure_url"],
-        "public_id": uploaded["public_id"],
-        "type": uploaded["resource_type"],
+        "url": delivery,
+        "public_id": public_id,
+        "type": resource_type,
         "format": uploaded.get("format"),
         "size": uploaded.get("bytes"),
+        "access_mode": "authenticated",
+        "url_expires_in": 3600,
     }
+
 
 @router.post("/media/delete")
 async def delete_uploaded_message_media(

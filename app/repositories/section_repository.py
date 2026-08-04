@@ -104,32 +104,59 @@ class SectionRepository:
         subsections: list[str],
         actor: dict | None = None,
         source: str = "manual",
+        encryption_version: int = 2,
+        plaintext: Any | None = None,
     ):
-        existing = await SectionRepository.get(owner_id, section_id)
-        new_fingerprint = _fingerprint_from_encrypted(
-            owner_id,
-            section_id,
-            encrypted_data,
+        from app.security.section_e2ee import (
+            E2EE_VERSION,
+            ciphertext_fingerprint,
+            is_e2ee_doc,
         )
-        new_data = decrypt_section_data(owner_id, section_id, encrypted_data)
+
+        existing = await SectionRepository.get(owner_id, section_id)
+        version = int(encryption_version or 2)
+        e2ee = version == E2EE_VERSION
+
+        if e2ee:
+            new_fingerprint = ciphertext_fingerprint(encrypted_data)
+            new_data: Any = plaintext if plaintext is not None else {}
+        else:
+            new_fingerprint = _fingerprint_from_encrypted(
+                owner_id,
+                section_id,
+                encrypted_data,
+            )
+            new_data = (
+                plaintext
+                if plaintext is not None
+                else decrypt_section_data(owner_id, section_id, encrypted_data)
+            )
 
         old_fingerprint = None
         old_data: Any = {}
         if existing:
             old_fingerprint = existing.get("content_fingerprint")
             if not old_fingerprint and existing.get("encrypted_data"):
-                old_fingerprint = _fingerprint_from_encrypted(
-                    owner_id,
-                    section_id,
-                    existing["encrypted_data"],
-                )
-            if existing.get("encrypted_data"):
-                try:
-                    old_data = decrypt_section_data(
+                if is_e2ee_doc(existing):
+                    old_fingerprint = ciphertext_fingerprint(
+                        existing["encrypted_data"]
+                    )
+                else:
+                    old_fingerprint = _fingerprint_from_encrypted(
                         owner_id,
                         section_id,
                         existing["encrypted_data"],
                     )
+            if existing.get("encrypted_data"):
+                try:
+                    if is_e2ee_doc(existing):
+                        old_data = {}
+                    else:
+                        old_data = decrypt_section_data(
+                            owner_id,
+                            section_id,
+                            existing["encrypted_data"],
+                        )
                 except Exception:
                     old_data = {}
 
@@ -139,9 +166,12 @@ class SectionRepository:
         now = datetime.utcnow()
         actor_meta = actor or {}
         last_updated_by = _actor_payload(actor_meta, source, now)
-        changed_scopes = _changed_scopes(old_data, new_data)
-        if not changed_scopes:
+        if e2ee:
             changed_scopes = [str(section_id)]
+        else:
+            changed_scopes = _changed_scopes(old_data, new_data)
+            if not changed_scopes:
+                changed_scopes = [str(section_id)]
 
         subsection_updates = (
             dict(existing.get("subsection_updates") or {}) if existing else {}
@@ -160,7 +190,7 @@ class SectionRepository:
                     "section_key": section_key,
                     "encrypted_data": encrypted_data,
                     "content_fingerprint": new_fingerprint,
-                    "encryption_version": 2,
+                    "encryption_version": version,
                     "subsections": subsections,
                     "updated_at": now,
                     "last_updated_by": last_updated_by,
@@ -183,18 +213,20 @@ class SectionRepository:
                     "source": source,
                     "scopes": changed_scopes,
                     "created_at": now,
+                    "e2ee": e2ee,
                 }
             )
         except Exception as exc:
-            print("⚠️ Section footprint write failed:", section_id, exc)
+            print("Section footprint write failed:", section_id, exc)
 
-        if _is_effectively_empty(new_data):
+        # E2EE: server cannot judge emptiness of ciphertext — still notify on change.
+        if not e2ee and _is_effectively_empty(new_data):
             return
 
         try:
             await notify_immediate_access_on_section_update(owner_id, section_id)
         except Exception as exc:
-            print("⚠️ Section update notification dispatch failed:", section_id, exc)
+            print("Section update notification dispatch failed:", section_id, exc)
 
     @staticmethod
     async def list_footprints(

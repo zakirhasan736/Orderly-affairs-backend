@@ -43,5 +43,15 @@ support_messages_collection = db["support_messages"]
 feedback_collection = db["feedback"]
 section_footprints_collection = db["section_footprints"]
 
+# System-owner admin panel
+admin_audit_logs_collection = db["admin_audit_logs"]
+admin_coupons_collection = db["admin_coupons"]
+admin_notifications_collection = db["admin_notifications"]
+admin_broadcasts_collection = db["admin_broadcasts"]
+admin_role_defs_collection = db["admin_role_defs"]
+admin_dsar_collection = db["admin_dsar_requests"]
+admin_legacy_collection = db["admin_legacy_requests"]
+admin_security_alerts_collection = db["admin_security_alerts"]
+
 if settings.APP_ENV == "development":
     print("MongoDB connected successfully")

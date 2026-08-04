@@ -13,6 +13,7 @@ from app.security.kit_data_crypto import (
 from app.security.message_crypto import load_message
 from app.security.nok_letter_crypto import load_nok_letter
 from app.security.section_crypto import decrypt_section_data
+from app.security.section_e2ee import present_kit_section
 from app.auth.death_detection import maybe_detect_owner_deceased_from_checklist
 
 from .models import ChecklistUpdate, SectionInput, SubsectionInput, TogglesInput
@@ -208,22 +209,7 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
         if not full_access and section_id not in allowed_sections:
             continue
 
-        try:
-            decrypted = decrypt_section_data(
-                owner_id,
-                section_id,
-                section.get("encrypted_data", ""),
-            )
-        except Exception:
-            decrypted = {}
-
-        sections.append({
-            "id": section_id,
-            "key": section.get("section_key"),
-            "data": decrypted,
-            "subsections": section.get("subsections", []),
-            "updated_at": section.get("updated_at"),
-        })
+        sections.append(present_kit_section(owner_id, section))
 
     # -------------------------
     # 3️⃣ Load NOK Letter

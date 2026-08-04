@@ -106,8 +106,33 @@ Trade-off: one extra backend request per protected page load. Recommended for pr
 - [ ] `ENABLE_EDGE_SESSION_CHECK=true` on frontend.
 - [ ] Stripe webhook URL and `STRIPE_WEBHOOK_SECRET` point to production.
 - [ ] Rotate `AES_256_KEY` and JWT keys per `app/security/KEY_ROTATION.md` if migrating from dev.
+  - JWT: `python scripts/generate_jwt_keys.py --force` (keeps `keys/public.previous.pem` during overlap).
+  - AES: set `AES_256_KEY` + `AES_256_KEY_PREVIOUS`, then `python scripts/rotate_aes_key.py`.
 - [ ] Run TOTP encryption migration (see below).
 - [ ] Run `python scripts/security_smoke_test.py` against production API (all checks pass).
+- [ ] Configure daily backups (`docs/BACKUP.md`): set `BACKUP_ENCRYPTION_KEY`, confirm `storage/backups/`, optional S3 versioning.
+
+---
+
+## Daily encrypted backups
+
+Application-level daily export of Mongo user/kit collections (ciphertext as stored), AES-GCM packaged under `storage/backups/`, optional versioned S3 upload.
+
+See **[`docs/BACKUP.md`](docs/BACKUP.md)** for env vars, cron, restore drill, and AWS versioning steps.
+
+Suggested production:
+
+```env
+BACKUP_ENABLED=true
+BACKUP_ROOT=/var/storage/backups
+BACKUP_ENCRYPTION_KEY=<dedicated base64 32-byte key>
+BACKUP_RETENTION_DAYS=14
+# Later:
+# BACKUP_S3_ENABLED=true
+# BACKUP_S3_BUCKET=...
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+```
 
 ---
 

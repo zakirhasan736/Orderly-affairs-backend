@@ -116,6 +116,7 @@ async def resolve_user_from_id(user_id: str, role: str):
         return await users_collection.find_one(
             {"_id": ObjectId(user_id), "role": "nextkin"}
         )
+    # owner + admin sessions both map to the owner document
     return await users_collection.find_one(
         {"_id": ObjectId(user_id), "role": "owner"}
     )

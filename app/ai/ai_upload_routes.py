@@ -16,16 +16,22 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.config import settings
 from app.database import ai_documents_collection
 from app.ai.ai_auth import get_current_owner, get_user_id
+from app.ai.ai_document_storage import (
+    ai_cloudinary_folder,
+    destroy_ai_document_assets,
+    fetch_cloudinary_bytes,
+    upload_ai_bytes_to_cloudinary,
+    write_temp_ai_file,
+)
+from app.ai.ai_extract_crypto import encrypt_extracted_text
 from app.ai.local_document_extract import extract_document_text
 from app.storage.vault import (
-    ensure_owner_vault_dir,
-    resolve_stored_ai_document_path,
-    resolve_vault_file_path,
+    recover_ai_document_path,
     user_quota_bytes,
     vault_quota_check,
     vault_usage_bytes,
@@ -34,7 +40,7 @@ from app.storage.vault import (
 
 router = APIRouter(prefix="/ai", tags=["ai-upload"])
 
-# 0 = permanent vault storage (recommended on VPS).
+# 0 = permanent storage (Cloudinary + Mongo).
 AI_UPLOAD_TTL_MINUTES = int(
     os.getenv("AI_UPLOAD_TTL_MINUTES", str(settings.AI_UPLOAD_TTL_MINUTES))
 )
@@ -66,19 +72,6 @@ def normalize_mongo_datetime(value):
         return value.astimezone(timezone.utc).replace(tzinfo=None)
 
     return value
-
-
-def safe_delete_file(path_value: str | None):
-    if not path_value:
-        return
-
-    try:
-        path = Path(path_value)
-
-        if path.exists() and path.is_file():
-            path.unlink()
-    except Exception:
-        pass
 
 
 def normalize_document_topic(name: Optional[str]) -> str:
@@ -138,7 +131,57 @@ def serialize_ai_document(doc: dict) -> dict:
         "section": doc.get("routed_section") or doc.get("section"),
         "content_hash": doc.get("content_hash"),
         "extract_reuse": bool(doc.get("extract_reuse")),
+        "storage": doc.get("storage") or "vault",
+        "public_id": doc.get("public_id"),
     }
+
+
+def sniff_media_type(filename: str, media_type: str, sample: bytes | None = None) -> str:
+    media_type = (media_type or "").strip() or "application/octet-stream"
+    if media_type not in {"", "application/octet-stream", "binary/octet-stream"}:
+        return media_type
+
+    lower = str(filename).lower()
+    if lower.endswith(".pdf"):
+        return "application/pdf"
+    if lower.endswith(".png"):
+        return "image/png"
+    if lower.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if lower.endswith(".webp"):
+        return "image/webp"
+    if lower.endswith(".gif"):
+        return "image/gif"
+    if lower.endswith((".tif", ".tiff")):
+        return "image/tiff"
+    if lower.endswith(".bmp"):
+        return "image/bmp"
+    if lower.endswith((".txt", ".csv", ".md", ".log")):
+        return "text/plain"
+    if lower.endswith(".json"):
+        return "application/json"
+
+    if not sample:
+        return media_type
+
+    head = sample[:16]
+    if sample.startswith(b"%PDF"):
+        return "application/pdf"
+    if sample.startswith(b"\x89PNG"):
+        return "image/png"
+    if head[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if sample.startswith(b"GIF8"):
+        return "image/gif"
+    if len(sample) >= 12 and sample[:4] == b"RIFF" and sample[8:12] == b"WEBP":
+        return "image/webp"
+    if head[:2] == b"BM":
+        return "image/bmp"
+    if sample and b"\x00" not in sample and all(
+        b in (9, 10, 13) or 32 <= b <= 126 or b >= 128 for b in sample
+    ):
+        return "text/plain"
+    return media_type
 
 
 async def delete_same_topic_documents(
@@ -150,6 +193,7 @@ async def delete_same_topic_documents(
     """
     Replace prior uploads of the same document topic for this owner.
     Same topic = same normalized filename (+ matching section when provided).
+    Deletes Cloudinary + Mongo (and any legacy vault path).
     """
     topic = normalize_document_topic(original_filename)
     if not topic:
@@ -163,6 +207,8 @@ async def delete_same_topic_documents(
         {
             "_id": 1,
             "path": 1,
+            "public_id": 1,
+            "resource_type": 1,
             "original_filename": 1,
             "section": 1,
             "routed_section": 1,
@@ -185,7 +231,7 @@ async def delete_same_topic_documents(
         if not file_id:
             continue
 
-        safe_delete_file(doc.get("path"))
+        destroy_ai_document_assets(doc)
         await ai_documents_collection.delete_one({"_id": doc["_id"]})
         replaced.append(file_id)
 
@@ -200,11 +246,11 @@ async def cleanup_expired_ai_documents():
 
     cursor = ai_documents_collection.find(
         {"expires_at": {"$lte": now}},
-        {"path": 1},
+        {"path": 1, "public_id": 1, "resource_type": 1},
     )
 
     async for doc in cursor:
-        safe_delete_file(doc.get("path"))
+        destroy_ai_document_assets(doc)
         await ai_documents_collection.delete_one({"_id": doc["_id"]})
 
 
@@ -245,11 +291,13 @@ async def upload_ai_document(
     ext = ALLOWED_MIME_TYPES[file.content_type]
     file_id = uuid.uuid4().hex
     stored_filename = f"{file_id}{ext}"
-    folder_uuid, vault_dir = await ensure_owner_vault_dir(current_user)
-    file_path = resolve_vault_file_path(folder_uuid, stored_filename)
     original_filename = (file.filename or f"document{ext}").strip() or f"document{ext}"
     section_key = str(section).strip() if section is not None else ""
     content_hash = content_hash_for_bytes(contents)
+    email = str(current_user.get("email") or "").strip().lower()
+    folder = ai_cloudinary_folder(email, user_id)
+    temp_path: Path | None = None
+    cloud_meta: dict | None = None
 
     try:
         # Exact byte match — copy AI cache before topic cleanup deletes the prior row.
@@ -260,21 +308,28 @@ async def upload_ai_document(
         extract_reuse = bool(prior)
         reused_from_file_id = str(prior.get("_id")) if prior else None
 
-        # Same topic re-upload: delete previous DB row + disk file, then add new.
+        # Same topic re-upload: delete previous Cloudinary + DB row, then add new.
         replaced_file_ids = await delete_same_topic_documents(
             user_id=user_id,
             original_filename=original_filename,
             section=section_key or None,
         )
 
-        vault_dir.mkdir(parents=True, exist_ok=True)
-        file_path.write_bytes(contents)
+        # Local extract from a temp copy (TXT / searchable PDF / OCR).
+        temp_path = write_temp_ai_file(contents, ext)
+        local_extract = extract_document_text(temp_path, file.content_type)
 
-        # Best effort file permission hardening.
-        try:
-            os.chmod(file_path, 0o600)
-        except Exception:
-            pass
+        cloud_meta = upload_ai_bytes_to_cloudinary(
+            contents=contents,
+            folder=folder,
+            filename=original_filename,
+            mime_type=file.content_type,
+        )
+        if not cloud_meta.get("public_id") or not cloud_meta.get("secure_url"):
+            raise HTTPException(
+                status_code=500,
+                detail="Document upload to Cloudinary failed.",
+            )
 
         now = utc_now_naive()
         expires_at = (
@@ -283,16 +338,11 @@ async def upload_ai_document(
             else None
         )
 
-        # Local extract snapshot (cheap for TXT/searchable PDF; OCR optional).
-        local_extract = extract_document_text(file_path, file.content_type)
-
         doc = {
             "_id": file_id,
             "user_id": user_id,
             "owner_id": user_id,
-            "folder_uuid": folder_uuid,
             "role": "owner",
-            "path": str(file_path),
             "stored_filename": stored_filename,
             "original_filename": original_filename,
             "mime_type": file.content_type,
@@ -303,8 +353,16 @@ async def upload_ai_document(
             "expires_at": expires_at,
             "status": "uploaded",
             "source": "upload",
-            "storage": "vault",
-            "extracted_text": (local_extract.get("text") or "")[:50000],
+            "storage": "cloudinary",
+            "public_id": cloud_meta["public_id"],
+            "secure_url": cloud_meta["secure_url"],
+            "resource_type": cloud_meta.get("resource_type") or "auto",
+            "cloudinary_folder": folder,
+            "extracted_text": encrypt_extracted_text(
+                user_id=user_id,
+                file_id=file_id,
+                text=(local_extract.get("text") or "")[:50000],
+            ),
             "extract_method": local_extract.get("method"),
             "extract_quality": local_extract.get("quality_score"),
             "needs_vision": bool(local_extract.get("needs_vision")),
@@ -348,17 +406,37 @@ async def upload_ai_document(
             "needs_vision": bool(local_extract.get("needs_vision")),
             "extract_method": local_extract.get("method"),
             "extract_quality": local_extract.get("quality_score"),
-            "storage": "vault",
+            "storage": "cloudinary",
+            "public_id": cloud_meta["public_id"],
         }
 
     except HTTPException:
-        safe_delete_file(str(file_path))
+        if cloud_meta and cloud_meta.get("public_id"):
+            destroy_ai_document_assets(
+                {
+                    "public_id": cloud_meta.get("public_id"),
+                    "resource_type": cloud_meta.get("resource_type"),
+                }
+            )
         raise
 
     except Exception as e:
         print("❌ AI document upload failed:", repr(e))
-        safe_delete_file(str(file_path))
+        if cloud_meta and cloud_meta.get("public_id"):
+            destroy_ai_document_assets(
+                {
+                    "public_id": cloud_meta.get("public_id"),
+                    "resource_type": cloud_meta.get("resource_type"),
+                }
+            )
         raise HTTPException(status_code=500, detail="Document upload failed.")
+
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 @router.get("/documents")
@@ -384,10 +462,14 @@ async def list_owner_ai_documents(
 
     documents = []
     async for doc in cursor:
-        path = resolve_stored_ai_document_path(doc)
-        if not path:
+        storage = str(doc.get("storage") or "")
+        if storage == "cloudinary" and doc.get("secure_url"):
+            documents.append(serialize_ai_document(doc))
             continue
-        documents.append(serialize_ai_document(doc))
+        # Legacy vault rows — only list when bytes are recoverable locally.
+        path = await recover_ai_document_path(doc)
+        if path or doc.get("secure_url"):
+            documents.append(serialize_ai_document(doc))
 
     used = await vault_usage_bytes(user_id=user_id)
     return {
@@ -417,53 +499,59 @@ async def preview_ai_document(
 
     expires_at = normalize_mongo_datetime(doc.get("expires_at"))
     if expires_at and expires_at <= utc_now_naive():
-        safe_delete_file(doc.get("path"))
+        destroy_ai_document_assets(doc)
         await ai_documents_collection.delete_one({"_id": file_id, "user_id": user_id})
         raise HTTPException(status_code=410, detail="Document expired.")
 
-    path = resolve_stored_ai_document_path(doc)
-    if not path:
-        # Content-hash reuse may point at an earlier upload that still has bytes.
-        reused_id = doc.get("reused_from_file_id")
-        if reused_id and str(reused_id) != str(file_id):
-            prior = await ai_documents_collection.find_one(
-                {"_id": reused_id, "user_id": user_id},
-            )
-            if prior:
-                path = resolve_stored_ai_document_path(prior)
-                if path:
-                    doc = prior
-    if not path:
-        raise HTTPException(
-            status_code=404,
-            detail="Document file missing on disk. Re-upload the file to preview it.",
-        )
-
-    filename = doc.get("original_filename") or path.name
+    filename = doc.get("original_filename") or doc.get("stored_filename") or "document"
     media_type = (doc.get("mime_type") or "").strip() or "application/octet-stream"
 
-    # Some uploads land as octet-stream / empty — sniff from extension so
-    # image + text previews work in the browser.
-    if media_type in {"", "application/octet-stream", "binary/octet-stream"}:
-        lower = str(filename).lower()
-        if lower.endswith(".pdf"):
-            media_type = "application/pdf"
-        elif lower.endswith(".png"):
-            media_type = "image/png"
-        elif lower.endswith((".jpg", ".jpeg")):
-            media_type = "image/jpeg"
-        elif lower.endswith(".webp"):
-            media_type = "image/webp"
-        elif lower.endswith(".gif"):
-            media_type = "image/gif"
-        elif lower.endswith((".tif", ".tiff")):
-            media_type = "image/tiff"
-        elif lower.endswith(".bmp"):
-            media_type = "image/bmp"
-        elif lower.endswith((".txt", ".csv", ".md", ".log")):
-            media_type = "text/plain"
-        elif lower.endswith(".json"):
-            media_type = "application/json"
+    secure_url = str(doc.get("secure_url") or "").strip()
+    public_id = str(doc.get("public_id") or "").strip()
+    if public_id or secure_url:
+        try:
+            payload = fetch_cloudinary_bytes(
+                public_id=public_id or None,
+                resource_type=doc.get("resource_type"),
+                secure_url=secure_url or None,
+            )
+        except Exception as exc:
+            print(f"❌ Cloudinary preview fetch failed for {file_id}: {exc}")
+            raise HTTPException(
+                status_code=410,
+                detail=(
+                    "Document file is not available. "
+                    "Re-upload the file to preview it."
+                ),
+            ) from exc
+
+        media_type = sniff_media_type(str(filename), media_type, payload[:512])
+        return Response(
+            content=payload,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}"',
+                "Cache-Control": "private, max-age=60",
+            },
+        )
+
+    path = await recover_ai_document_path(doc)
+    if not path:
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "Document file is not available on this server. "
+                "Re-upload the image or text file to preview it here."
+            ),
+        )
+
+    sample = None
+    try:
+        with open(path, "rb") as fh:
+            sample = fh.read(512)
+    except Exception:
+        sample = None
+    media_type = sniff_media_type(str(filename), media_type, sample)
 
     return FileResponse(
         path=str(path),
@@ -478,17 +566,17 @@ async def delete_uploaded_ai_document(
     file_id: str,
     current_user=Depends(get_current_owner),
 ):
-    """Owner deletes a vault upload (disk + Mongo) from overview / section history."""
+    """Owner deletes an upload (Cloudinary + Mongo) from overview / section history."""
     user_id = get_user_id(current_user)
     doc = await ai_documents_collection.find_one(
         {"_id": file_id, "user_id": user_id},
-        {"path": 1},
+        {"path": 1, "public_id": 1, "resource_type": 1},
     )
 
     if not doc:
         # Already gone — treat as success for idempotent cleanup.
         return {"success": True, "deleted": False}
 
-    safe_delete_file(doc.get("path"))
+    destroy_ai_document_assets(doc)
     await ai_documents_collection.delete_one({"_id": file_id, "user_id": user_id})
     return {"success": True, "deleted": True}

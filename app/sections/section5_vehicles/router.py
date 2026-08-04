@@ -4,6 +4,7 @@ from bson import ObjectId
 from app.database import users_collection
 from app.repositories.section_repository import SectionRepository
 from app.security.section_crypto import encrypt_section_data, decrypt_section_data
+from app.security.section_e2ee import present_section_for_api
 from app.sections.section5_vehicles.schemas import Section5VehiclesPayload
 from app.security.token_resolver import decode_owner_or_nok_token
 from app.security.section_file_cleanup import process_section_deleted_files
@@ -94,12 +95,7 @@ async def get_section5(request: Request,
     if not section:
         return {}
 
-    decrypted = decrypt_section_data(owner_id, SECTION_ID, section["encrypted_data"])
-
-    return {
-        "section_key": SECTION_KEY,
-        "data": decrypted,
-    }
+    return present_section_for_api(owner_id, SECTION_ID, SECTION_KEY, section)
 
 
 @router.delete("")
