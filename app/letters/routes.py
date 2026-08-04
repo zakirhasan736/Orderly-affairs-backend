@@ -9,7 +9,7 @@ from app.security.nok_letter_crypto import load_nok_letter, prepare_nok_letter_f
 from app.security.nextkin_profile_crypto import load_nextkin_profile
 from app.security.token_resolver import decode_owner_or_nok_token
 from app.config import nextkin_login_url
-from .core import require_owner, require_nok
+from .core import require_owner, require_nok, require_owner_or_family_letter_access
 from .models import NOKLetterIn, NOKLetterOut
 
 router = APIRouter(prefix="/nok-letter", tags=["nok-letter"])
@@ -359,11 +359,24 @@ async def get_my_nok_letter(
     nok_id: Optional[str] = Query(None, description="Target NOK user _id"),
 ):
     if nok_id:
-        owner = await require_owner(request, authorization)
+        owner = await require_owner_or_family_letter_access(
+            request, authorization, write=False
+        )
         return await _get_owner_nok_letter(str(owner["_id"]), nok_id)
 
     decoded = decode_owner_or_nok_token(request, authorization)
     if decoded.get("role") == "nextkin":
+        # Pure Next-of-Kin (not family dashboard) reads their own letter.
+        from app.auth.access_types import is_family_collaborator
+        from app.auth.vault_actor import resolve_actor
+
+        actor = await resolve_actor(decoded)
+        if actor and is_family_collaborator(actor):
+            owner = await require_owner_or_family_letter_access(
+                request, authorization, write=False
+            )
+            return await _get_owner_nok_letter(str(owner["_id"]), None)
+
         nk, ctx = await require_nok(request, authorization)
         owner_id = str(ctx["owner_id"])
         nok_user_id = str(nk["_id"])
@@ -387,7 +400,9 @@ async def create_or_replace_my_nok_letter(
     authorization: str | None = Header(default=None),
     nok_id: Optional[str] = Query(None),
 ):
-    owner = await require_owner(request, authorization)
+    owner = await require_owner_or_family_letter_access(
+        request, authorization, write=True
+    )
     owner_id = str(owner["_id"])
     merged = await apply_autofill(owner_id, payload, nok_id)
 
@@ -426,7 +441,9 @@ async def update_my_nok_letter(
     authorization: str | None = Header(default=None),
     nok_id: Optional[str] = Query(None),
 ):
-    owner = await require_owner(request, authorization)
+    owner = await require_owner_or_family_letter_access(
+        request, authorization, write=True
+    )
     owner_id = str(owner["_id"])
 
     # Compute merge (ensures text matches the chosen NOK if any)

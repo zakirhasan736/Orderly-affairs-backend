@@ -199,6 +199,11 @@ async def list_family_members(request: Request, authorization: str | None):
                 "has_master_password": bool(
                     nk.get("password_hash") or nk.get("master_password")
                 ),
+                "e2ee_wrap_configured": bool(
+                    isinstance(nk.get("e2ee_wrap"), dict)
+                    and (nk.get("e2ee_wrap") or {}).get("wrapped_dek_b64")
+                    and (nk.get("e2ee_wrap") or {}).get("salt_b64")
+                ),
                 # Never list plaintext — use reveal endpoint when needed.
                 "master_password": "",
                 "created_at": nk.get("created_at"),

@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 import time
 
+from app.security.token_resolver import decode_owner_or_nok_token
 from fastapi import APIRouter, UploadFile, File, Header, HTTPException, Request
 from bson import ObjectId
 
-from app.security.token_resolver import decode_access_token
 from app.security.section_file_cleanup import delete_owned_file
 from app.security.cloudinary_service import (
     signed_delivery_url,
@@ -99,7 +99,7 @@ async def upload_asset(
     file: UploadFile = File(...),
     authorization: str | None = Header(default=None),
 ):
-    decoded = decode_access_token(request, authorization)
+    decoded = decode_owner_or_nok_token(request, authorization)
     stamp = await _actor_stamp(decoded)
 
     try:
@@ -166,7 +166,7 @@ async def refresh_signed_upload_url(
     authorization: str | None = Header(default=None),
 ):
     """Return a fresh signed Cloudinary URL for an authenticated vault attachment."""
-    decoded = decode_access_token(request, authorization)
+    decoded = decode_owner_or_nok_token(request, authorization)
     public_id = str(data.get("public_id") or "").strip()
     if not public_id:
         raise HTTPException(status_code=400, detail="public_id required")
@@ -205,7 +205,7 @@ async def delete_upload(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    decoded = decode_access_token(request, authorization)
+    decoded = decode_owner_or_nok_token(request, authorization)
 
     if decoded["role"] == "owner":
         public_id = data.get("public_id")

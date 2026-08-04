@@ -10,17 +10,18 @@ from typing import List, Optional
 from fastapi import (
     APIRouter,
     BackgroundTasks,
-    Depends,
     File,
     Form,
+    Header,
     HTTPException,
+    Request,
     UploadFile,
 )
 from fastapi.responses import FileResponse, Response
 
 from app.config import settings
 from app.database import ai_documents_collection
-from app.ai.ai_auth import get_current_owner, get_user_id
+from app.ai.ai_auth import get_user_id, get_vault_owner_for_ai
 from app.ai.ai_document_storage import (
     ai_cloudinary_folder,
     destroy_ai_document_assets,
@@ -257,12 +258,16 @@ async def cleanup_expired_ai_documents():
 @router.post("/upload-document")
 async def upload_ai_document(
     background_tasks: BackgroundTasks,
+    request: Request,
     file: UploadFile = File(...),
     section: Optional[str] = Form(None),
-    current_user=Depends(get_current_owner),
+    authorization: str | None = Header(default=None),
 ):
     background_tasks.add_task(cleanup_expired_ai_documents)
 
+    current_user = await get_vault_owner_for_ai(
+        request, authorization, require_upload=True
+    )
     user_id = get_user_id(current_user)
 
     if file.content_type not in ALLOWED_MIME_TYPES:
@@ -442,10 +447,12 @@ async def upload_ai_document(
 @router.get("/documents")
 async def list_owner_ai_documents(
     background_tasks: BackgroundTasks,
-    current_user=Depends(get_current_owner),
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
-    """List this owner's uploaded autofill documents (name + metadata)."""
+    """List vault owner's uploaded autofill documents (owner + family readers)."""
     background_tasks.add_task(cleanup_expired_ai_documents)
+    current_user = await get_vault_owner_for_ai(request, authorization)
     user_id = get_user_id(current_user)
     now = utc_now_naive()
 
@@ -486,9 +493,11 @@ async def list_owner_ai_documents(
 @router.get("/document/{file_id}/preview")
 async def preview_ai_document(
     file_id: str,
-    current_user=Depends(get_current_owner),
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
-    """Stream the uploaded file so the owner can view image / text / PDF."""
+    """Stream the uploaded file so owner/family can view image / text / PDF."""
+    current_user = await get_vault_owner_for_ai(request, authorization)
     user_id = get_user_id(current_user)
     doc = await ai_documents_collection.find_one(
         {"_id": file_id, "user_id": user_id},
@@ -564,9 +573,13 @@ async def preview_ai_document(
 @router.delete("/document/{file_id}")
 async def delete_uploaded_ai_document(
     file_id: str,
-    current_user=Depends(get_current_owner),
+    request: Request,
+    authorization: str | None = Header(default=None),
 ):
-    """Owner deletes an upload (Cloudinary + Mongo) from overview / section history."""
+    """Owner or family Editor+ deletes an upload from overview / section history."""
+    current_user = await get_vault_owner_for_ai(
+        request, authorization, require_upload=True
+    )
     user_id = get_user_id(current_user)
     doc = await ai_documents_collection.find_one(
         {"_id": file_id, "user_id": user_id},

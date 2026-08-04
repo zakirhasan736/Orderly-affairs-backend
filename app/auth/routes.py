@@ -61,7 +61,7 @@ from app.security.cookie_auth import (
     NOK_ACCESS_COOKIE,
     extract_access_token,
 )
-from app.security.token_resolver import decode_access_token
+from app.security.token_resolver import decode_access_token, decode_owner_or_nok_token
 from app.security.device_fingerprint import log_device_fingerprint
 from app.security.totp_crypto import (
     encrypt_totp_value,
@@ -1598,16 +1598,41 @@ async def get_my_nextkin(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    decoded = decode_access_token(request, authorization)
-    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
-    from app.auth.vault_actor import require_owner_or_family
-
-    _, owner = await require_owner_or_family(
-        decoded,
-        perm="can_manage_nextkin",
-        area_id=DASHBOARD_AREA_SECTION2_NOK,
-        detail="Only the owner or a family Admin+ with Section 2 access can view Next-of-Kin",
+    decoded = decode_owner_or_nok_token(request, authorization)
+    from app.auth.family_access import (
+        DASHBOARD_AREA_OVERVIEW,
+        DASHBOARD_AREA_SECTION2_NOK,
+        family_has_dashboard_area,
     )
+    from app.auth.portal_roles import resolve_dashboard_permissions
+    from app.auth.vault_actor import (
+        require_owner_or_family,
+        require_owner_or_family_reader,
+    )
+
+    if decoded.get("role") == "owner":
+        _, owner = await require_owner_or_family(decoded)
+    else:
+        actor, owner = await require_owner_or_family_reader(
+            decoded,
+            detail="Family access required to view Next-of-Kin",
+        )
+        perms = resolve_dashboard_permissions(actor)
+        allowed = (
+            bool(perms.get("can_manage_nextkin"))
+            or family_has_dashboard_area(actor, DASHBOARD_AREA_SECTION2_NOK)
+            or family_has_dashboard_area(actor, "2")
+            or family_has_dashboard_area(actor, "3")
+            or family_has_dashboard_area(actor, DASHBOARD_AREA_OVERVIEW)
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "No access to Next-of-Kin list. Ask the owner to grant "
+                    "Section 2, Section 3 (letters), or overview."
+                ),
+            )
 
     from app.auth.access_types import NEXTKIN_ACCESS_MONGO_FILTER
 
