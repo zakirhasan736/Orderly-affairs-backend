@@ -6,7 +6,12 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 
 from app.admin.deps import require_admin
-from app.admin.permissions import user_can_clear_rate_limits
+from app.admin.audit import log_admin_action
+from app.admin.permissions import (
+    user_can_clear_all_rate_limits,
+    user_can_clear_rate_limits,
+    user_can_manage_subscriptions,
+)
 from app.admin.users import apply_complimentary_grant
 from app.billing.access import get_comp
 from app.config import settings
@@ -40,6 +45,9 @@ class ClearRateLimitsRequest(BaseModel):
     email: Optional[EmailStr] = None
     clear_auth_limits: bool = True
     clear_otp_logs: bool = False
+    # Super-admin only: wipe every auth_rate_limits doc when email is omitted.
+    confirm_global: bool = False
+    reason: Optional[str] = None
 
 
 @admin_billing_router.get("/overview")
@@ -111,6 +119,8 @@ async def grant_complimentary(
     - duration: free until ends_at; reminders at ~30d / 7d / 1d before end
     """
     admin = await require_admin(request, authorization)
+    if not user_can_manage_subscriptions(admin):
+        raise HTTPException(403, "Not allowed to manage complimentary access")
     email = payload.email.lower().strip()
 
     user = await users_collection.find_one({"email": email, "role": "owner"})
@@ -136,7 +146,9 @@ async def revoke_complimentary(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    await require_admin(request, authorization)
+    admin = await require_admin(request, authorization)
+    if not user_can_manage_subscriptions(admin):
+        raise HTTPException(403, "Not allowed to manage complimentary access")
     email = payload.email.lower().strip()
     now = datetime.utcnow()
 
@@ -184,25 +196,48 @@ async def clear_rate_limits(
 
     deleted_auth = 0
     deleted_otp = 0
+    email = (str(payload.email).lower().strip() if payload.email else "")
 
     if payload.clear_auth_limits:
-        if payload.email:
-            email = payload.email.lower().strip()
+        if email:
             # keys look like "login:user@x.com:1.2.3.4"
             result = await auth_rate_limits_collection.delete_many(
                 {"key": {"$regex": email.replace(".", "\\.")}}
             )
             deleted_auth = result.deleted_count or 0
         else:
+            if not user_can_clear_all_rate_limits(admin):
+                raise HTTPException(
+                    403,
+                    "Email required — only super admins may clear all rate limits",
+                )
+            if not payload.confirm_global:
+                raise HTTPException(
+                    400,
+                    "confirm_global=true required to wipe all auth rate limits",
+                )
             result = await auth_rate_limits_collection.delete_many({})
             deleted_auth = result.deleted_count or 0
 
-    if payload.clear_otp_logs and payload.email:
-        email = payload.email.lower().strip()
+    if payload.clear_otp_logs:
+        if not email:
+            raise HTTPException(400, "email required to clear OTP send logs")
         result = await otp_fraud_logs_collection.delete_many(
             {"email": email, "action": "send"}
         )
         deleted_otp = result.deleted_count or 0
+
+    await log_admin_action(
+        admin.get("email") or "",
+        "clear_rate_limits",
+        target=email or "*",
+        meta={
+            "deleted_auth_limit_docs": deleted_auth,
+            "deleted_otp_send_logs": deleted_otp,
+            "global": not bool(email),
+            "reason": payload.reason,
+        },
+    )
 
     return {
         "message": "Rate limits cleared",

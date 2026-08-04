@@ -19,7 +19,9 @@ from app.admin.permissions import (
     user_can_delete_users,
     user_can_edit_profile_email,
     user_can_force_logout,
+    user_can_issue_coupons,
     user_can_manage_roles,
+    user_can_manage_subscriptions,
     user_can_suspend_accounts,
     user_is_read_only,
 )
@@ -308,6 +310,8 @@ async def admin_session(
         "can_clear_rate_limits": user_can_clear_rate_limits(scoped),
         "can_force_logout": user_can_force_logout(scoped),
         "can_delete_users": user_can_delete_users(scoped),
+        "can_manage_subscriptions": user_can_manage_subscriptions(scoped),
+        "can_issue_coupons": user_can_issue_coupons(scoped),
         "read_only": user_is_read_only(scoped),
     }
 

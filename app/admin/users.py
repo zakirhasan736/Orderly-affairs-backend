@@ -8,15 +8,15 @@ from typing import Literal, Optional
 import stripe
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.admin.audit import log_admin_action
 from app.admin.deps import require_admin, require_system_owner
 from app.admin.permissions import (
-    user_can_clear_rate_limits,
     user_can_edit_profile_email,
     user_can_force_logout,
+    user_can_manage_subscriptions,
     user_can_suspend_accounts,
 )
 from app.billing.access import compute_comp_end, default_billing_fields, get_comp
@@ -281,8 +281,11 @@ async def delete_user(
     request: Request,
     authorization: str | None = Header(default=None),
     hard: bool = Query(default=False),
+    reason: str | None = Query(default=None, max_length=500),
 ):
     admin = await require_system_owner(request, authorization)
+    if not (reason or "").strip():
+        raise HTTPException(400, "reason is required for account deletion")
     user = await users_collection.find_one({"_id": _oid(user_id), "role": "owner"})
     if not user:
         raise HTTPException(404, "User not found")
@@ -298,7 +301,7 @@ async def delete_user(
             admin.get("email") or "",
             "user_hard_delete",
             target=str(user["_id"]),
-            meta={"email": user.get("email")},
+            meta={"email": user.get("email"), "reason": reason},
         )
         return {"message": "User permanently deleted", "id": user_id}
 
@@ -318,9 +321,13 @@ async def delete_user(
         admin.get("email") or "",
         "user_soft_delete",
         target=str(user["_id"]),
-        meta={"email": user.get("email")},
+        meta={"email": user.get("email"), "reason": reason},
     )
     return {"message": "User soft-deleted", "id": user_id, "deleted_at": now}
+
+
+class ForceLogoutRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 @admin_users_router.post("/{user_id}/force-logout")
@@ -328,6 +335,7 @@ async def force_logout(
     user_id: str,
     request: Request,
     authorization: str | None = Header(default=None),
+    payload: ForceLogoutRequest = Body(default_factory=ForceLogoutRequest),
 ):
     admin = await require_admin(request, authorization)
     if not user_can_force_logout(admin):
@@ -336,11 +344,15 @@ async def force_logout(
     if not user:
         raise HTTPException(404, "User not found")
 
+    if not (payload.reason or "").strip():
+        raise HTTPException(400, "reason is required")
+
     await revoke_all_user_refresh_tokens(str(user["_id"]))
     await log_admin_action(
         admin.get("email") or "",
         "user_force_logout",
         target=str(user["_id"]),
+        meta={"reason": payload.reason},
     )
     return {"message": "All refresh tokens revoked", "id": user_id}
 
@@ -353,6 +365,8 @@ async def grant_comp_for_user(
     authorization: str | None = Header(default=None),
 ):
     admin = await require_admin(request, authorization)
+    if not user_can_manage_subscriptions(admin):
+        raise HTTPException(403, "Not allowed to manage complimentary access")
     user = await users_collection.find_one({"_id": _oid(user_id), "role": "owner"})
     if not user:
         raise HTTPException(404, "User not found")

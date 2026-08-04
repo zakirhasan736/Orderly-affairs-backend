@@ -282,3 +282,37 @@ def user_can_force_logout(user: dict) -> bool:
         return False
     role = normalize_admin_role(user.get("admin_role"))
     return role in ("super_admin", "admin", "editor", "support")
+
+
+def user_can_manage_subscriptions(user: dict) -> bool:
+    """Grant/revoke comps, billing mutations — not viewers."""
+    if user_is_read_only(user):
+        return False
+    return _matrix_flag(user.get("admin_role"), "Manage subscriptions & comps")
+
+
+def user_can_issue_coupons(user: dict) -> bool:
+    """Create/revoke platform coupons (matrix: super_admin only)."""
+    if user_is_read_only(user):
+        return False
+    return _matrix_flag(user.get("admin_role"), "Issue & revoke coupon codes")
+
+
+def user_can_issue_lifetime_coupons(user: dict) -> bool:
+    if user_is_read_only(user):
+        return False
+    role = normalize_admin_role(user.get("admin_role"))
+    if role == "super_admin":
+        return True
+    defn = BUILTIN_ROLES.get(role) or {}
+    return bool(defn.get("can_issue_lifetime_coupons"))
+
+
+def user_can_issue_refunds(user: dict) -> bool:
+    """Stripe refunds — same bar as subscription management."""
+    return user_can_manage_subscriptions(user)
+
+
+def user_can_clear_all_rate_limits(user: dict) -> bool:
+    """Unscoped wipe of every auth rate-limit doc — super_admin only."""
+    return normalize_admin_role(user.get("admin_role")) == "super_admin"

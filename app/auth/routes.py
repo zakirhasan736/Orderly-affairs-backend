@@ -215,6 +215,12 @@ class ReportOwnerDeceasedRequest(BaseModel):
     master_password: str
     confirm: bool = False
 
+class RevealNextKinPasswordRequest(BaseModel):
+    password: str | None = None
+    mfa_challenge_token: str | None = None
+    step_up_token: str | None = None
+
+
 class MFAResetRequest(BaseModel):
     password: str | None = None
     mfa_challenge_token: str | None = None
@@ -1296,11 +1302,13 @@ async def nextkin_login(request: Request, response: Response):
 async def reveal_nextkin_password(
     nextkin_id: str,
     request: Request,
+    payload: RevealNextKinPasswordRequest,
     authorization: str | None = Header(default=None),
 ):
     """
     Owner (or family Admin+) one-shot reveal of a NOK/family master password.
 
+    Requires step-up (account password / recent MFA / step_up_token).
     List endpoints no longer return plaintext. Call this when printing a card
     or showing the eye toggle — rate-limited per owner.
     """
@@ -1308,11 +1316,18 @@ async def reveal_nextkin_password(
     from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
     from app.auth.vault_actor import require_owner_or_family
 
-    _, owner = await require_owner_or_family(
+    actor, owner = await require_owner_or_family(
         decoded,
         perm="can_manage_nextkin",
         area_id=DASHBOARD_AREA_SECTION2_NOK,
         detail="Only the owner or a family Admin+ can reveal Next-of-Kin passwords",
+    )
+
+    require_step_up_auth(
+        user=actor,
+        password=payload.password,
+        mfa_challenge_token=payload.mfa_challenge_token,
+        step_up_token=payload.step_up_token,
     )
 
     await enforce_auth_rate_limit(

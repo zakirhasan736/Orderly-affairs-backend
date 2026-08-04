@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field
 
 from app.admin.audit import log_admin_action
 from app.admin.deps import require_admin
+from app.admin.permissions import (
+    user_can_issue_coupons,
+    user_can_issue_lifetime_coupons,
+)
 from app.database import admin_coupons_collection
 
 admin_coupons_router = APIRouter(prefix="/admin/coupons", tags=["admin-coupons"])
@@ -66,6 +70,10 @@ async def generate_coupons(
     authorization: str | None = Header(default=None),
 ):
     admin = await require_admin(request, authorization)
+    if not user_can_issue_coupons(admin):
+        raise HTTPException(403, "Not allowed to issue coupons")
+    if payload.kind == "lifetime" and not user_can_issue_lifetime_coupons(admin):
+        raise HTTPException(403, "Only super admins may issue lifetime coupons")
 
     if payload.kind == "duration" and not payload.duration_days:
         raise HTTPException(400, "duration_days required for duration coupons")
@@ -181,6 +189,8 @@ async def revoke_coupon(
     authorization: str | None = Header(default=None),
 ):
     admin = await require_admin(request, authorization)
+    if not user_can_issue_coupons(admin):
+        raise HTTPException(403, "Not allowed to revoke coupons")
     normalized = code.strip().upper()
     doc = await admin_coupons_collection.find_one({"code": normalized})
     if not doc:
