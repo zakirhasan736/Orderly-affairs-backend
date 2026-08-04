@@ -38,3 +38,15 @@ class FamilyUpdateRequest(BaseModel):
     portal_role: str | None = None
     dashboard_permissions: dict[str, bool] | None = None
     master_password: str | None = None
+
+
+class FamilyRoleAreaEntry(BaseModel):
+    access_level: str = "Full Dashboard Access"
+    authorized_sections: list[str] | None = []
+
+
+class FamilyRoleAreasUpdateRequest(BaseModel):
+    """Global defaults per portal role (viewer → super_admin)."""
+
+    roles: dict[str, FamilyRoleAreaEntry]
+    apply_to_members: bool = True

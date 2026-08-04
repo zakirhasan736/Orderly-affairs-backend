@@ -9,7 +9,15 @@ from fastapi import HTTPException, Request
 
 from app.auth.access_types import ACCESS_TYPE_FAMILY, FAMILY_ACCESS_MONGO_FILTER
 from app.auth.family_access import prepare_family_access_fields
-from app.auth.family_schemas import FamilyCreateRequest, FamilyUpdateRequest
+from app.auth.family_role_areas import (
+    load_role_area_defaults,
+    save_role_area_defaults,
+)
+from app.auth.family_schemas import (
+    FamilyCreateRequest,
+    FamilyRoleAreasUpdateRequest,
+    FamilyUpdateRequest,
+)
 from app.auth.portal_roles import (
     normalize_portal_role,
     resolve_dashboard_permissions,
@@ -347,4 +355,62 @@ async def delete_family_member(
     return {
         "message": f"Family member '{family.get('full_name') or family['email']}' deleted.",
         "deleted_id": family_id,
+    }
+
+
+async def get_family_role_areas(request: Request, authorization: str | None):
+    decoded = decode_access_token(request, authorization)
+    actor = await _resolve_actor(decoded)
+    if not actor:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_owner_or_family_manager(decoded, actor)
+    owner = await _resolve_owner_for_actor(actor)
+    roles = load_role_area_defaults(owner)
+    return {
+        "roles": {
+            role_id: {
+                **entry,
+                "portal_role": role_id,
+                "portal_role_label": role_label(role_id),
+            }
+            for role_id, entry in roles.items()
+        }
+    }
+
+
+async def update_family_role_areas(
+    payload: FamilyRoleAreasUpdateRequest,
+    request: Request,
+    authorization: str | None,
+):
+    decoded = decode_access_token(request, authorization)
+    actor = await _resolve_actor(decoded)
+    if not actor:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_owner_or_family_manager(decoded, actor)
+    owner = await _resolve_owner_for_actor(actor)
+
+    roles_payload = {
+        key: value.model_dump() if hasattr(value, "model_dump") else value.dict()
+        for key, value in (payload.roles or {}).items()
+    }
+    try:
+        result = await save_role_area_defaults(
+            owner,
+            roles_payload,
+            apply_to_members=bool(payload.apply_to_members),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "message": (
+            f"Updated access areas for {len(result['updated_roles'])} role(s)"
+            + (
+                f"; applied to {result['members_updated']} family member(s)."
+                if payload.apply_to_members
+                else "."
+            )
+        ),
+        **result,
     }

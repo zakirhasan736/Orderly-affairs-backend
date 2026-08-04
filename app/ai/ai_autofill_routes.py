@@ -580,7 +580,7 @@ async def _finalize_autofill_success(
         routed_section = source_doc.get("routed_section")
 
     update_fields: dict = {
-        "status": "uploaded",
+        "status": "ready",
         "consumed_sections": existing_consumed,
         "cached_extractions": cached_extractions,
         "last_classification": classification,

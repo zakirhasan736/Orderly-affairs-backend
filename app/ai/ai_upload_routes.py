@@ -117,13 +117,30 @@ def serialize_ai_document(doc: dict) -> dict:
     created = normalize_mongo_datetime(doc.get("created_at"))
     updated = normalize_mongo_datetime(doc.get("updated_at")) or created
     expires = normalize_mongo_datetime(doc.get("expires_at"))
+    raw_status = str(doc.get("status") or "uploaded").strip().lower()
+    consumed = doc.get("consumed_sections") or []
+    cached = doc.get("cached_extractions") or {}
+    has_fill = (isinstance(consumed, list) and len(consumed) > 0) or (
+        isinstance(cached, dict) and bool(cached)
+    )
+    # Autofill success historically reset status to "uploaded" / left "processing".
+    # Surface those as ready once the document has already filled vault fields.
+    if has_fill and raw_status in {"uploaded", "processing", "extracting", "classifying", "queued"}:
+        ui_status = "ready"
+    elif raw_status in {"ready", "done", "complete", "filled"}:
+        ui_status = "ready"
+    else:
+        ui_status = raw_status or "uploaded"
+
     return {
         "file_id": str(doc.get("_id")),
         "name": doc.get("original_filename") or doc.get("stored_filename") or "Document",
         "original_filename": doc.get("original_filename"),
         "mime_type": doc.get("mime_type"),
         "size_bytes": doc.get("size_bytes"),
-        "status": doc.get("status") or "uploaded",
+        "status": ui_status,
+        "filled": bool(has_fill),
+        "consumed_sections": list(consumed) if isinstance(consumed, list) else [],
         "created_at": created.isoformat() if created else None,
         "updated_at": updated.isoformat() if updated else None,
         "expires_at": expires.isoformat() if expires else None,

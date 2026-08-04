@@ -236,7 +236,11 @@ class DeleteAccountRequest(BaseModel):
 
 
 from app.auth.nextkin_schemas import NextKinCreateRequest
-from app.auth.family_schemas import FamilyCreateRequest, FamilyUpdateRequest
+from app.auth.family_schemas import (
+    FamilyCreateRequest,
+    FamilyRoleAreasUpdateRequest,
+    FamilyUpdateRequest,
+)
 
 # ---- Next-of-Kin ----
 class NextKinUpdateRequest(BaseModel):
@@ -1973,6 +1977,29 @@ async def delete_family(
     from app.auth.family_routes import delete_family_member
 
     return await delete_family_member(family_id, request, authorization)
+
+
+@router.get("/family-role-areas")
+async def get_family_role_areas(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Global default vault areas per portal role (owner kit)."""
+    from app.auth.family_routes import get_family_role_areas as _get
+
+    return await _get(request, authorization)
+
+
+@router.put("/family-role-areas")
+async def put_family_role_areas(
+    payload: FamilyRoleAreasUpdateRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Increase/reduce access areas for Viewer–Super Admin globally."""
+    from app.auth.family_routes import update_family_role_areas
+
+    return await update_family_role_areas(payload, request, authorization)
 
 
 # app/auth/routes.py  (ADD THIS NEW ENDPOINT ANYWHERE AFTER THE ROUTER IS CREATED)
