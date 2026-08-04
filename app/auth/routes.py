@@ -2708,36 +2708,50 @@ async def refresh_token(request: Request, response: Response):
     owner_refresh = request.cookies.get("oa_refresh_token")
     nok_refresh = request.cookies.get("oa_nok_refresh_token")
     admin_refresh = request.cookies.get("oa_admin_refresh_token")
+    # Family/NOK dashboards send X-OA-Session-Kind so a leftover owner refresh
+    # cookie cannot steal the rotation and wipe the collaborator session.
+    session_kind = (request.headers.get("X-OA-Session-Kind") or "").strip().lower()
+    prefer_nok = session_kind in ("family", "nextkin")
 
-    if admin_refresh:
+    async def try_role(role: str) -> dict | None:
         try:
             return await refresh_session_from_cookie(
                 response,
                 request,
-                role="admin",
+                role=role,
             )
         except ValueError:
-            pass
+            return None
 
-    if owner_refresh:
-        try:
-            return await refresh_session_from_cookie(
-                response,
-                request,
-                role="owner",
-            )
-        except ValueError:
-            pass
+    if admin_refresh and not prefer_nok:
+        result = await try_role("admin")
+        if result is not None:
+            return result
+
+    if prefer_nok and nok_refresh:
+        result = await try_role("nextkin")
+        if result is not None:
+            return result
+
+    if owner_refresh and not prefer_nok:
+        result = await try_role("owner")
+        if result is not None:
+            return result
 
     if nok_refresh:
-        try:
-            return await refresh_session_from_cookie(
-                response,
-                request,
-                role="nextkin",
-            )
-        except ValueError:
-            pass
+        result = await try_role("nextkin")
+        if result is not None:
+            return result
+
+    if owner_refresh:
+        result = await try_role("owner")
+        if result is not None:
+            return result
+
+    if admin_refresh:
+        result = await try_role("admin")
+        if result is not None:
+            return result
 
     raise HTTPException(status_code=401, detail="Missing refresh session")
 
@@ -2745,6 +2759,8 @@ async def refresh_token(request: Request, response: Response):
 @router.get("/session")
 async def get_session(request: Request):
     """Return auth state without exposing JWT values to JavaScript."""
+
+    candidates: list[dict] = []
 
     for cookie_name, role in (
         (OWNER_ACCESS_COOKIE, "owner"),
@@ -2807,9 +2823,22 @@ async def get_session(request: Request):
             payload["auto_renew"] = flags["auto_renew"]
             payload["trial_mode"] = flags["trial_mode"]
             payload["lock_message"] = flags["lock_message"]
-        return payload
+        candidates.append(payload)
 
-    return {"authenticated": False}
+    if not candidates:
+        return {"authenticated": False}
+
+    # Leftover owner cookies must not hide an active family collaborator session.
+    for payload in candidates:
+        if (
+            payload.get("role") == "nextkin"
+            and payload.get("access_type") == "family"
+        ):
+            return payload
+    for payload in candidates:
+        if payload.get("role") == "nextkin":
+            return payload
+    return candidates[0]
 
 
 # ============================================================

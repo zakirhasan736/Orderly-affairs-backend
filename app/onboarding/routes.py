@@ -1,4 +1,4 @@
-from app.security.token_resolver import decode_access_token
+from app.security.token_resolver import decode_owner_or_nok_token
 from fastapi import APIRouter, HTTPException, Header, Request
 from datetime import datetime
 from app.database import onboarding_progress
@@ -14,7 +14,7 @@ async def get_tour_status(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    user = decode_access_token(request, authorization)
+    user = decode_owner_or_nok_token(request, authorization)
 
     doc = await onboarding_progress.find_one(
         {"user_id": user["sub"], "role": user["role"]}
@@ -41,7 +41,7 @@ async def update_tour_status(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    user = decode_access_token(request, authorization)
+    user = decode_owner_or_nok_token(request, authorization)
     now = datetime.utcnow()
 
     update_fields = {

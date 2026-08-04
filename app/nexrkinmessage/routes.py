@@ -1,4 +1,4 @@
-from app.security.token_resolver import decode_access_token
+from app.security.token_resolver import decode_owner_or_nok_token
 from fastapi import APIRouter, HTTPException, UploadFile, File, Header, Query, Request
 from datetime import datetime
 from bson import ObjectId
@@ -46,8 +46,24 @@ def parse_message_id(letter_id: str) -> ObjectId:
         raise HTTPException(status_code=400, detail="Invalid message id")
 
 
-def get_authenticated_user(request: Request, authorization: str | None = None):
-    return decode_access_token(request, authorization)
+async def resolve_message_owner_id(
+    request: Request,
+    authorization: str | None = None,
+    *,
+    write: bool = False,
+) -> str:
+    """Owner email used as message owner_id; family may act on granted section 4."""
+    from app.auth.vault_actor import require_owner_or_family
+
+    decoded = decode_owner_or_nok_token(request, authorization)
+    if decoded.get("role") == "owner":
+        return decoded["sub"]
+
+    kwargs = {"area_id": "4", "detail": "No access to messages"}
+    if write:
+        kwargs["perm"] = "can_write"
+    _, owner = await require_owner_or_family(decoded, **kwargs)
+    return owner["email"]
 
 
 def delete_media_file(media: dict | None) -> bool:
@@ -69,8 +85,7 @@ async def create_letter(
     payload: LetterCreate,
     request: Request, authorization: str | None = Header(default=None)
 ):
-    user = decode_access_token(request, authorization)
-    owner_id = user.get("owner_id") or user.get("sub")
+    owner_id = await resolve_message_owner_id(request, authorization, write=True)
 
     doc = prepare_message_for_storage({
         "owner_id": owner_id,
@@ -96,9 +111,8 @@ async def create_letter(
 
 @router.get("")
 async def get_letters(request: Request, authorization: str | None = Header(default=None)):
-    user = decode_access_token(request, authorization)
-    owner_id = user.get("owner_id") or user.get("sub")
-   
+    owner_id = await resolve_message_owner_id(request, authorization, write=False)
+
     letters = await messageofnextkin_collection.find({
         "owner_id": owner_id,
         "is_deleted": False,
@@ -129,8 +143,7 @@ async def get_letters(request: Request, authorization: str | None = Header(defau
 
 @router.delete("")
 async def delete_all_letters(request: Request, authorization: str | None = Header(default=None)):
-    user = decode_access_token(request, authorization)
-    owner_id = user.get("owner_id") or user.get("sub")
+    owner_id = await resolve_message_owner_id(request, authorization, write=True)
 
     letters = await messageofnextkin_collection.find({
         "owner_id": owner_id,
@@ -160,8 +173,7 @@ async def update_letter(
     payload: LetterUpdate,
     request: Request, authorization: str | None = Header(default=None)
 ):
-    user = get_authenticated_user(request, authorization)
-    owner_id = user.get("owner_id") or user.get("sub")
+    owner_id = await resolve_message_owner_id(request, authorization, write=True)
     letter_oid = parse_message_id(letter_id)
 
     letter = await messageofnextkin_collection.find_one({
@@ -216,8 +228,7 @@ async def update_letter(
 
 @router.delete("/{letter_id}")
 async def delete_letter(letter_id: str, request: Request, authorization: str | None = Header(default=None)):
-    user = get_authenticated_user(request, authorization)
-    owner_id = user.get("owner_id") or user.get("sub")
+    owner_id = await resolve_message_owner_id(request, authorization, write=True)
     letter_oid = parse_message_id(letter_id)
 
     letter = await messageofnextkin_collection.find_one({
@@ -246,8 +257,7 @@ async def delete_letter(letter_id: str, request: Request, authorization: str | N
 
 @router.delete("/{letter_id}/media")
 async def delete_letter_media(letter_id: str, request: Request, authorization: str | None = Header(default=None)):
-    user = get_authenticated_user(request, authorization)
-    owner_id = user.get("owner_id") or user.get("sub")
+    owner_id = await resolve_message_owner_id(request, authorization, write=True)
     letter_oid = parse_message_id(letter_id)
 
     letter = await messageofnextkin_collection.find_one({
@@ -274,7 +284,7 @@ async def get_message_media_upload_signature(
     file_size: int = Query(..., ge=1),
     resource_type: str = Query("video"),
 ):
-    decode_access_token(request, authorization)
+    await resolve_message_owner_id(request, authorization, write=True)
 
     try:
         validate_message_media_size(file_size)
@@ -333,8 +343,7 @@ async def refresh_message_media_signed_url(
     authorization: str | None = Header(default=None),
 ):
     """Fresh signed URL for authenticated letter/message media (owner-scoped)."""
-    user = decode_access_token(request, authorization)
-    owner_id = str(user.get("owner_id") or user.get("sub") or "").strip()
+    owner_id = await resolve_message_owner_id(request, authorization, write=False)
     public_id = str(data.get("public_id") or "").strip()
     if not public_id:
         raise HTTPException(status_code=400, detail="public_id required")
@@ -373,7 +382,7 @@ async def upload_message_media(
     file: UploadFile = File(...),
     authorization: str | None = Header(default=None),
 ):
-    decode_access_token(request, authorization)
+    await resolve_message_owner_id(request, authorization, write=True)
 
     if not is_allowed_message_media(file):
         raise HTTPException(
@@ -443,9 +452,7 @@ async def delete_uploaded_message_media(
     - orphan cleanup (uploaded while composing, before the message is saved)
     - removing an attachment that is already linked to one of the owner's messages
     """
-    decoded = decode_access_token(request, authorization)
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Owner only")
+    await resolve_message_owner_id(request, authorization, write=True)
 
     public_id = (payload.public_id or "").strip()
     if not public_id.startswith(f"{MESSAGE_MEDIA_FOLDER}/") and public_id != MESSAGE_MEDIA_FOLDER:

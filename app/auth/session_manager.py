@@ -50,6 +50,11 @@ def is_full_kit_access(user: dict) -> bool:
 
 
 def _nok_access_minutes(user: dict) -> int:
+    # Family collaborators work in the owner dashboard — use owner-length sessions.
+    from app.auth.access_types import is_family_collaborator
+
+    if is_family_collaborator(user):
+        return max(1, int(settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     if is_full_kit_access(user):
         return max(1, int(settings.NOK_FULL_KIT_ACCESS_TOKEN_EXPIRE_MINUTES))
     return max(1, int(settings.NOK_ACCESS_TOKEN_EXPIRE_MINUTES))

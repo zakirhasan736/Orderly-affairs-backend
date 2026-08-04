@@ -47,14 +47,26 @@ def decode_owner_or_nok_token(
 ) -> dict:
     owner_token = request.cookies.get(OWNER_ACCESS_COOKIE)
     nok_token = request.cookies.get(NOK_ACCESS_COOKIE)
+    session_kind = (request.headers.get("X-OA-Session-Kind") or "").strip().lower()
+    prefer_nok = session_kind in ("family", "nextkin")
 
-    if owner_token:
-        decoded = verify_token(owner_token)
+    def _verify(cookie_val: str | None) -> dict | None:
+        if not cookie_val:
+            return None
+        return verify_token(cookie_val)
+
+    if prefer_nok:
+        decoded = _verify(nok_token)
         if decoded:
             return decoded
-
-    if nok_token:
-        decoded = verify_token(nok_token)
+        decoded = _verify(owner_token)
+        if decoded:
+            return decoded
+    else:
+        decoded = _verify(owner_token)
+        if decoded:
+            return decoded
+        decoded = _verify(nok_token)
         if decoded:
             return decoded
 
