@@ -4,7 +4,12 @@ from typing import List, Union
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 from random import randint
-from app.auth.death_detection import record_nextkin_last_login, record_owner_last_login
+from app.auth.death_detection import (
+    record_nextkin_last_login,
+    record_owner_last_login,
+    user_is_returning_login,
+    user_is_returning_for_session,
+)
 from app.auth.service import mark_owner_deceased, trigger_death_letters
 from bson.errors import InvalidId
 from secrets import token_urlsafe
@@ -436,11 +441,16 @@ async def issue_session_for_user(response: Response, user: dict) -> dict:
     """Issue owner or NOK/family cookie session based on role."""
     role = user.get("role")
     if role == "nextkin":
-        await record_nextkin_last_login(str(user["_id"]))
-        return await issue_nok_session(response, user)
+        returning = await record_nextkin_last_login(str(user["_id"]))
+        session = await issue_nok_session(response, user)
+        session["returning_user"] = returning
+        return session
     if role == "owner":
-        await record_owner_last_login(user["email"])
-        return await issue_owner_session(response, user)
+        returning = await record_owner_last_login(user["email"])
+        session = await issue_owner_session(response, user)
+        session["returning_user"] = returning
+        session["full_name"] = user.get("full_name")
+        return session
     raise HTTPException(status_code=400, detail=MFA_GENERIC_ERROR)
 
 
@@ -1174,10 +1184,12 @@ async def owner_login(data: LoginRequest, request: Request, response: Response):
 
             return response
 
-    await record_owner_last_login(email)
+    returning = await record_owner_last_login(email)
     log_device_fingerprint(request, "login_success", subject=email)
     session = await issue_owner_session(response, user)
     session["email"] = email
+    session["returning_user"] = returning
+    session["full_name"] = user.get("full_name")
     return session
 
 # ============================================================
@@ -2863,6 +2875,7 @@ async def get_session(request: Request):
                 ) or []
                 payload["access_level"] = user.get("access_level")
                 payload["full_name"] = user.get("full_name")
+                payload["returning_user"] = user_is_returning_for_session(user)
         if role == "owner":
             from app.billing.access import billing_session_flags
 
@@ -2875,6 +2888,8 @@ async def get_session(request: Request):
             payload["auto_renew"] = flags["auto_renew"]
             payload["trial_mode"] = flags["trial_mode"]
             payload["lock_message"] = flags["lock_message"]
+            payload["full_name"] = user.get("full_name")
+            payload["returning_user"] = user_is_returning_for_session(user)
         candidates.append(payload)
 
     if not candidates:

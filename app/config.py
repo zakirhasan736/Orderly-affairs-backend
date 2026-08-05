@@ -169,8 +169,10 @@ class Settings(BaseSettings):
     WEEKLY_SECURITY_MONITOR_MINUTE: int = 30
 
     # === Client-side E2EE for vault sections (encryption_version 3) ===
-    # When true: clients may store opaque ciphertext; server cannot decrypt v3.
-    E2EE_ENABLED: bool = True
+    # Disabled by default: family/NOK sharing needs server AES-256-GCM (v2).
+    # Client E2EE blocked shared-access reads; fire-department grade at-rest
+    # encryption remains via AES_256_KEY + encrypt_section_data.
+    E2EE_ENABLED: bool = False
 
     # === Daily encrypted backups (Mongo user data as stored ciphertext) ===
     BACKUP_ENABLED: bool = True

@@ -1,17 +1,21 @@
 # Client-side E2EE for vault sections
 
-**Status:** Implemented behind `E2EE_ENABLED=true` (default).
+**Status:** **Disabled by default** (`E2EE_ENABLED=false`).
 
-## AES-256-GCM is good — key custody is the issue
+Product mode is **server AES-256-GCM (v2)** so owner, family, and NOK can all read granted sections after normal login. Client E2EE (v3) blocked shared access because the server cannot decrypt those rows for collaborators.
 
-| Model | Cipher | Who holds the key? | If API / Mongo / admin is compromised |
-|-------|--------|--------------------|----------------------------------------|
-| **v2** (legacy) | AES-256-GCM | Server `AES_256_KEY` | Attacker can decrypt vault section bodies |
-| **v3** (E2EE) | AES-256-GCM (same algorithm) | Browser DEK only; server stores *wrapped* DEK | Attacker sees opaque ciphertext only |
+## AES-256-GCM is still the security grade
 
-So: **we are not replacing a weak cipher.** We are moving from *server-held keys* to *client-held keys*. AES-256-GCM remains the right authenticated encryption choice in both models.
+| Model | Cipher | Who holds the key? | Family / NOK sharing |
+|-------|--------|--------------------|----------------------|
+| **v2** (default) | AES-256-GCM | Server `AES_256_KEY` | Works — server decrypts for authorized sessions |
+| **v3** (optional E2EE) | AES-256-GCM | Browser DEK only | Hard — every collaborator needs a DEK wrap |
 
-## What “E2EE” means here
+**v2 is not “unencrypted.”** Data at rest in Mongo is still AES-256-GCM. Access is controlled by auth + ACL (owner / family / NOK).
+
+Set `E2EE_ENABLED=true` only if you intentionally want server-blind vault ciphertext (and accept the wrap/unlock complexity).
+
+## What “E2EE” means when enabled
 
 | Party | Can decrypt vault section ciphertext (v3)? |
 |-------|--------------------------------------------|
@@ -20,9 +24,15 @@ So: **we are not replacing a weak cipher.** We are moving from *server-held keys
 | API / Mongo / System Owner admin tools | **No** — only opaque ciphertext + wrapped DEK |
 | Server `AES_256_KEY` | **Not used** for `encryption_version: 3` |
 
-Legacy `encryption_version: 2` rows remain server-decryptable until migrated (owner unlock runs a full section pass).
+When E2EE is turned off, owner login can still unwrap an existing DEK once to convert leftover v3 rows back to v2.
 
-## Flow
+## Flow (default — server AES)
+
+1. Owner / family / NOK sign in → authorized section APIs return decrypted JSON.
+2. Section save → server encrypts with `AES_256_KEY` (v2).
+3. Kit payload for NOK uses the same server decrypt path for granted sections.
+
+## Flow (optional client E2EE)
 
 1. Owner signs in with password → client derives wrapping key (PBKDF2-SHA256, 310k) → unwraps or creates DEK → holds DEK in memory (idle / hidden-tab auto-lock).
 2. Server stores `{ salt, wrapped_dek }` on `users.e2ee` — never the DEK.

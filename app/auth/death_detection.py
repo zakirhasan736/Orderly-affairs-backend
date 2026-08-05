@@ -35,26 +35,71 @@ def _owner_last_activity(owner: dict) -> datetime | None:
     return owner.get("last_login_at") or owner.get("created_at")
 
 
-async def record_owner_last_login(owner_email: str) -> None:
+async def record_owner_last_login(owner_email: str) -> bool:
+    """
+    Stamp last login and increment login_count.
+    Returns True when this owner has signed in before (returning user).
+    """
+    email = owner_email.lower()
+    prior = await users_collection.find_one(
+        {"email": email, "role": "owner"},
+        {"login_count": 1, "last_login_at": 1},
+    )
+    returning = user_is_returning_login(prior)
+
     await users_collection.update_one(
-        {"email": owner_email.lower(), "role": "owner"},
+        {"email": email, "role": "owner"},
         {
             "$set": {"last_login_at": datetime.utcnow()},
+            "$inc": {"login_count": 1},
             "$unset": {"inactivity_warning_sent_at": ""},
         },
     )
+    return returning
 
 
-async def record_nextkin_last_login(nextkin_id: str) -> None:
+def user_is_returning_login(user: dict | None) -> bool:
+    """True when the user had at least one completed login before this attempt."""
+    if not user:
+        return False
+    login_count = int(user.get("login_count") or 0)
+    if login_count >= 1:
+        return True
+    return bool(user.get("last_login_at"))
+
+
+def user_is_returning_for_session(user: dict | None) -> bool:
+    """True for dashboard greeting after the first-ever login is complete."""
+    if not user:
+        return False
+    login_count = int(user.get("login_count") or 0)
+    if login_count >= 2:
+        return True
+    if login_count == 1:
+        return False
+    return bool(user.get("last_login_at"))
+
+
+async def record_nextkin_last_login(nextkin_id: str) -> bool:
     try:
         nk_object_id = ObjectId(nextkin_id)
     except Exception:
-        return
+        return False
+
+    prior = await users_collection.find_one(
+        {"_id": nk_object_id, "role": "nextkin"},
+        {"login_count": 1, "last_login_at": 1},
+    )
+    returning = user_is_returning_login(prior)
 
     await users_collection.update_one(
         {"_id": nk_object_id, "role": "nextkin"},
-        {"$set": {"last_login_at": datetime.utcnow()}},
+        {
+            "$set": {"last_login_at": datetime.utcnow()},
+            "$inc": {"login_count": 1},
+        },
     )
+    return returning
 
 
 async def owner_inactive_long_enough(owner: dict) -> bool:

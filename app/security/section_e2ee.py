@@ -96,8 +96,15 @@ def prepare_write_blob(
     Returns (encrypted_or_opaque_blob, encryption_version, plaintext_or_none).
 
     For v3, plaintext is None — server must not attempt decrypt.
+    When E2EE_ENABLED is false, never accept opaque client ciphertext.
     """
+    from app.config import settings
+
     if is_e2ee_write_body(body):
+        if not bool(getattr(settings, "E2EE_ENABLED", False)):
+            raise ValueError(
+                "Client E2EE writes are disabled — use server AES-256-GCM section APIs"
+            )
         return str(body["ciphertext"]), E2EE_VERSION, None
     # Strip transport keys if mixed
     clean = {k: v for k, v in body.items() if k not in ("e2ee", "ciphertext")}

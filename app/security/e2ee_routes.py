@@ -44,11 +44,13 @@ async def e2ee_status(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    if not _e2ee_enabled():
-        return {"enabled": False, "configured": False, "reason": "E2EE_ENABLED=false"}
-
+    """
+    When E2EE_ENABLED=false, client write/setup is off. Existing wraps are still
+    returned so owners can unlock once and convert leftover v3 rows to server AES.
+    """
     decoded = decode_owner_or_nok_token(request, authorization)
     role = decoded.get("role")
+    enabled = _e2ee_enabled()
 
     if role == "owner":
         user = await users_collection.find_one(
@@ -59,16 +61,20 @@ async def e2ee_status(
         env = (user.get("e2ee") or {}) if isinstance(user.get("e2ee"), dict) else {}
         configured = bool(env.get("wrapped_dek_b64") and env.get("salt_b64"))
         return {
-            "enabled": True,
+            "enabled": enabled,
+            "client_write": enabled,
             "role": "owner",
             "configured": configured,
-            "needs_setup": bool(env.get("needs_setup")) or not configured,
+            "needs_setup": bool(enabled)
+            and (bool(env.get("needs_setup")) or not configured),
+            "migration_unlock_available": bool(configured and not enabled),
             "kdf": env.get("kdf"),
             "kdf_iterations": env.get("kdf_iterations"),
             "wrap_alg": env.get("wrap_alg"),
             "salt_b64": env.get("salt_b64"),
             "wrapped_dek_b64": env.get("wrapped_dek_b64"),
             "updated_at": env.get("updated_at"),
+            "reason": None if enabled else "E2EE_ENABLED=false",
         }
 
     if role == "nextkin":
@@ -82,16 +88,20 @@ async def e2ee_status(
             if isinstance(user.get("e2ee_wrap"), dict)
             else {}
         )
+        configured = bool(env.get("wrapped_dek_b64") and env.get("salt_b64"))
         return {
-            "enabled": True,
+            "enabled": enabled,
+            "client_write": enabled,
             "role": "nextkin",
-            "configured": bool(env.get("wrapped_dek_b64") and env.get("salt_b64")),
+            "configured": configured,
+            "migration_unlock_available": bool(configured and not enabled),
             "kdf": env.get("kdf"),
             "kdf_iterations": env.get("kdf_iterations"),
             "wrap_alg": env.get("wrap_alg"),
             "salt_b64": env.get("salt_b64"),
             "wrapped_dek_b64": env.get("wrapped_dek_b64"),
             "owner_id": user.get("owner_id"),
+            "reason": None if enabled else "E2EE_ENABLED=false",
         }
 
     raise HTTPException(403, "Owner or Next-of-Kin only")
