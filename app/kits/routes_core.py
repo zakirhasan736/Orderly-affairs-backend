@@ -19,6 +19,7 @@ from app.auth.death_detection import maybe_detect_owner_deceased_from_checklist
 from .models import ChecklistUpdate, SectionInput, SubsectionInput, TogglesInput
 from .core import require_owner, require_nok, get_or_init_kit, ensure_section_struct, ensure_subsection_struct, filter_sections_for_nok
 from app.security.access_control import assert_section_read_access, nok_has_section_access
+from app.security.vault_principals import require_nok_principal
 from app.notifications.personal_message_emails import send_personal_message_email
 
 router = APIRouter(prefix="/kit", tags=["kit-core"])
@@ -357,6 +358,8 @@ async def save_checklist_progress(
         raise HTTPException(status_code=401, detail="Next-of-Kin not found")
     if not nextkin.get("immediate_access", False):
         raise HTTPException(status_code=403, detail="Access not approved")
+
+    require_nok_principal(nextkin)
 
     nextkin_id = str(nextkin["_id"])
     owner_id = str(nextkin.get("owner_id") or decoded.get("owner_id") or "")

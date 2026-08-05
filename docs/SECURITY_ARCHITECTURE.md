@@ -8,6 +8,14 @@ Interactive canvas (diagrams + charts): open via **File → Open File**:
 
 ---
 
+## Related documents
+
+- **`docs/SECURITY_MODEL.md`** — Official client-facing security model (Owner · Family · NOK, RBAC, ABAC, AES-256-GCM)
+- `docs/SECURITY_LAYERS.md` — Eight-layer defense in depth
+- `docs/E2EE.md` — Optional client encryption
+
+---
+
 ## 1. System topology
 
 ```

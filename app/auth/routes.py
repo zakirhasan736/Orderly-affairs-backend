@@ -2046,6 +2046,10 @@ async def get_nextkin_access(
     if not nextkin:
         raise HTTPException(status_code=404, detail="Next-of-Kin not found")
 
+    from app.security.vault_principals import require_nok_principal
+
+    require_nok_principal(nextkin)
+
     if not nextkin.get("immediate_access", False):
         raise HTTPException(status_code=403, detail="Access not approved")
 
@@ -3182,6 +3186,10 @@ async def nextkin_report_owner_deceased(
     )
     if not nextkin:
         raise HTTPException(status_code=400, detail=NOK_LOGIN_GENERIC)
+
+    from app.security.vault_principals import require_nok_principal
+
+    require_nok_principal(nextkin, detail=NOK_LOGIN_GENERIC)
 
     if not verify_password(payload.master_password, nextkin.get("password_hash", "")):
         raise HTTPException(status_code=401, detail=NOK_LOGIN_GENERIC)

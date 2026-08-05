@@ -1,5 +1,10 @@
 from fastapi import HTTPException
 
+from app.auth.access_types import is_nextkin_collaborator
+
+# NOK survivor portal — management sections blocked at API (see SECURITY_MODEL.md).
+NOK_HIDDEN_SECTION_IDS = frozenset({"2", "3", "4"})
+
 
 def assert_section_read_access(user: dict, section_id: str):
     """
@@ -16,6 +21,16 @@ def assert_section_read_access(user: dict, section_id: str):
     # Must be approved
     if not user.get("immediate_access", False):
         raise HTTPException(status_code=403, detail="Access not approved")
+
+    # ABAC: NOK principal cannot read owner-management sections via survivor portal.
+    if is_nextkin_collaborator(user):
+        sid = str(section_id or "").strip()
+        parent = "".join(ch for ch in sid if ch.isdigit()) or sid
+        if sid in NOK_HIDDEN_SECTION_IDS or parent in NOK_HIDDEN_SECTION_IDS:
+            raise HTTPException(
+                status_code=403,
+                detail="This section is not available in the Next-of-Kin portal",
+            )
 
     # Full vault / dashboard access (family uses Full Kit synonym in DB)
     level = user.get("access_level") or ""
