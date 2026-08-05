@@ -723,8 +723,9 @@ async def _finalize_autofill_success(
         ):
             partner_results[partner_key] = partner_result
 
-    # Persist PRIMARY only when the client is not holding for Accept review.
-    # Overview inbox sets defer_persist=true so owners can edit before save.
+    # Persist PRIMARY only when the client is not holding for Accept review
+    # and when server-side AES merge is safe. Overview / E2EE clients always
+    # set defer_persist=true and write ciphertext themselves.
     if not payload.defer_persist:
         persist_keys = [payload.section]
         asyncio.create_task(

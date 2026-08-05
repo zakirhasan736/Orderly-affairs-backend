@@ -196,7 +196,9 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
     # 2️⃣ Load Kit Sections
     # -------------------------
     full_access = nextkin.get("access_level") == "Full Kit Access"
-    allowed_sections = set(nextkin.get("authorized_sections", []))
+    allowed_sections = {
+        str(x) for x in (nextkin.get("authorized_sections") or [])
+    }
 
     sections_cursor = section_data_collection.find({
         "owner_id": owner_id
@@ -204,7 +206,7 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
 
     sections = []
     async for section in sections_cursor:
-        section_id = section.get("section_id")
+        section_id = str(section.get("section_id") or "")
 
         if not full_access and section_id not in allowed_sections:
             continue

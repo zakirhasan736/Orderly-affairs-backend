@@ -529,6 +529,17 @@ async def persist_ai_result_to_owner_section(
 
     try:
         existing = await SectionRepository.get(owner_id, section_id)
+        # Client E2EE (v3) rows are opaque — server must never merge or overwrite.
+        from app.security.section_e2ee import is_e2ee_doc
+
+        if is_e2ee_doc(existing):
+            logger.info(
+                "Background AI persist skipped E2EE section %s for owner %s",
+                section_id,
+                owner_id,
+            )
+            return False
+
         current: dict = {}
         if existing and existing.get("encrypted_data"):
             current = decrypt_section_data(
