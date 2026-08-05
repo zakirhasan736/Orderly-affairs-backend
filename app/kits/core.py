@@ -1,12 +1,14 @@
 from fastapi import HTTPException, Request
 from typing import Dict, Any, Tuple
 from datetime import datetime
+from bson import ObjectId
 from app.security.cookie_auth import NOK_ACCESS_COOKIE
 from app.security.token_resolver import decode_access_token
 from app.database import users_collection, kits_collection
 from app.security.kit_data_crypto import load_kit_document
 
 from app.security.access_control import nok_has_section_access
+from app.security.vault_principals import require_nok_principal
 
 async def require_owner(request: Request, authorization: str | None = None):
     decoded = decode_access_token(request, authorization)
@@ -23,10 +25,19 @@ async def require_nok(request: Request, authorization: str | None = None) -> Tup
         raise HTTPException(status_code=403, detail="Next-of-Kin token required")
 
     nk = await users_collection.find_one({"email": decoded["email"], "role": "nextkin"})
+    if not nk and decoded.get("sub"):
+        try:
+            nk = await users_collection.find_one(
+                {"_id": ObjectId(str(decoded["sub"])), "role": "nextkin"}
+            )
+        except Exception:
+            nk = None
     if not nk:
         raise HTTPException(status_code=404, detail="Next-of-Kin not found")
     if not nk.get("immediate_access", False):
         raise HTTPException(status_code=403, detail="Access not yet approved")
+
+    require_nok_principal(nk)
 
     owner_id = nk.get("owner_id")
     if not owner_id:
@@ -62,15 +73,12 @@ def ensure_subsection_struct(kit: Dict[str, Any], section_id: str, sub_id: str) 
             break
 
 def filter_sections_for_nok(kit: Dict[str, Any], nk: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply NOK access (full vs. authorized section list)."""
-    access_level = nk.get("access_level", "Full Kit Access")
-    if access_level in ("Full Kit Access", "Full Dashboard Access"):
-        return kit
+    """Apply NOK access — Full Kit still excludes owner-management sections 2/3/4."""
     filtered = {
         **kit,
         "sections": [
             s
-            for s in kit["sections"]
+            for s in kit.get("sections") or []
             if nok_has_section_access(nk, str(s.get("id") or ""))
         ],
     }

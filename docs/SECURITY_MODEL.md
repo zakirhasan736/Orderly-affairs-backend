@@ -66,10 +66,11 @@ Family members help the owner maintain the kit. They do **not** use the NOK surv
 | **Portal** | NOK dashboard (`/next-kin/*`) — **separate** from owner dashboard |
 | **Login** | `/next-kin` |
 | **Session** | `nok_auth_token` cookie · **5–10 minute** access TTL |
-| **Vault access** | **Read-only** on owner-granted sections |
-| **Special actions** | Checklists · report passing · message delivery (after death rules) |
+| **Vault sections** | **View-only** on owner-granted sections (cannot edit owner form fields) |
+| **NOK portal actions** | **Full manage** — checklists, report passing, deliver messages, letter view, MFA settings |
+| **Hidden from NOK** | Sections 2 / 3 / 4 (owner management areas) |
 
-NOK is a **survivor access portal**, not an editor role.
+NOK is a **survivor access portal**. They fully control *their* dashboard actions and checklists. They do **not** rewrite the owner's vault section data.
 
 ---
 

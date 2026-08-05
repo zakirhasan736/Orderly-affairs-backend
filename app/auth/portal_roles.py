@@ -150,7 +150,12 @@ def can_upload_documents(user: dict | None) -> bool:
 
 
 def resolve_dashboard_permissions(user: dict | None) -> dict[str, bool]:
-    """Merge role defaults with optional per-user dashboard_permissions overrides."""
+    """
+    Merge role defaults with optional per-user dashboard_permissions overrides.
+
+    Overrides may only *reduce* capabilities (never elevate above the portal role).
+    This keeps Viewer / Editor / Portal Manager / Admin / Super Admin honest.
+    """
     if not user:
         return _empty_perms()
     if user.get("role") == "owner":
@@ -178,7 +183,8 @@ def resolve_dashboard_permissions(user: dict | None) -> dict[str, bool]:
     if isinstance(overrides, dict):
         for key in base:
             if key in overrides and overrides[key] is not None:
-                base[key] = bool(overrides[key])
+                # Cap: role max AND override (cannot grant more than the role)
+                base[key] = bool(base[key]) and bool(overrides[key])
     return base
 
 

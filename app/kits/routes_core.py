@@ -192,16 +192,13 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
     if not nextkin.get("immediate_access", False):
         raise HTTPException(status_code=403, detail="Access not approved")
 
+    require_nok_principal(nextkin)
+
     owner_id = nextkin["owner_id"]
 
     # -------------------------
-    # 2️⃣ Load Kit Sections
+    # 2️⃣ Load Kit Sections (ABAC — Full Kit still hides management 2/3/4)
     # -------------------------
-    full_access = nextkin.get("access_level") in (
-        "Full Kit Access",
-        "Full Dashboard Access",
-    )
-
     sections_cursor = section_data_collection.find({
         "owner_id": owner_id
     })
@@ -210,7 +207,7 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
     async for section in sections_cursor:
         section_id = str(section.get("section_id") or "")
 
-        if not full_access and not nok_has_section_access(nextkin, section_id):
+        if not nok_has_section_access(nextkin, section_id):
             continue
 
         sections.append(present_kit_section(owner_id, section))
@@ -288,7 +285,24 @@ async def deliver_message(
     if decoded.get("role") != "nextkin":
         raise HTTPException(status_code=403, detail="Only NOK can deliver messages")
 
-    owner_id = decoded.get("owner_id")
+    nextkin = await users_collection.find_one(
+        {"email": decoded.get("sub"), "role": "nextkin"}
+    )
+    if not nextkin:
+        try:
+            nextkin = await users_collection.find_one(
+                {"_id": ObjectId(decoded["sub"]), "role": "nextkin"}
+            )
+        except Exception:
+            nextkin = None
+    if not nextkin:
+        raise HTTPException(status_code=401, detail="Next-of-Kin not found")
+    if not nextkin.get("immediate_access", False):
+        raise HTTPException(status_code=403, detail="Access not approved")
+
+    require_nok_principal(nextkin)
+
+    owner_id = str(nextkin.get("owner_id") or decoded.get("owner_id") or "")
     if not owner_id:
         raise HTTPException(status_code=400, detail="Owner ID missing")
 
