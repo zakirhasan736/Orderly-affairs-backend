@@ -151,10 +151,11 @@ def can_upload_documents(user: dict | None) -> bool:
 
 def resolve_dashboard_permissions(user: dict | None) -> dict[str, bool]:
     """
-    Merge role defaults with optional per-user dashboard_permissions overrides.
+    Family RBAC from portal_role (Viewer → Super Admin).
 
-    Overrides may only *reduce* capabilities (never elevate above the portal role).
-    This keeps Viewer / Editor / Portal Manager / Admin / Super Admin honest.
+    Persisted `dashboard_permissions` snapshots from older creates/updates are
+    ignored — they froze the previous role and blocked runtime role/area changes.
+    Portal role + authorized_sections (ABAC) are the source of truth.
     """
     if not user:
         return _empty_perms()
@@ -170,7 +171,7 @@ def resolve_dashboard_permissions(user: dict | None) -> dict[str, bool]:
         }
 
     meta = portal_role_meta(user.get("portal_role"))
-    base = {
+    return {
         "can_read": bool(meta.get("can_read")),
         "can_write": bool(meta.get("can_write")),
         "can_upload": bool(meta.get("can_upload")),
@@ -179,13 +180,6 @@ def resolve_dashboard_permissions(user: dict | None) -> dict[str, bool]:
         "can_manage_billing": bool(meta.get("can_manage_billing")),
         "can_view_vault_settings": bool(meta.get("can_view_vault_settings")),
     }
-    overrides = user.get("dashboard_permissions") or {}
-    if isinstance(overrides, dict):
-        for key in base:
-            if key in overrides and overrides[key] is not None:
-                # Cap: role max AND override (cannot grant more than the role)
-                base[key] = bool(base[key]) and bool(overrides[key])
-    return base
 
 
 def _empty_perms() -> dict[str, bool]:

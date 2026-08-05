@@ -92,7 +92,21 @@ class TestPortalRoleMatrix:
         assert perms["can_manage_nextkin"] is True
         assert perms["can_manage_family_access"] is True
 
-    def test_override_cannot_elevate_viewer(self):
+    def test_stale_db_permission_snapshot_ignored(self):
+        """Old frozen dashboard_permissions must not block a role upgrade."""
+        user = _family(
+            "editor",
+            dashboard_permissions={
+                "can_write": False,
+                "can_upload": False,
+                "can_manage_nextkin": False,
+            },
+        )
+        perms = resolve_dashboard_permissions(user)
+        assert perms["can_write"] is True
+        assert perms["can_upload"] is True
+
+    def test_role_downgrade_applies_immediately(self):
         user = _family(
             "viewer",
             dashboard_permissions={
@@ -105,15 +119,6 @@ class TestPortalRoleMatrix:
         assert perms["can_write"] is False
         assert perms["can_upload"] is False
         assert perms["can_manage_nextkin"] is False
-
-    def test_override_can_reduce_editor(self):
-        user = _family(
-            "editor",
-            dashboard_permissions={"can_upload": False},
-        )
-        perms = resolve_dashboard_permissions(user)
-        assert perms["can_write"] is True
-        assert perms["can_upload"] is False
 
     def test_true_nok_cannot_write(self):
         user = {

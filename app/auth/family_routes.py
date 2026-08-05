@@ -112,10 +112,13 @@ async def create_family_member(
 
     plain_password = (payload.master_password or "").strip() or generate_password()
     portal_role = normalize_portal_role(payload.portal_role)
-    temp_user = {"role": "nextkin", "portal_role": portal_role, "access_type": ACCESS_TYPE_FAMILY}
-    if payload.dashboard_permissions:
-        temp_user["dashboard_permissions"] = payload.dashboard_permissions
-    permissions = resolve_dashboard_permissions(temp_user)
+    permissions = resolve_dashboard_permissions(
+        {
+            "role": "nextkin",
+            "portal_role": portal_role,
+            "access_type": ACCESS_TYPE_FAMILY,
+        }
+    )
 
     new_doc = {
         "email": email,
@@ -126,7 +129,6 @@ async def create_family_member(
         "authorized_sections": normalized["authorized_sections"] or [],
         "access_type": ACCESS_TYPE_FAMILY,
         "portal_role": portal_role,
-        "dashboard_permissions": permissions,
         "immediate_access": True,
         "access_timing": "immediate",
         "access_revoked": False,
@@ -278,12 +280,8 @@ async def update_family_member(
     update_data["access_type"] = ACCESS_TYPE_FAMILY
     update_data["immediate_access"] = True
     update_data["access_timing"] = "immediate"
-
-    merged_for_perms = dict(current)
-    merged_for_perms.update(update_data)
-    update_data["dashboard_permissions"] = resolve_dashboard_permissions(
-        merged_for_perms
-    )
+    # Never persist a frozen permission snapshot — role is resolved at request time.
+    update_data.pop("dashboard_permissions", None)
 
     password_changed = False
     new_password = (payload.master_password or "").strip() or None
@@ -303,8 +301,12 @@ async def update_family_member(
     merged["_id"] = family["_id"]
     stored = prepare_nextkin_profile_for_storage(merged)
     stored.pop("_id", None)
+    stored.pop("dashboard_permissions", None)
 
-    await users_collection.update_one({"_id": ObjectId(family_id)}, {"$set": stored})
+    await users_collection.update_one(
+        {"_id": ObjectId(family_id)},
+        {"$set": stored, "$unset": {"dashboard_permissions": ""}},
+    )
 
     password_email_sent = False
     if password_changed and new_password:
