@@ -1,7 +1,6 @@
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import owner_login_url, settings
+from app.notifications.mailer import send_email
 from app.notifications.display_names import resolve_owner_display_name
 from app.notifications.email_layout import (
     email_callout,
@@ -33,12 +32,8 @@ async def send_owner_inactivity_check_email(*, owner: dict) -> None:
         preheader="Please confirm you are okay — sign in within 15 days",
     )
 
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=owner["email"],
         subject="Orderly Affairs – Please confirm you are okay",
         html_content=html,
     )
-
-    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-    sg.send(message)

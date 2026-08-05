@@ -1,11 +1,10 @@
-"""SendGrid emails for any section expiry / renewal / deadline reminders."""
+"""SES emails for any section expiry / renewal / deadline reminders."""
 
 from __future__ import annotations
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.mailer import email_sending_configured, send_email
 from app.notifications.email_layout import (
     email_cta_row,
     email_expiry_rows,
@@ -153,12 +152,9 @@ def send_expiry_reminder_email(
     expiry_date: str,
     days_before: int,
 ) -> None:
-    if not to_email or not settings.SENDGRID_API_KEY:
+    if not to_email or not email_sending_configured():
         return
-
-    sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=to_email,
         subject=_subject(days_before, section_title, item_label, field_label),
         html_content=_body(
@@ -171,7 +167,6 @@ def send_expiry_reminder_email(
             expiry_date=expiry_date,
         ),
     )
-    sg.send(message)
 
 
 def send_expiry_digest_email(
@@ -183,7 +178,7 @@ def send_expiry_digest_email(
 
     ``items``: list of (section_code, label, date_text).
     """
-    if not to_email or not settings.SENDGRID_API_KEY or not items:
+    if not to_email or not email_sending_configured() or not items:
         return
 
     n = len(items)
@@ -209,14 +204,11 @@ def send_expiry_digest_email(
             ]
         ),
     )
-    sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=to_email,
         subject=title,
         html_content=html,
     )
-    sg.send(message)
 
 
 # Back-compat for older insurance-only imports

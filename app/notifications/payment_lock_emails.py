@@ -1,9 +1,8 @@
 """Emails when unpaid trial / failed payment locks an owner account."""
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.mailer import send_email
 from app.notifications.email_layout import (
     email_callout,
     portal_url,
@@ -51,12 +50,8 @@ async def send_payment_lock_email(*, user: dict, reason: str = "trial_ended_unpa
             cta_label="Resolve billing",
             preheader="Action required for your Orderly Affairs account",
         )
-
-    sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=email,
         subject=subject,
         html_content=html,
     )
-    sg.send(message)

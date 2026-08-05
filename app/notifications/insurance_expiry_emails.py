@@ -1,11 +1,10 @@
-"""SendGrid emails for insurance / registration expiry reminders."""
+"""SES emails for insurance / registration expiry reminders."""
 
 from enum import Enum
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.mailer import email_sending_configured, send_email
 from app.notifications.email_layout import (
     email_callout,
     escape,
@@ -83,12 +82,9 @@ def send_insurance_expiry_email(
     days_before: int,
     company: str | None = None,
 ) -> None:
-    if not to_email or not settings.SENDGRID_API_KEY:
+    if not to_email or not email_sending_configured():
         return
-
-    sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=to_email,
         subject=_subject(days_before, policy_label),
         html_content=_body(
@@ -100,4 +96,3 @@ def send_insurance_expiry_email(
             company=company,
         ),
     )
-    sg.send(message)

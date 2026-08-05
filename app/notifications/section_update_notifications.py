@@ -1,9 +1,8 @@
 from datetime import datetime, timedelta
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import nextkin_login_url, settings
+from app.notifications.mailer import send_email
 from app.database import db, users_collection
 from app.notifications.display_names import (
     resolve_nextkin_display_name,
@@ -125,15 +124,11 @@ async def _send_section_update_email(
         preheader=f"{owner_name} updated {section_title}",
     )
 
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=nextkin["email"],
         subject=f"Orderly Affairs – {section_title} Updated",
         html_content=html,
     )
-
-    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-    sg.send(message)
 
 
 async def notify_immediate_access_on_section_update(

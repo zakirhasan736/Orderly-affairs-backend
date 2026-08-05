@@ -9,8 +9,7 @@ from app.auth.service import mark_owner_deceased, trigger_death_letters
 from bson.errors import InvalidId
 from secrets import token_urlsafe
 from io import BytesIO
-import pyotp, qrcode, base64, random, string, sendgrid
-from sendgrid.helpers.mail import Mail
+import pyotp, qrcode, base64, random, string
 from bson import ObjectId
 from passlib.context import CryptContext
 from app.security.usage_guard import enforce_usage
@@ -81,6 +80,7 @@ from app.auth.session_manager import (
     refresh_session_from_cookie,
 )
 from app.config import settings
+from app.notifications.mailer import send_email
 from datetime import datetime
 from app.notifications.nextkin_emails import (
     send_nextkin_email,
@@ -92,7 +92,6 @@ from app.notifications.display_names import (
 )
 import string, random
 
-from sendgrid import SendGridAPIClient
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -688,9 +687,6 @@ async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
             paper_body,
             render_reminder_card,
         )
-
-        sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-
         nk_label = nextkin.get("full_name") or nextkin["email"]
         first = (str(nk_label).strip().split() or ["Someone"])[0]
         access = nextkin.get("access_level") or "Full Kit Access"
@@ -722,14 +718,11 @@ async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
             ),
         )
 
-        message = Mail(
-            from_email=settings.EMAIL_SENDER,
+        send_email(
             to_emails=owner["email"],
             subject="Orderly Affairs – Next-of-Kin Access Alert",
             html_content=html,
         )
-
-        sg.send(message)
 
     except Exception as e:
         # Never block login
@@ -1896,9 +1889,7 @@ async def delete_nextkin(
 
         owner_name = await resolve_owner_display_name(owner)
         nk_name = resolve_nextkin_display_name(nextkin)
-        sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-        message = Mail(
-            from_email=settings.EMAIL_SENDER,
+        send_email(
             to_emails=nextkin["email"],
             subject="Orderly Affairs - Next-of-Kin Account Deleted",
             html_content=render_simple_email(
@@ -1917,9 +1908,8 @@ async def delete_nextkin(
                 preheader="Your Next-of-Kin account was deleted",
             ),
         )
-        sg.send(message)
     except Exception as e:
-        print("⚠️ SendGrid delete notification failed:", e)
+        print("⚠️ SES delete notification failed:", e)
 
     return {
         "message": f"Next-of-Kin '{nextkin.get('full_name') or nextkin['email']}' deleted successfully.",
@@ -3326,10 +3316,7 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
             p,
             render_email,
         )
-
-        sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-        message = Mail(
-            from_email=settings.EMAIL_SENDER,
+        send_email(
             to_emails=email,
             subject="Orderly Affairs Password Reset",
             html_content=render_email(
@@ -3352,9 +3339,8 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
                 ),
             ),
         )
-        sg.send(message)
     except Exception as e:
-        print("SendGrid error:", e)
+        print("SES error:", e)
         await otp_collection.delete_many({
             "email": email,
             "type": "password_reset",

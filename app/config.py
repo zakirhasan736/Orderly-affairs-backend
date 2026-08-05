@@ -62,10 +62,12 @@ class Settings(BaseSettings):
     # Prefer env AES_256_KEY_PREVIOUS (read in crypto.py); this mirrors config docs.
     AES_256_KEY_PREVIOUS: str | None = None
 
-    # === Email ===
-    SENDGRID_API_KEY: str
+    # === Email (Amazon SES via AWS credentials) ===
+    # From identities must be verified in SES (domain verify covers these).
     EMAIL_SENDER: EmailStr
     MESSAGES_FROM_EMAIL: EmailStr = "messages@orderly-affairs.com"
+    # SES API region (SSM /orderly-affairs/SES_REGION). Falls back to AWS_REGION.
+    SES_REGION: str | None = None
     # Absolute HTTPS logo URL for HTML emails. Leave blank to use Cloudinary default
     # (email clients cannot load localhost / private image URLs).
     EMAIL_LOGO_URL: str | None = None

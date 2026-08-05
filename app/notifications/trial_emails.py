@@ -3,10 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.mailer import send_email
 from app.notifications.email_layout import (
     billing_url,
     email_cta_row,
@@ -127,15 +126,11 @@ async def send_trial_email(*, user: dict, event: TrialEmailEvent):
 
     if event not in subject_map:
         return
-
-    sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=user["email"],
         subject=subject_map[event],
         html_content=html,
     )
-    sg.send(message)
 
 
 def _next_day(dt: datetime | None) -> datetime | None:

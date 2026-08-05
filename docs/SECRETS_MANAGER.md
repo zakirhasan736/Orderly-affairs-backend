@@ -12,7 +12,9 @@
 | `/orderly-affairs/BACKUP_ENCRYPTION_KEY` | `BACKUP_ENCRYPTION_KEY` |
 | `/orderly-affairs/JWT_PRIVATE_KEY` | `JWT_PRIVATE_KEY` |
 | `/orderly-affairs/JWT_PUBLIC_KEY` | `JWT_PUBLIC_KEY` |
-| `/orderly-affairs/SENDGRID_API_KEY` | `SENDGRID_API_KEY` |
+| `/orderly-affairs/EMAIL_SENDER` | `EMAIL_SENDER` |
+| `/orderly-affairs/MESSAGES_FROM_EMAIL` | `MESSAGES_FROM_EMAIL` |
+| `/orderly-affairs/SES_REGION` | `SES_REGION` (SES API region; falls back to `AWS_REGION`) |
 | `/orderly-affairs/OPENAI_API_KEY` | `OPENAI_API_KEY` |
 | `/orderly-affairs/STRIPE_SECRET_KEY` | `STRIPE_SECRET_KEY` |
 | `/orderly-affairs/STRIPE_WEBHOOK_SECRET` | `STRIPE_WEBHOOK_SECRET` |
@@ -46,7 +48,6 @@ AWS_SECRETS_MANAGER_OVERRIDE=true
 
 STRIPE_PRICE_MONTHLY=...
 STRIPE_PRICE_YEARLY=...
-EMAIL_SENDER=support@orderly-affairs.com
 ADMIN_EMAILS=...
 VAULT_S3_ENABLED=true
 MESSAGE_S3_ENABLED=true
@@ -54,7 +55,18 @@ SECTION_S3_ENABLED=true
 BACKUP_S3_ENABLED=true
 ```
 
-Do **not** put AES/JWT/Mongo/Stripe secret/webhook/Twilio/Cloudinary/OpenAI/SendGrid/backup keys in `.env`.
+`EMAIL_SENDER`, `MESSAGES_FROM_EMAIL`, and `SES_REGION` load from SSM when
+`AWS_SECRETS_MANAGER_OVERRIDE=true`. Domain verification in SES is enough for
+those From addresses — no per-address verify needed.
+
+Safe to **delete** unused SSM param `/orderly-affairs/SENDGRID_API_KEY` (app no longer reads it).
+
+Do **not** put AES/JWT/Mongo/Stripe secret/webhook/Twilio/Cloudinary/OpenAI/backup keys in `.env`.
+
+Outbound email uses **Amazon SES** (`app/notifications/mailer.py`) with the same
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` as S3. Verify
+`EMAIL_SENDER` and `MESSAGES_FROM_EMAIL` in SES (and leave the SES sandbox, or
+only send to verified recipients in sandbox).
 
 ## IAM policy (read)
 
@@ -87,7 +99,16 @@ Do **not** put AES/JWT/Mongo/Stripe secret/webhook/Twilio/Cloudinary/OpenAI/Send
 }
 ```
 
-Plus existing S3 permissions for the bucket prefixes.
+Plus existing S3 permissions for the bucket prefixes, and SES send:
+
+```json
+{
+  "Sid": "SesSendOrderlyAffairs",
+  "Effect": "Allow",
+  "Action": ["ses:SendEmail", "ses:SendRawEmail"],
+  "Resource": "*"
+}
+```
 
 Optional write (for `scripts/put_ssm_remaining_secrets.py`):
 

@@ -5,10 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.mailer import email_sending_configured, send_email
 from app.database import users_collection
 from app.notifications.email_layout import (
     email_chips,
@@ -49,15 +48,13 @@ def build_kit_review_email() -> str:
 
 async def send_kit_review_email(*, user: dict) -> None:
     email = user.get("email")
-    if not email or not settings.SENDGRID_API_KEY:
+    if not email or not email_sending_configured():
         return
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=email,
         subject="Is this still true? — review your kit",
         html_content=build_kit_review_email(),
     )
-    SendGridAPIClient(settings.SENDGRID_API_KEY).send(message)
 
 
 def _anchor_date(user: dict) -> datetime | None:

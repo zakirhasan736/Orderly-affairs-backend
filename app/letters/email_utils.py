@@ -4,10 +4,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import nextkin_login_url, settings
+from app.notifications.mailer import send_email as ses_send_email
 
 FONT_SANS = (
     "'Instrument Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',"
@@ -314,11 +313,8 @@ def render_email_html(doc: Dict[str, Any], *, owner_name: str | None = None) -> 
 
 
 async def send_email(to_email: str, subject: str, html: str) -> None:
-    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    ses_send_email(
         to_emails=to_email,
         subject=subject,
         html_content=html,
     )
-    sg.send(message)

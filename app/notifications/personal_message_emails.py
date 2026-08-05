@@ -5,10 +5,9 @@ from datetime import datetime
 from pathlib import Path
 
 from bson import ObjectId
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.mailer import send_email
 from app.database import users_collection
 from app.notifications.display_names import resolve_owner_display_name
 from app.notifications.email_layout import brand_logo_url, portal_url
@@ -310,13 +309,9 @@ async def send_personal_message_email(*, letter: dict, owner: dict | None = None
         duration_label=duration_label,
         cta_url=attachment_url or portal_url(),
     )
-
-    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-    message = Mail(
-        from_email=settings.MESSAGES_FROM_EMAIL,
+    send_email(
         to_emails=letter["recipient_email"],
         subject=personal_message_subject(sender_name, message_type=attachment_type),
         html_content=html_content,
+        from_email=settings.MESSAGES_FROM_EMAIL,
     )
-
-    sg.send(message)

@@ -7,14 +7,13 @@ from typing import Any
 
 import phonenumbers
 from fastapi import HTTPException, Request
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from pymongo.errors import DuplicateKeyError
 
 from app.auth.captcha import verify_captcha_token
 from app.auth.twilio_verify import send_verification_code
 from app.config import settings
+from app.notifications.mailer import send_email
 from app.database import (
     otp_fraud_logs_collection,
     otp_send_locks_collection,
@@ -699,10 +698,7 @@ def deliver_email_otp(email: str, otp: int) -> None:
         p,
         render_email,
     )
-
-    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=email,
         subject="Your Orderly Affairs verification code",
         html_content=render_email(
@@ -725,7 +721,6 @@ def deliver_email_otp(email: str, otp: int) -> None:
             ),
         ),
     )
-    sg.send(message)
 
 
 async def _seconds_since_last_email_send(email: str) -> int | None:
@@ -973,7 +968,7 @@ async def send_email_otp_secure(
     """
     Rate-limit → generate → persist (optional) → send.
 
-    The email is delivered only after store_otp succeeds. If SendGrid fails,
+    The email is delivered only after store_otp succeeds. If SES fails,
     rollback_otp runs and the client gets an error (no success response).
     """
     context = await enforce_email_otp_send_limits(

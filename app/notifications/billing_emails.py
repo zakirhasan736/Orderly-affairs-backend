@@ -1,9 +1,8 @@
 from enum import Enum
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import settings
+from app.notifications.mailer import send_email
 from app.notifications.email_layout import portal_url, render_simple_email
 
 
@@ -70,12 +69,8 @@ async def send_billing_email(*, user: dict, event: BillingEmailEvent):
             preheader="Your yearly subscription is active",
         ),
     }
-
-    sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
+    send_email(
         to_emails=user["email"],
         subject=subject_map[event],
         html_content=body_map[event],
     )
-    sg.send(message)

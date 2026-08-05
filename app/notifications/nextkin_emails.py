@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from app.config import family_dashboard_login_url, nextkin_login_url, settings
+from app.notifications.mailer import send_email
 from app.notifications.display_names import (
     resolve_nextkin_display_name,
     resolve_owner_display_name,
@@ -273,8 +272,6 @@ async def send_nextkin_email(
     owner: dict,
     plain_password: str | None = None,
 ):
-    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-
     owner_name = await resolve_owner_display_name(owner)
     nk_name = resolve_nextkin_display_name(nextkin)
     login = nextkin_login_url()
@@ -402,15 +399,12 @@ async def send_nextkin_email(
     else:
         return
 
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
-        to_emails=nextkin["email"],
-        subject=subject,
-        html_content=html,
-    )
-
     try:
-        sg.send(message)
+        send_email(
+            to_emails=nextkin["email"],
+            subject=subject,
+            html_content=html,
+        )
     except Exception as e:
         print(f"NextKin email failed ({event}):", e)
 
@@ -423,7 +417,6 @@ async def send_family_invite_email(
     password_only: bool = False,
 ):
     """Invite a family collaborator to the owner dashboard (separate session)."""
-    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
     owner_name = await resolve_owner_display_name(owner)
     recipient = resolve_nextkin_display_name(family)
     login = family_dashboard_login_url()
@@ -494,31 +487,25 @@ async def send_family_invite_email(
         preheader="Your family collaborator dashboard invite",
     )
 
-    message = Mail(
-        from_email=settings.EMAIL_SENDER,
-        to_emails=family["email"],
-        subject=subject,
-        html_content=html,
-    )
     try:
-        sg.send(message)
+        send_email(
+            to_emails=family["email"],
+            subject=subject,
+            html_content=html,
+        )
     except Exception as e:
         print("Family invite email failed:", e)
 
 
 async def send_message_email(*, to: str, subject: str, html: str):
     """Legacy helper — prefer send_personal_message_email for personal messages."""
-    sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-
-    message = Mail(
-        from_email=settings.MESSAGES_FROM_EMAIL,
-        to_emails=to,
-        subject=subject,
-        html_content=html,
-    )
-
     try:
-        sg.send(message)
+        send_email(
+            to_emails=to,
+            subject=subject,
+            html_content=html,
+            from_email=settings.MESSAGES_FROM_EMAIL,
+        )
     except Exception as e:
         print("Message delivery email failed:", e)
         raise
