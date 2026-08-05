@@ -6,6 +6,8 @@ from app.security.token_resolver import decode_access_token
 from app.database import users_collection, kits_collection
 from app.security.kit_data_crypto import load_kit_document
 
+from app.security.access_control import nok_has_section_access
+
 async def require_owner(request: Request, authorization: str | None = None):
     decoded = decode_access_token(request, authorization)
     if decoded.get("role") != "owner":
@@ -60,15 +62,16 @@ def ensure_subsection_struct(kit: Dict[str, Any], section_id: str, sub_id: str) 
             break
 
 def filter_sections_for_nok(kit: Dict[str, Any], nk: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply NOK access (full vs. list of section IDs)."""
+    """Apply NOK access (full vs. authorized section list)."""
     access_level = nk.get("access_level", "Full Kit Access")
-    authorized = nk.get("authorized_sections") or []
-    full = access_level == "Full Kit Access"
-    if full:
+    if access_level in ("Full Kit Access", "Full Dashboard Access"):
         return kit
-    allowed = set(str(x) for x in authorized)
     filtered = {
         **kit,
-        "sections": [s for s in kit["sections"] if s.get("id") in allowed]
+        "sections": [
+            s
+            for s in kit["sections"]
+            if nok_has_section_access(nk, str(s.get("id") or ""))
+        ],
     }
     return filtered

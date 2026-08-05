@@ -42,6 +42,8 @@ support_threads_collection = db["support_threads"]
 support_messages_collection = db["support_messages"]
 feedback_collection = db["feedback"]
 section_footprints_collection = db["section_footprints"]
+access_logs_collection = db["access_logs"]
+vault_audit_logs_collection = db["vault_audit_logs"]
 
 # System-owner admin panel
 admin_audit_logs_collection = db["admin_audit_logs"]

@@ -3199,6 +3199,35 @@ async def nextkin_report_owner_deceased(
     if not owner:
         raise HTTPException(status_code=400, detail=NOK_LOGIN_GENERIC)
 
+    if owner.get("owner_status") == "deceased":
+        return {
+            "status": "deceased",
+            "already_reported": True,
+            "message": "This passing has already been recorded.",
+            "upon_death_granted": 0,
+        }
+
+    from app.auth.death_detection import MIN_DEATH_SIGNAL_CHECKS
+    from app.security.auth_rate_limit import enforce_auth_rate_limit
+
+    await enforce_auth_rate_limit(
+        request,
+        key=f"nok-death-report:{nextkin['_id']}",
+    )
+
+    death_ready = bool(owner.get("death_signals_pending_confirmation"))
+    death_count = int(owner.get("death_signal_count") or 0)
+    if not death_ready and death_count < MIN_DEATH_SIGNAL_CHECKS:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Before reporting a passing, complete at least "
+                f"{MIN_DEATH_SIGNAL_CHECKS} survivor checklist items in your "
+                "Full Kit (or wait until the system flags your checklist for "
+                "confirmation). This helps prevent mistaken reports."
+            ),
+        )
+
     result = await mark_owner_deceased(
         owner_id=str(owner["_id"]),
         reported_by_nextkin_id=str(nextkin["_id"]),
@@ -3232,21 +3261,28 @@ async def update_owner_status(
 ):
     decoded = decode_access_token(request, authorization)
 
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only the kit owner may update status")
+
     if status not in ["alive", "deceased"]:
         raise HTTPException(400, "Invalid status")
 
-    # await users_collection.update_one(
-    #     {"_id": user["sub"]},
-    #     {"$set": {"owner_status": status}}
-    # )
-    await users_collection.update_one(
-    {"email": decoded["sub"], "role": "owner"},
-    {"$set": {"owner_status": status}}
-)
-
-    # 🔥 TRIGGER DEATH LETTERS
     if status == "deceased":
-        await trigger_death_letters(decoded["sub"])
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Owner status cannot be set to deceased here. A verified "
+                "Next-of-Kin must use Report Passing after completing the "
+                "survivor checklist."
+            ),
+        )
+
+    result = await users_collection.update_one(
+        {"email": decoded["sub"], "role": "owner"},
+        {"$set": {"owner_status": status}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Owner not found")
 
     return {"status": "updated"}
 

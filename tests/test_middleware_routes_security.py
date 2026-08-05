@@ -325,6 +325,16 @@ class TestBillingAndUsageGuards:
         assert exc.value.status_code in (402, 403)
         assert PAYMENT_LOCK_MESSAGE.split()[0] in str(exc.value.detail)
 
+    def test_vault_billing_path_gate(self):
+        from app.security.vault_paths import is_vault_api_path
+
+        assert is_vault_api_path("/sections/section5-vehicles") is True
+        assert is_vault_api_path("/ai/upload-document") is True
+        assert is_vault_api_path("/billing/checkout") is False
+        assert is_vault_api_path("/auth/session") is False
+        assert is_vault_api_path("/e2ee/status") is False
+        assert is_vault_api_path("/e2ee/vault/sections/5") is True
+
     def test_usage_limit_for_nextkin(self):
         user = {"billing": {"plan": "monthly"}}
         enforce_usage(user, "nextkin", 2)

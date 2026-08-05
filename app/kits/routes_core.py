@@ -18,6 +18,7 @@ from app.auth.death_detection import maybe_detect_owner_deceased_from_checklist
 
 from .models import ChecklistUpdate, SectionInput, SubsectionInput, TogglesInput
 from .core import require_owner, require_nok, get_or_init_kit, ensure_section_struct, ensure_subsection_struct, filter_sections_for_nok
+from app.security.access_control import assert_section_read_access, nok_has_section_access
 from app.notifications.personal_message_emails import send_personal_message_email
 
 router = APIRouter(prefix="/kit", tags=["kit-core"])
@@ -195,10 +196,10 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
     # -------------------------
     # 2️⃣ Load Kit Sections
     # -------------------------
-    full_access = nextkin.get("access_level") == "Full Kit Access"
-    allowed_sections = {
-        str(x) for x in (nextkin.get("authorized_sections") or [])
-    }
+    full_access = nextkin.get("access_level") in (
+        "Full Kit Access",
+        "Full Dashboard Access",
+    )
 
     sections_cursor = section_data_collection.find({
         "owner_id": owner_id
@@ -208,7 +209,7 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
     async for section in sections_cursor:
         section_id = str(section.get("section_id") or "")
 
-        if not full_access and section_id not in allowed_sections:
+        if not full_access and not nok_has_section_access(nextkin, section_id):
             continue
 
         sections.append(present_kit_section(owner_id, section))
@@ -342,11 +343,28 @@ async def save_checklist_progress(
     if decoded.get("role") != "nextkin":
         raise HTTPException(status_code=403, detail="Only NOK allowed")
 
-    nextkin_id = decoded["sub"]
-    owner_id = decoded.get("owner_id")
+    nextkin = await users_collection.find_one(
+        {"email": decoded.get("sub"), "role": "nextkin"}
+    )
+    if not nextkin:
+        try:
+            nextkin = await users_collection.find_one(
+                {"_id": ObjectId(decoded["sub"]), "role": "nextkin"}
+            )
+        except Exception:
+            nextkin = None
+    if not nextkin:
+        raise HTTPException(status_code=401, detail="Next-of-Kin not found")
+    if not nextkin.get("immediate_access", False):
+        raise HTTPException(status_code=403, detail="Access not approved")
+
+    nextkin_id = str(nextkin["_id"])
+    owner_id = str(nextkin.get("owner_id") or decoded.get("owner_id") or "")
 
     if not owner_id:
         raise HTTPException(status_code=400, detail="Owner ID missing")
+
+    assert_section_read_access(nextkin, str(payload.section_id))
 
     encrypted_checklist = prepare_checklist_for_storage(
         owner_id=owner_id,

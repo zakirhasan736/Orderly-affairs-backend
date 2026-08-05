@@ -16,7 +16,4 @@ def decrypt_section_data(owner_id: str, section_id: str, encrypted_data: str) ->
         return {}
 
     context = section_encryption_context(owner_id, section_id)
-    try:
-        return decrypt_data(encrypted_data, context=context)
-    except Exception:
-        return decrypt_data(encrypted_data)
+    return decrypt_data(encrypted_data, context=context)

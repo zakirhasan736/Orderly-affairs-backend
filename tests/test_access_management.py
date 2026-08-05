@@ -140,3 +140,15 @@ class TestAccessControl:
             },
             "7",
         )
+
+    def test_nok_has_section_access_parent_match(self):
+        from app.security.access_control import nok_has_section_access
+
+        user = {
+            "role": "nextkin",
+            "immediate_access": True,
+            "access_level": SECTION_SPECIFIC_ACCESS,
+            "authorized_sections": ["5"],
+        }
+        assert nok_has_section_access(user, "5A") is True
+        assert nok_has_section_access(user, "7") is False

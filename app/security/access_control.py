@@ -40,3 +40,12 @@ def assert_section_read_access(user: dict, section_id: str):
         status_code=403,
         detail=f"No access to section {section_id}",
     )
+
+
+def nok_has_section_access(user: dict, section_id: str) -> bool:
+    """Non-throwing check — mirrors assert_section_read_access."""
+    try:
+        assert_section_read_access(user, section_id)
+        return True
+    except HTTPException:
+        return False

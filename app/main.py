@@ -107,6 +107,9 @@ from app.security.https_redirect import HTTPSRedirectMiddleware
 from app.security.security_headers import SecurityHeadersMiddleware
 from app.security.csrf import CsrfMiddleware
 from app.security.api_rate_limit import VaultApiRateLimitMiddleware
+from app.security.vault_billing_middleware import VaultBillingMiddleware
+from app.security.vault_audit import VaultAuditMiddleware
+from app.security.vault_role_guard import VaultRoleGuardMiddleware
 from app.security.error_handlers import (
     http_exception_handler,
     starlette_http_exception_handler,
@@ -127,6 +130,9 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(VaultAuditMiddleware)
+app.add_middleware(VaultRoleGuardMiddleware)
+app.add_middleware(VaultBillingMiddleware)
 app.add_middleware(VaultApiRateLimitMiddleware)
 app.add_middleware(CsrfMiddleware)
 
