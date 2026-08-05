@@ -50,7 +50,7 @@ async def enforce_auth_rate_limit(
     max_attempts: int | None = None,
     window_minutes: int | None = None,
 ) -> None:
-    if settings.APP_ENV == "development":
+    if settings.is_development:
         return
 
     limit = max_attempts or settings.AUTH_RATE_LIMIT_MAX_ATTEMPTS

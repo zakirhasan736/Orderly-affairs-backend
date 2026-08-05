@@ -59,7 +59,7 @@ async def seed_default_admin() -> None:
                 "$unset": {"deleted_at": ""},
             },
         )
-        if settings.APP_ENV == "development":
+        if settings.is_development:
             print(f"[admin] Admin flags ensured (password unchanged): {email}")
         return
 

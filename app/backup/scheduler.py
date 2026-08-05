@@ -25,8 +25,7 @@ async def _backup_job() -> None:
 
 def start_backup_scheduler() -> None:
     if not settings.BACKUP_ENABLED:
-        if settings.APP_ENV == "development":
-            print("Daily backup scheduler disabled (BACKUP_ENABLED=false)")
+        print("Daily backup scheduler disabled (BACKUP_ENABLED=false)")
         return
 
     scheduler.add_job(
@@ -42,8 +41,14 @@ def start_backup_scheduler() -> None:
     )
     if not scheduler.running:
         scheduler.start()
-    if settings.APP_ENV == "development":
-        print(
-            "Daily backup scheduler started "
-            f"(cron {settings.BACKUP_CRON_HOUR:02d}:{settings.BACKUP_CRON_MINUTE:02d} UTC)"
-        )
+
+    s3_note = "local only"
+    if settings.backup_s3_active:
+        bucket = settings.backup_s3_bucket_name
+        prefix = (settings.BACKUP_S3_PREFIX or "orderly-affairs/backups").strip("/")
+        s3_note = f"S3 s3://{bucket}/{prefix}/"
+    print(
+        "Daily backup scheduler started "
+        f"(cron {settings.BACKUP_CRON_HOUR:02d}:{settings.BACKUP_CRON_MINUTE:02d} UTC, "
+        f"{s3_note})"
+    )

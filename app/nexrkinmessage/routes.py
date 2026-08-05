@@ -4,18 +4,24 @@ from datetime import datetime
 from bson import ObjectId
 from bson.errors import InvalidId
 from app.security.message_crypto import load_message, prepare_message_for_storage
-from app.database import messageofnextkin_collection
+from app.database import messageofnextkin_collection, users_collection
 from .models import LetterCreate, LetterUpdate, MediaDeleteRequest
+from app.config import settings
 from app.security.cloudinary_service import (
     MESSAGE_MEDIA_FOLDER,
     MESSAGE_MEDIA_MAX_BYTES,
     delete_file,
-    generate_message_media_upload_signature,
     signed_media_delivery_url,
-    upload_file as cloudinary_upload_file,
-    upload_media_file,
     validate_message_media_size,
 )
+from app.storage.message_s3 import (
+    delete_message_s3_object,
+    key_belongs_to_owner_folder,
+    message_s3_prefix,
+    presign_message_get_url,
+    upload_message_bytes_to_s3,
+)
+from app.storage.vault import get_or_create_folder_uuid, vault_quota_check
 
 router = APIRouter(prefix="/message", tags=["Message"])
 
@@ -46,6 +52,72 @@ def parse_message_id(letter_id: str) -> ObjectId:
         raise HTTPException(status_code=400, detail="Invalid message id")
 
 
+def media_identity(media: dict | None) -> str | None:
+    if not isinstance(media, dict):
+        return None
+    return (
+        str(media.get("s3_key") or "").strip()
+        or str(media.get("public_id") or "").strip()
+        or None
+    )
+
+
+def refresh_media_delivery(media: dict | None) -> dict | None:
+    """Attach a fresh playback URL for S3 (or leave Cloudinary URL as-is)."""
+    if not isinstance(media, dict):
+        return media
+    s3_key = str(media.get("s3_key") or "").strip()
+    if not s3_key and str(media.get("storage") or "").lower() != "s3":
+        return media
+    if not s3_key:
+        s3_key = str(media.get("public_id") or "").strip()
+    if not s3_key:
+        return media
+    url = presign_message_get_url(
+        s3_key=s3_key,
+        bucket=str(media.get("s3_bucket") or "").strip() or None,
+        expires_in=900,
+    )
+    if not url:
+        return media
+    refreshed = dict(media)
+    refreshed["url"] = url
+    refreshed["url_expires_in"] = 900
+    refreshed["storage"] = refreshed.get("storage") or "s3"
+    if not refreshed.get("s3_key"):
+        refreshed["s3_key"] = s3_key
+    return refreshed
+
+
+def delete_media_file(media: dict | None) -> bool:
+    """Delete remote bytes for message media (S3 and/or Cloudinary)."""
+    if not media:
+        return True
+
+    ok = True
+    s3_key = str(media.get("s3_key") or "").strip()
+    storage = str(media.get("storage") or "").lower()
+    public_id = str(media.get("public_id") or "").strip()
+
+    if s3_key or storage == "s3":
+        key = s3_key or public_id
+        if key and key.startswith(message_s3_prefix()):
+            if not delete_message_s3_object(
+                s3_key=key,
+                bucket=str(media.get("s3_bucket") or "").strip() or None,
+            ):
+                ok = False
+            return ok
+
+    if public_id and not public_id.startswith(message_s3_prefix() + "/"):
+        deleted = delete_file(public_id, media.get("type"))
+        if not deleted:
+            print(f"⚠️ Failed to hard-delete message media from Cloudinary: {public_id}")
+            ok = False
+
+    return ok
+
+
 async def resolve_message_owner_id(
     request: Request,
     authorization: str | None = None,
@@ -66,19 +138,17 @@ async def resolve_message_owner_id(
     return owner["email"]
 
 
-def delete_media_file(media: dict | None) -> bool:
-    if not media:
-        return True
-
-    public_id = media.get("public_id")
-    if not public_id:
-        return True
-
-    deleted = delete_file(public_id, media.get("type"))
-    if not deleted:
-        print(f"⚠️ Failed to hard-delete message media from Cloudinary: {public_id}")
-
-    return deleted
+async def load_owner_user_by_email(owner_email: str) -> dict:
+    email = (owner_email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid owner")
+    user = await users_collection.find_one({"email": email, "role": "owner"})
+    if not user:
+        # Some owners may omit role or use mixed-case email only.
+        user = await users_collection.find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=404, detail="Owner account not found")
+    return user
 
 @router.post("")
 async def create_letter(
@@ -130,7 +200,7 @@ async def get_letters(request: Request, authorization: str | None = Header(defau
             "recipient": decrypted.get("recipient"),
             "recipient_email": decrypted["recipient_email"],
             "message_type": decrypted["message_type"],
-            "media": decrypted.get("media"),
+            "media": refresh_media_delivery(decrypted.get("media")),
             "delivery_trigger": decrypted["delivery_trigger"],
             "delivery_date": decrypted.get("delivery_date"),
             "delivery_occasion": decrypted.get("delivery_occasion"),
@@ -190,10 +260,11 @@ async def update_letter(
     if "media" in update_data:
         old_media = letter.get("media")
         new_media = update_data.get("media")
-        old_public_id = (old_media or {}).get("public_id")
-        new_public_id = (new_media or {}).get("public_id")
+        old_id = media_identity(old_media)
+        new_id = media_identity(new_media)
 
-        if old_public_id and old_public_id != new_public_id:
+        # Replace: delete previous remote object after identity changes.
+        if old_id and old_id != new_id:
             delete_media_file(old_media)
 
     merged = load_message(letter)
@@ -291,19 +362,36 @@ async def get_message_media_upload_signature(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    normalized = resource_type if resource_type in ("video", "image") else "video"
-    return generate_message_media_upload_signature(resource_type=normalized)
+    # Prefer API → S3 uploads; Cloudinary direct upload is retired.
+    if not settings.message_s3_active:
+        raise HTTPException(
+            status_code=503,
+            detail="Media storage is not configured (S3).",
+        )
+    return {
+        "storage": "s3",
+        "use_api_upload": True,
+        "folder": f"{message_s3_prefix()}/{{owner}}",
+        "resource_type": resource_type if resource_type in ("video", "image") else "video",
+        "max_bytes": MESSAGE_MEDIA_MAX_BYTES,
+        "s3_bucket": settings.message_s3_bucket_name,
+        "s3_prefix": message_s3_prefix(),
+    }
 
-
-async def _caller_owns_message_media(owner_id: str, public_id: str) -> bool:
-    """True only when this owner's messages/letters reference the public_id."""
+async def _caller_owns_message_media(owner_id: str, *, public_id: str | None = None, s3_key: str | None = None) -> bool:
+    """True when this owner's messages reference the asset (or orphan under their folder)."""
     from app.database import letters_collection
 
+    key = (s3_key or public_id or "").strip()
+    if not key:
+        return False
+
+    query_or = [{"media.public_id": key}, {"media.s3_key": key}]
     msg = await messageofnextkin_collection.find_one(
         {
             "owner_id": owner_id,
-            "media.public_id": public_id,
             "is_deleted": {"$ne": True},
+            "$or": query_or,
         },
         {"_id": 1},
     )
@@ -313,7 +401,7 @@ async def _caller_owns_message_media(owner_id: str, public_id: str) -> bool:
     letter = await letters_collection.find_one(
         {
             "owner_id": owner_id,
-            "media.public_id": public_id,
+            "$or": [{"media.public_id": key}, {"media.s3_key": key}],
         },
         {"_id": 1},
     )
@@ -327,8 +415,10 @@ async def _caller_owns_message_media(owner_id: str, public_id: str) -> bool:
         {
             "owner_id": owner_id,
             "$or": [
-                {"media.public_id": public_id},
-                {"attachment.public_id": public_id},
+                {"media.public_id": key},
+                {"media.s3_key": key},
+                {"attachment.public_id": key},
+                {"attachment.s3_key": key},
             ],
         },
         {"_id": 1},
@@ -342,19 +432,52 @@ async def refresh_message_media_signed_url(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    """Fresh signed URL for authenticated letter/message media (owner-scoped)."""
+    """Fresh signed / presigned URL for letter/message media (owner-scoped)."""
     owner_id = await resolve_message_owner_id(request, authorization, write=False)
     public_id = str(data.get("public_id") or "").strip()
-    if not public_id:
-        raise HTTPException(status_code=400, detail="public_id required")
+    s3_key = str(data.get("s3_key") or "").strip()
+    key = s3_key or public_id
+    if not key:
+        raise HTTPException(status_code=400, detail="public_id or s3_key required")
     if not owner_id:
         raise HTTPException(status_code=403, detail="Not authorized for this media")
+
+    # S3 path
+    if (
+        str(data.get("storage") or "").lower() == "s3"
+        or key.startswith(message_s3_prefix() + "/")
+        or s3_key
+    ):
+        owner = await load_owner_user_by_email(owner_id)
+        folder_uuid = await get_or_create_folder_uuid(owner)
+        if not key_belongs_to_owner_folder(s3_key=key, folder_uuid=folder_uuid):
+            # Still allow if Mongo proves ownership (legacy key layout).
+            if not await _caller_owns_message_media(
+                owner_id, public_id=public_id or None, s3_key=key
+            ):
+                raise HTTPException(status_code=403, detail="Not authorized for this media")
+        url = presign_message_get_url(
+            s3_key=key,
+            bucket=str(data.get("s3_bucket") or "").strip() or None,
+            expires_in=900,
+        )
+        if not url:
+            raise HTTPException(status_code=400, detail="Could not sign media URL")
+        return {
+            "public_id": public_id or key,
+            "s3_key": key,
+            "url": url,
+            "storage": "s3",
+            "access_mode": "private",
+            "url_expires_in": 900,
+        }
+
     if not (
         public_id.startswith(MESSAGE_MEDIA_FOLDER.rstrip("/"))
         or public_id.startswith("letters/media")
     ):
         raise HTTPException(status_code=403, detail="Not authorized for this media")
-    if not await _caller_owns_message_media(owner_id, public_id):
+    if not await _caller_owns_message_media(owner_id, public_id=public_id):
         raise HTTPException(status_code=403, detail="Not authorized for this media")
 
     resource_type = data.get("resource_type") or data.get("type") or "video"
@@ -372,7 +495,7 @@ async def refresh_message_media_signed_url(
         "public_id": public_id,
         "url": url,
         "access_mode": "authenticated",
-        "url_expires_in": 3600,
+        "url_expires_in": 900,
     }
 
 
@@ -382,7 +505,7 @@ async def upload_message_media(
     file: UploadFile = File(...),
     authorization: str | None = Header(default=None),
 ):
-    await resolve_message_owner_id(request, authorization, write=True)
+    owner_email = await resolve_message_owner_id(request, authorization, write=True)
 
     if not is_allowed_message_media(file):
         raise HTTPException(
@@ -390,9 +513,10 @@ async def upload_message_media(
             detail="Only audio, video, or image files are allowed",
         )
 
-    file.file.seek(0, 2)
-    size = file.file.tell()
-    file.file.seek(0)
+    contents = await file.read()
+    size = len(contents)
+    if size <= 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
         validate_message_media_size(size)
@@ -404,40 +528,57 @@ async def upload_message_media(
     is_image = content_type.startswith("image/") or filename.endswith(
         (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif")
     )
+    is_audio = content_type.startswith("audio/") or filename.endswith(
+        (".mp3", ".m4a", ".wav", ".aac", ".ogg")
+    )
+    kind = "image" if is_image else ("audio" if is_audio else "video")
 
-    if is_image:
-        uploaded = cloudinary_upload_file(
-            file.file,
-            folder=MESSAGE_MEDIA_FOLDER,
-            access_mode="authenticated",
-            type="authenticated",
-        )
-    else:
-        uploaded = upload_media_file(
-            file.file,
-            folder=MESSAGE_MEDIA_FOLDER,
+    if not settings.message_s3_active:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Media storage is not configured. Set AWS_BUCKET / MESSAGE_S3_* "
+                "and restart the API."
+            ),
         )
 
-    public_id = uploaded.get("public_id")
-    resource_type = uploaded.get("resource_type")
-    delivery = uploaded.get("secure_url")
-    if public_id:
-        try:
-            delivery = signed_media_delivery_url(
-                str(public_id),
-                resource_type=resource_type,
-            ) or delivery
-        except Exception:
-            pass
+    owner = await load_owner_user_by_email(owner_email)
+    user_id = str(owner.get("_id"))
+    await vault_quota_check(
+        user=owner,
+        user_id=user_id,
+        incoming_bytes=size,
+        owner_email=owner_email,
+    )
+    folder_uuid = await get_or_create_folder_uuid(owner)
+    try:
+        uploaded = upload_message_bytes_to_s3(
+            contents=contents,
+            folder_uuid=folder_uuid,
+            mime_type=file.content_type or "application/octet-stream",
+            original_filename=file.filename,
+            kind=kind,
+        )
+    except Exception as exc:
+        print("❌ Message S3 upload failed:", repr(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Could not store media on S3. Please try again.",
+        ) from exc
 
     return {
-        "url": delivery,
-        "public_id": public_id,
-        "type": resource_type,
+        "url": uploaded.get("url"),
+        "public_id": uploaded.get("public_id"),
+        "s3_key": uploaded.get("s3_key"),
+        "s3_bucket": uploaded.get("s3_bucket"),
+        "storage": "s3",
+        "type": uploaded.get("type") or kind,
         "format": uploaded.get("format"),
-        "size": uploaded.get("bytes"),
-        "access_mode": "authenticated",
-        "url_expires_in": 3600,
+        "size": uploaded.get("size") or size,
+        "mime_type": uploaded.get("mime_type"),
+        "folder_uuid": folder_uuid,
+        "access_mode": "private",
+        "url_expires_in": 900,
     }
 
 
@@ -446,40 +587,53 @@ async def delete_uploaded_message_media(
     payload: MediaDeleteRequest,
     request: Request, authorization: str | None = Header(default=None)
 ):
-    """Delete message media from Cloudinary.
+    """Delete message media from S3 / Cloudinary.
 
     Used for:
     - orphan cleanup (uploaded while composing, before the message is saved)
     - removing an attachment that is already linked to one of the owner's messages
     """
-    await resolve_message_owner_id(request, authorization, write=True)
+    owner_email = await resolve_message_owner_id(request, authorization, write=True)
 
     public_id = (payload.public_id or "").strip()
+    s3_key = (getattr(payload, "s3_key", None) or "").strip()
+    key = s3_key or public_id
+    if not key:
+        raise HTTPException(status_code=400, detail="public_id or s3_key required")
+
+    is_s3 = bool(s3_key) or key.startswith(message_s3_prefix() + "/")
+
+    if is_s3:
+        owner = await load_owner_user_by_email(owner_email)
+        folder_uuid = await get_or_create_folder_uuid(owner)
+        if not key_belongs_to_owner_folder(s3_key=key, folder_uuid=folder_uuid):
+            if not await _caller_owns_message_media(
+                owner_email, public_id=public_id or None, s3_key=key
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only your message media can be deleted from this endpoint",
+                )
+        await messageofnextkin_collection.update_many(
+            {
+                "owner_id": owner_email,
+                "is_deleted": False,
+                "$or": [{"media.s3_key": key}, {"media.public_id": key}],
+            },
+            {"$set": {"media": None, "updated_at": datetime.utcnow()}},
+        )
+        delete_message_s3_object(s3_key=key)
+        return {"status": "deleted", "storage": "s3"}
+
     if not public_id.startswith(f"{MESSAGE_MEDIA_FOLDER}/") and public_id != MESSAGE_MEDIA_FOLDER:
         raise HTTPException(
             status_code=400,
             detail="Only message media can be deleted from this endpoint",
         )
 
-    owner_id = decoded.get("owner_id") or decoded.get("sub")
-    sub = decoded.get("sub")
-    if sub:
-        from app.database import users_collection
-
-        owner_query: dict = {"role": "owner"}
-        if ObjectId.is_valid(str(sub)):
-            owner_query["$or"] = [{"email": sub}, {"_id": ObjectId(str(sub))}]
-        else:
-            owner_query["email"] = sub
-
-        owner = await users_collection.find_one(owner_query)
-        if owner:
-            owner_id = str(owner["_id"])
-
-    # Detach from any of this owner's messages that still reference the file.
     await messageofnextkin_collection.update_many(
         {
-            "owner_id": str(owner_id),
+            "owner_id": owner_email,
             "media.public_id": public_id,
             "is_deleted": False,
         },
@@ -489,4 +643,4 @@ async def delete_uploaded_message_media(
     # Allow orphan deletes: media uploaded during compose is not in Mongo yet.
     delete_file(public_id, payload.resource_type)
 
-    return {"status": "deleted"}
+    return {"status": "deleted", "storage": "cloudinary"}

@@ -1,8 +1,8 @@
 """
-Cloudinary-backed storage helpers for AI autofill documents.
+Storage helpers for AI autofill documents.
 
-Uploads use authenticated Cloudinary delivery; Mongo holds metadata.
-Preview / extract download via short-lived signed URLs — not public links.
+Primary: AWS S3 (when VAULT_S3 / AWS_BUCKET configured).
+Legacy: Cloudinary authenticated assets + on-disk VAULT_ROOT paths.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Optional
 
 import requests
 
+from app.config import settings
 from app.security.cloudinary_service import (
     delete_file,
     fetch_authenticated_bytes,
@@ -21,6 +22,11 @@ from app.security.cloudinary_service import (
     upload_file,
 )
 from app.storage.vault import recover_ai_document_path
+from app.storage.vault_s3 import (
+    delete_vault_s3_object,
+    fetch_vault_s3_bytes,
+    upload_vault_bytes_to_s3,
+)
 
 
 def ai_cloudinary_folder(email: str | None, user_id: str) -> str:
@@ -30,9 +36,16 @@ def ai_cloudinary_folder(email: str | None, user_id: str) -> str:
 
 
 def destroy_ai_document_assets(doc: dict | None) -> None:
-    """Delete Cloudinary asset (and any legacy vault path) for one AI document."""
+    """Delete S3 / Cloudinary / legacy vault bytes for one AI document."""
     if not isinstance(doc, dict):
         return
+
+    s3_key = str(doc.get("s3_key") or "").strip()
+    if s3_key or str(doc.get("storage") or "").lower() == "s3":
+        delete_vault_s3_object(
+            s3_key=s3_key or None,
+            bucket=str(doc.get("s3_bucket") or "").strip() or None,
+        )
 
     public_id = str(doc.get("public_id") or "").strip()
     if public_id:
@@ -69,7 +82,6 @@ def upload_ai_bytes_to_cloudinary(
     )
     public_id = result.get("public_id")
     resource_type = result.get("resource_type") or "auto"
-    # Prefer a signed delivery URL over a permanent public secure_url.
     delivery = ""
     if public_id:
         try:
@@ -88,6 +100,43 @@ def upload_ai_bytes_to_cloudinary(
         "format": result.get("format"),
         "bytes": result.get("bytes") or len(contents),
         "mime_type": mime_type,
+        "storage": "cloudinary",
+    }
+
+
+def upload_ai_bytes_to_storage(
+    *,
+    contents: bytes,
+    folder_uuid: str,
+    stored_filename: str,
+    mime_type: str,
+    original_filename: str,
+    email: str | None = None,
+    user_id: str = "",
+) -> dict:
+    """
+    Store upload bytes on S3 (required). Returns fields for ai_documents Mongo row.
+    Legacy Cloudinary rows remain readable via fetch/destroy helpers.
+    """
+    if not settings.vault_s3_active:
+        raise RuntimeError(
+            "Vault S3 is not configured. Set AWS_BUCKET / VAULT_S3_* and restart."
+        )
+
+    meta = upload_vault_bytes_to_s3(
+        contents=contents,
+        folder_uuid=folder_uuid,
+        stored_filename=stored_filename,
+        mime_type=mime_type,
+        original_filename=original_filename,
+    )
+    return {
+        "storage": "s3",
+        "s3_bucket": meta.get("s3_bucket"),
+        "s3_key": meta.get("s3_key"),
+        "s3_region": meta.get("s3_region"),
+        "folder_uuid": folder_uuid,
+        "stored_filename": stored_filename,
     }
 
 
@@ -110,7 +159,7 @@ def fetch_cloudinary_bytes(
     timeout: int = 60,
 ) -> bytes:
     """
-    Download AI document bytes.
+    Download AI document bytes from Cloudinary.
 
     Prefer authenticated signed download by public_id; fall back to legacy
     public secure_url for older uploads.
@@ -124,7 +173,6 @@ def fetch_cloudinary_bytes(
                 timeout=timeout,
             )
         except Exception as auth_exc:
-            # Fall through to legacy URL for pre-migration assets.
             if not secure_url:
                 raise auth_exc
 
@@ -137,25 +185,29 @@ def fetch_cloudinary_bytes(
     return response.content
 
 
-async def materialize_ai_document_file(doc: dict | None) -> Optional[Path]:
-    """
-    Return a local filesystem path for extractors / classifiers.
-
-    Prefer vault path when present; otherwise download from Cloudinary
-    (authenticated signed URL when possible).
-    """
-    if not isinstance(doc, dict):
-        return None
-
-    path = await recover_ai_document_path(doc)
-    if path:
-        return path
+def fetch_ai_document_bytes(doc: dict) -> bytes:
+    """Load raw bytes from S3, Cloudinary, or raise if remote store missing."""
+    storage = str(doc.get("storage") or "").strip().lower()
+    s3_key = str(doc.get("s3_key") or "").strip()
+    if storage == "s3" or s3_key:
+        return fetch_vault_s3_bytes(
+            s3_key=s3_key,
+            bucket=str(doc.get("s3_bucket") or "").strip() or None,
+        )
 
     public_id = str(doc.get("public_id") or "").strip()
     secure_url = str(doc.get("secure_url") or "").strip()
-    if not public_id and not secure_url:
-        return None
+    if public_id or secure_url:
+        return fetch_cloudinary_bytes(
+            public_id=public_id or None,
+            resource_type=doc.get("resource_type"),
+            secure_url=secure_url or None,
+        )
 
+    raise RuntimeError("No remote document bytes available")
+
+
+def _suffix_for_doc(doc: dict) -> str:
     mime = str(doc.get("mime_type") or "")
     ext_map = {
         "application/pdf": ".pdf",
@@ -165,15 +217,36 @@ async def materialize_ai_document_file(doc: dict | None) -> Optional[Path]:
         "image/webp": ".webp",
     }
     name = str(doc.get("original_filename") or doc.get("stored_filename") or "")
-    suffix = Path(name).suffix if "." in name else ext_map.get(mime, ".bin")
-    try:
-        contents = fetch_cloudinary_bytes(
-            public_id=public_id or None,
-            resource_type=doc.get("resource_type"),
-            secure_url=secure_url or None,
-        )
-    except Exception as exc:
-        print(f"⚠️ Cloudinary download failed: {exc}")
+    if "." in name:
+        return Path(name).suffix
+    return ext_map.get(mime, ".bin")
+
+
+async def materialize_ai_document_file(doc: dict | None) -> Optional[Path]:
+    """
+    Return a local filesystem path for extractors / classifiers.
+
+    Prefer vault path when present; otherwise download from S3 or Cloudinary.
+    """
+    if not isinstance(doc, dict):
         return None
 
-    return write_temp_ai_file(contents, suffix or ".bin")
+    path = await recover_ai_document_path(doc)
+    if path:
+        return path
+
+    storage = str(doc.get("storage") or "").strip().lower()
+    s3_key = str(doc.get("s3_key") or "").strip()
+    public_id = str(doc.get("public_id") or "").strip()
+    secure_url = str(doc.get("secure_url") or "").strip()
+
+    if not s3_key and storage != "s3" and not public_id and not secure_url:
+        return None
+
+    try:
+        contents = fetch_ai_document_bytes(doc)
+    except Exception as exc:
+        print(f"⚠️ Document download failed: {exc}")
+        return None
+
+    return write_temp_ai_file(contents, _suffix_for_doc(doc) or ".bin")

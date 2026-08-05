@@ -47,5 +47,5 @@ async def upload_letter_media(
         "format": uploaded.get("format"),
         "size": uploaded.get("bytes"),
         "access_mode": "authenticated",
-        "url_expires_in": 3600,
+        "url_expires_in": 900,
     }

@@ -23,7 +23,7 @@ Safe Trust bullets:
 - ✅ End-to-end encryption for vault sections — platform cannot decrypt ciphertext  
 - ✅ HTTPS everywhere · TLS in transit  
 
-**Do not over-claim:** E2EE applies to vault sections at `encryption_version: 3` (re-save to migrate).
+**Do not over-claim:** E2EE applies to vault sections at `encryption_version: 3`. AES-256-GCM is used for both v2 and v3 — the difference is **who holds the key** (server vs browser). Legacy v2 migrates on owner unlock / “Finish migration”.
 
 ---
 

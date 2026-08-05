@@ -20,7 +20,7 @@ from bson.errors import InvalidId
 from fastapi import HTTPException
 
 from app.config import settings
-from app.database import ai_documents_collection, users_collection
+from app.database import ai_documents_collection, messageofnextkin_collection, users_collection
 
 
 def vault_root() -> Path:
@@ -302,18 +302,56 @@ async def vault_usage_bytes(*, user_id: str | None = None) -> int:
     return int(cursor[0].get("total") or 0)
 
 
+async def message_media_usage_bytes(*, owner_email: str | None = None) -> int:
+    """Sum personal-message media sizes for one owner (owner_id is email)."""
+    match: dict = {
+        "is_deleted": {"$ne": True},
+        "media": {"$type": "object"},
+    }
+    if owner_email:
+        match["owner_id"] = owner_email
+    pipeline = [
+        {"$match": match},
+        {
+            "$group": {
+                "_id": None,
+                "total": {"$sum": {"$ifNull": ["$media.size", 0]}},
+            }
+        },
+    ]
+    cursor = await messageofnextkin_collection.aggregate(pipeline).to_list(length=1)
+    if not cursor:
+        return 0
+    return int(cursor[0].get("total") or 0)
+
+
+async def owner_storage_usage_bytes(
+    *,
+    user_id: str | None = None,
+    owner_email: str | None = None,
+) -> int:
+    """AI vault docs + personal message media for one owner (shared 5 GB)."""
+    docs = await vault_usage_bytes(user_id=user_id) if user_id else 0
+    media = await message_media_usage_bytes(owner_email=owner_email) if owner_email else 0
+    return int(docs) + int(media)
+
+
 async def vault_quota_check(
     *,
     user: dict,
     user_id: str,
     incoming_bytes: int,
+    owner_email: str | None = None,
 ) -> None:
     if incoming_bytes <= 0:
         return
 
-    global_used = await vault_usage_bytes()
+    email = (owner_email or user.get("email") or "").strip().lower() or None
+
+    global_docs = await vault_usage_bytes()
+    global_media = await message_media_usage_bytes()
     global_cap = int(settings.VAULT_GLOBAL_QUOTA_BYTES)
-    if global_used + incoming_bytes > global_cap:
+    if global_docs + global_media + incoming_bytes > global_cap:
         raise HTTPException(
             status_code=507,
             detail=(
@@ -322,15 +360,22 @@ async def vault_quota_check(
             ),
         )
 
-    user_used = await vault_usage_bytes(user_id=user_id)
+    user_used = await owner_storage_usage_bytes(
+        user_id=user_id,
+        owner_email=email,
+    )
     user_cap = user_quota_bytes(user)
     if user_used + incoming_bytes > user_cap:
-        mb = max(1, user_cap // (1024 * 1024))
+        if user_cap >= 1024 * 1024 * 1024:
+            limit_label = f"{user_cap / (1024 ** 3):.0f} GB"
+        else:
+            limit_label = f"{max(1, user_cap // (1024 * 1024))} MB"
         raise HTTPException(
             status_code=413,
             detail=(
-                f"Your document storage limit ({mb} MB) would be exceeded. "
-                "Delete unused uploads from Overview or a section, then try again."
+                f"Your storage limit ({limit_label}) would be exceeded. "
+                "This covers autofill documents and personal message media. "
+                "Delete unused uploads, then try again."
             ),
         )
 

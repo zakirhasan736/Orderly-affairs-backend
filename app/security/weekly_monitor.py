@@ -128,7 +128,7 @@ async def run_weekly_security_monitor() -> dict[str, Any]:
 
 def start_weekly_security_scheduler() -> None:
     if not getattr(settings, "WEEKLY_SECURITY_MONITOR_ENABLED", True):
-        if settings.APP_ENV == "development":
+        if settings.is_development:
             print("Weekly security monitor disabled")
         return
 
@@ -150,7 +150,7 @@ def start_weekly_security_scheduler() -> None:
     )
     if not scheduler.running:
         scheduler.start()
-    if settings.APP_ENV == "development":
+    if settings.is_development:
         print(
             f"Weekly security monitor scheduled ({day} {hour:02d}:{minute:02d} UTC)"
         )

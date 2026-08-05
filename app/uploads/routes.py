@@ -1,25 +1,27 @@
 from datetime import datetime, timezone
-import time
 
 from app.security.token_resolver import decode_owner_or_nok_token
 from fastapi import APIRouter, UploadFile, File, Header, HTTPException, Request
 from bson import ObjectId
 
-from app.security.section_file_cleanup import delete_owned_file
-from app.security.cloudinary_service import (
-    signed_delivery_url,
-    upload_file,
-)
-from cloudinary.exceptions import Error as CloudinaryError
+from app.config import settings
+from app.security.section_file_cleanup import delete_owned_file, owner_upload_prefix
+from app.security.cloudinary_service import signed_delivery_url
 from app.security.file_validation import validate_upload
 from app.database import users_collection
 from app.auth.portal_roles import can_upload_documents
 from app.auth.access_types import is_family_collaborator, resolve_access_type
+from app.storage.section_s3 import (
+    is_section_s3_key,
+    presign_section_get_url,
+    section_s3_owner_prefix,
+    upload_section_bytes_to_s3,
+)
+from app.storage.vault import vault_quota_check
 
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
 
-# Short-lived signed delivery for vault section attachments.
-SIGNED_URL_TTL_SECONDS = 60 * 60  # 1 hour
+SIGNED_URL_TTL_SECONDS = 15 * 60  # 15 minutes
 
 
 async def _actor_stamp(decoded: dict) -> dict:
@@ -62,10 +64,9 @@ async def _actor_stamp(decoded: dict) -> dict:
     }
 
 
-async def _owner_folder_prefix(decoded: dict) -> str:
-    """Return the Cloudinary folder prefix this actor may access."""
+async def _resolve_owner_email(decoded: dict) -> str:
     if decoded.get("role") == "owner":
-        return f"orderly_affairs/{decoded['sub']}/"
+        return str(decoded["sub"]).strip().lower()
 
     user = None
     try:
@@ -81,10 +82,21 @@ async def _owner_folder_prefix(decoded: dict) -> str:
     )
     if not owner:
         raise HTTPException(status_code=404, detail="Owner not found")
-    return f"orderly_affairs/{owner.get('email')}/"
+    return str(owner.get("email") or "").strip().lower()
 
 
-def _signed_url(public_id: str, resource_type: str | None = None) -> str:
+async def _load_owner_user(owner_email: str) -> dict:
+    user = await users_collection.find_one({"email": owner_email, "role": "owner"})
+    if not user:
+        user = await users_collection.find_one({"email": owner_email})
+    if not user:
+        raise HTTPException(status_code=404, detail="Owner account not found")
+    return user
+
+
+def _legacy_cloudinary_signed_url(public_id: str, resource_type: str | None = None) -> str:
+    import time
+
     expires_at = int(time.time()) + SIGNED_URL_TTL_SECONDS
     return signed_delivery_url(
         public_id,
@@ -101,58 +113,60 @@ async def upload_asset(
 ):
     decoded = decode_owner_or_nok_token(request, authorization)
     stamp = await _actor_stamp(decoded)
+    owner_email = await _resolve_owner_email(decoded)
 
     try:
         validate_upload(file)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    folder_key = decoded["sub"]
-    if decoded.get("role") == "nextkin":
-        # Store under owner folder when possible
-        try:
-            user = await users_collection.find_one(
-                {"_id": ObjectId(str(decoded["sub"])), "role": "nextkin"}
-            )
-            if user and user.get("owner_id"):
-                owner = await users_collection.find_one(
-                    {"_id": ObjectId(str(user["owner_id"])), "role": "owner"}
-                )
-                if owner:
-                    folder_key = owner.get("email") or folder_key
-        except Exception:
-            pass
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    if not settings.section_s3_active:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "File storage is not configured. Set AWS_BUCKET / SECTION_S3_* "
+                "and restart the API."
+            ),
+        )
+
+    owner = await _load_owner_user(owner_email)
+    await vault_quota_check(
+        user=owner,
+        user_id=str(owner.get("_id")),
+        incoming_bytes=len(contents),
+        owner_email=owner_email,
+    )
 
     try:
-        result = upload_file(
-            file.file,
-            folder=f"orderly_affairs/{folder_key}",
-            access_mode="authenticated",
-            type="authenticated",
+        uploaded = upload_section_bytes_to_s3(
+            contents=contents,
+            owner_email=owner_email,
+            mime_type=file.content_type or "application/octet-stream",
+            original_filename=file.filename,
         )
-    except CloudinaryError:
+    except Exception as exc:
+        print("❌ Section S3 upload failed:", repr(exc))
         raise HTTPException(
-            status_code=400,
-            detail="File failed security scan and was rejected",
-        )
-
-    public_id = result.get("public_id")
-    resource_type = result.get("resource_type")
-    delivery = ""
-    if public_id:
-        try:
-            delivery = _signed_url(str(public_id), resource_type)
-        except Exception:
-            delivery = str(result.get("secure_url") or "")
+            status_code=500,
+            detail="Could not store file on S3. Please try again.",
+        ) from exc
 
     return {
         "name": file.filename,
-        "url": delivery or result.get("secure_url"),
-        "public_id": public_id,
-        "type": resource_type,
-        "format": result.get("format"),
-        "size": result.get("bytes"),
-        "access_mode": "authenticated",
+        "url": uploaded.get("url"),
+        "public_id": uploaded.get("public_id"),  # S3 key
+        "s3_key": uploaded.get("s3_key"),
+        "s3_bucket": uploaded.get("s3_bucket"),
+        "storage": "s3",
+        "type": uploaded.get("type"),
+        "format": uploaded.get("format"),
+        "size": uploaded.get("size"),
+        "mime_type": uploaded.get("mime_type"),
+        "access_mode": "private",
         "url_expires_in": SIGNED_URL_TTL_SECONDS,
         "scan_status": "clean",
         **stamp,
@@ -165,27 +179,42 @@ async def refresh_signed_upload_url(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    """Return a fresh signed Cloudinary URL for an authenticated vault attachment."""
+    """Fresh presigned (S3) or signed (legacy Cloudinary) URL for a vault attachment."""
     decoded = decode_owner_or_nok_token(request, authorization)
-    public_id = str(data.get("public_id") or "").strip()
+    owner_email = await _resolve_owner_email(decoded)
+    public_id = str(data.get("public_id") or data.get("s3_key") or "").strip()
     if not public_id:
         raise HTTPException(status_code=400, detail="public_id required")
 
-    prefix = await _owner_folder_prefix(decoded)
-    if not public_id.startswith(prefix.rstrip("/")) and not public_id.startswith(
-        prefix
-    ):
-        # Allow exact folder match without trailing slash quirks
-        if not public_id.startswith("orderly_affairs/"):
+    # --- S3 ---
+    if is_section_s3_key(public_id) or str(data.get("storage") or "").lower() == "s3":
+        allowed = section_s3_owner_prefix(owner_email)
+        if not public_id.startswith(allowed):
             raise HTTPException(status_code=403, detail="Not authorized for this file")
-        # Owner prefix is email-based; reject if not under allowed owner folder
-        allowed = prefix.rstrip("/")
-        if not (public_id == allowed or public_id.startswith(allowed + "/")):
-            raise HTTPException(status_code=403, detail="Not authorized for this file")
+        url = presign_section_get_url(
+            s3_key=public_id,
+            bucket=str(data.get("s3_bucket") or "").strip() or None,
+            expires_in=SIGNED_URL_TTL_SECONDS,
+        )
+        if not url:
+            raise HTTPException(status_code=400, detail="Could not sign delivery URL")
+        return {
+            "public_id": public_id,
+            "s3_key": public_id,
+            "url": url,
+            "storage": "s3",
+            "access_mode": "private",
+            "url_expires_in": SIGNED_URL_TTL_SECONDS,
+        }
+
+    # --- Legacy Cloudinary ---
+    prefix = owner_upload_prefix(owner_email)
+    if not (public_id == prefix.rstrip("/") or public_id.startswith(prefix)):
+        raise HTTPException(status_code=403, detail="Not authorized for this file")
 
     resource_type = data.get("resource_type") or data.get("type")
     try:
-        url = _signed_url(public_id, resource_type)
+        url = _legacy_cloudinary_signed_url(public_id, resource_type)
     except Exception as exc:
         raise HTTPException(
             status_code=400, detail=f"Could not sign delivery URL: {exc}"
@@ -194,6 +223,7 @@ async def refresh_signed_upload_url(
     return {
         "public_id": public_id,
         "url": url,
+        "storage": "cloudinary",
         "access_mode": "authenticated",
         "url_expires_in": SIGNED_URL_TTL_SECONDS,
     }
@@ -206,18 +236,15 @@ async def delete_upload(
     authorization: str | None = Header(default=None),
 ):
     decoded = decode_owner_or_nok_token(request, authorization)
+    public_id = str(data.get("public_id") or data.get("s3_key") or "").strip()
+    if not public_id:
+        raise HTTPException(status_code=400, detail="public_id required")
 
     if decoded["role"] == "owner":
-        public_id = data.get("public_id")
-        if not public_id:
-            raise HTTPException(status_code=400)
-        owner_prefix = f"orderly_affairs/{decoded['sub']}/"
-        if not str(public_id).startswith(owner_prefix):
-            raise HTTPException(status_code=403, detail="Not authorized to delete this file")
-        delete_owned_file(public_id, decoded["sub"])
-        return {"status": "deleted"}
+        owner_email = str(decoded["sub"]).strip().lower()
+        delete_owned_file(public_id, owner_email)
+        return {"status": "deleted", "storage": "s3" if is_section_s3_key(public_id) else "cloudinary"}
 
-    # Family editor+ may delete files they can access under the owner kit
     if decoded["role"] != "nextkin":
         raise HTTPException(status_code=403)
 
@@ -227,18 +254,14 @@ async def delete_upload(
     if not user or not is_family_collaborator(user) or not can_upload_documents(user):
         raise HTTPException(status_code=403)
 
-    public_id = data.get("public_id")
-    if not public_id:
-        raise HTTPException(status_code=400)
-
     owner = await users_collection.find_one(
         {"_id": ObjectId(str(user["owner_id"])), "role": "owner"}
     )
     if not owner:
         raise HTTPException(status_code=404)
-    owner_prefix = f"orderly_affairs/{owner['email']}/"
-    if not str(public_id).startswith(owner_prefix):
-        raise HTTPException(status_code=403, detail="Not authorized to delete this file")
 
     delete_owned_file(public_id, owner["email"])
-    return {"status": "deleted"}
+    return {
+        "status": "deleted",
+        "storage": "s3" if is_section_s3_key(public_id) else "cloudinary",
+    }

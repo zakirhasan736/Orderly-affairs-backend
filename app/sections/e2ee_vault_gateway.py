@@ -20,7 +20,8 @@ from app.config import settings
 e2ee_vault_router = APIRouter(prefix="/e2ee/vault", tags=["e2ee-vault"])
 
 # slug -> (section_id, section_key, subsections)
-VAULT_SECTIONS: dict[str, tuple[str, str, list[str]]] = {
+# Include FE/legacy path aliases so unlock+migrate never 404 on known sections.
+_VAULT_SECTION_CANONICAL: dict[str, tuple[str, str, list[str]]] = {
     "section1-vital-information": ("1", "section1_vitalinformation", ["1A", "1C"]),
     "section5-vehicles": ("5", "section5_vehicles", ["5A", "5B", "5C"]),
     "section6-main-residence": ("6", "section6_main_residence", ["6A"]),
@@ -47,6 +48,21 @@ VAULT_SECTIONS: dict[str, tuple[str, str, list[str]]] = {
         "section21_estate",
         ["21A"],
     ),
+}
+
+# Aliases used by legacy FastAPI routers / older FE clients.
+_VAULT_SECTION_ALIASES: dict[str, str] = {
+    "section20-legal-documents-records": "section20-legal-document-records",
+    "section21-estate-planning-final-wishes": "section21-estate-planning-finalwishes",
+}
+
+VAULT_SECTIONS: dict[str, tuple[str, str, list[str]]] = dict(_VAULT_SECTION_CANONICAL)
+for _alias, _canon in _VAULT_SECTION_ALIASES.items():
+    VAULT_SECTIONS[_alias] = _VAULT_SECTION_CANONICAL[_canon]
+
+# section_id -> preferred slug (for migration-status)
+SECTION_ID_TO_SLUG: dict[str, str] = {
+    meta[0]: slug for slug, meta in _VAULT_SECTION_CANONICAL.items()
 }
 
 

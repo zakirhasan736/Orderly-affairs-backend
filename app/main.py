@@ -1,5 +1,27 @@
 from dotenv import load_dotenv
+
 load_dotenv()
+# Ensure AWS secrets merge before other app imports (AES_256_KEY, etc.).
+try:
+    from app.security.secrets_bootstrap import apply_aws_secrets_manager
+
+    apply_aws_secrets_manager()
+except Exception as exc:
+    import os
+
+    secret_id = (
+        os.getenv("AWS_SECRETS_MANAGER_SECRET_ID")
+        or os.getenv("SECRETS_MANAGER_SECRET_ID")
+        or ""
+    ).strip()
+    ssm_path = (
+        os.getenv("AWS_SSM_PARAMETER_PATH") or os.getenv("SSM_PARAMETER_PATH") or ""
+    ).strip()
+    env = (os.getenv("APP_ENV") or "development").strip().lower()
+    if (secret_id or ssm_path) and env in {"production", "prod", "staging"}:
+        raise
+    print(f"⚠️ AWS secrets bootstrap skipped: {exc}")
+
 import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
@@ -94,9 +116,9 @@ from app.security.error_handlers import (
 
 app = FastAPI(
     title="Orderly Affairs Backend API",
-    docs_url="/docs" if settings.APP_ENV == "development" else None,
-    redoc_url="/redoc" if settings.APP_ENV == "development" else None,
-    openapi_url="/openapi.json" if settings.APP_ENV == "development" else None,
+    docs_url="/docs" if settings.is_development else None,
+    redoc_url="/redoc" if settings.is_development else None,
+    openapi_url="/openapi.json" if settings.is_development else None,
 )
 
 app.add_exception_handler(HTTPException, http_exception_handler)
@@ -111,7 +133,7 @@ app.add_middleware(CsrfMiddleware)
 # Trailing slash mismatch breaks exact-origin CORS checks
 _frontend = (settings.FRONTEND_URL or "").rstrip("/")
 origins = [o for o in {_frontend, "https://portal.orderly-affairs.com"} if o]
-if settings.APP_ENV == "development":
+if settings.is_development:
     for local in ("http://localhost:3000", "http://127.0.0.1:3000"):
         if local not in origins:
             origins.append(local)
@@ -138,7 +160,7 @@ async def startup():
     try:
         await ensure_owner_phone_index(users_collection)
     except Exception as exc:
-        if settings.APP_ENV == "development":
+        if settings.is_development:
             print("Owner phone unique index warning:", exc)
 
     try:
@@ -175,7 +197,7 @@ async def startup():
             try:
                 await check_scheduled_letters()
             except Exception as e:
-                if settings.APP_ENV == "development":
+                if settings.is_development:
                     print("NOK message scheduler error:", e)
 
             await asyncio.sleep(60)
@@ -187,13 +209,14 @@ async def startup():
             await run_encryption_migration()
             await run_security_audit()
         except Exception as exc:
-            if settings.APP_ENV == "development":
+            if settings.is_development:
                 print("Encryption-at-rest migration error:", exc)
 
     asyncio.create_task(encryption_migration_loop())
 
-    if settings.APP_ENV == "development":
+    if settings.is_development:
         print("Both letter & message schedulers started")
+
 
 app.include_router(upload_router)
 app.include_router(auth_router)

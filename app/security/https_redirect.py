@@ -9,7 +9,7 @@ from app.config import settings
 
 class HTTPSRedirectMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
-        if settings.APP_ENV != "development":
+        if not settings.is_development:
             forwarded_proto = request.headers.get("x-forwarded-proto", "")
             if forwarded_proto and forwarded_proto.lower() != "https":
                 url = request.url.replace(scheme="https")

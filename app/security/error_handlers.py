@@ -13,7 +13,8 @@ GENERIC_NOT_FOUND = "Not found."
 
 
 def _is_production() -> bool:
-    return settings.APP_ENV == "production"
+    # Treat prod + staging as hardened (sanitize 500s / validation dumps).
+    return settings.is_hardened_runtime
 
 
 def _sanitize_http_detail(status_code: int, detail) -> str | dict:

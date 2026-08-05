@@ -1,26 +1,52 @@
-"""Delete Cloudinary files from section payloads with owner ownership checks."""
+"""Delete section/feedback upload files with owner ownership checks.
+
+Supports:
+- S3 keys under orderly-affairs/sections/{owner}/
+- Legacy Cloudinary public_ids under orderly_affairs/{owner}/
+"""
 
 from typing import Any
 
 from fastapi import HTTPException
 
 from app.security.cloudinary_service import delete_file
+from app.storage.section_s3 import (
+    delete_section_s3_object,
+    is_section_s3_key,
+    section_s3_owner_prefix,
+)
 
 
 def owner_upload_prefix(owner_email: str) -> str:
+    """Legacy Cloudinary folder prefix."""
     return f"orderly_affairs/{owner_email}/"
 
 
 def delete_owned_file(public_id: str, owner_email: str) -> None:
     if not public_id:
         return
+
+    key = str(public_id).strip()
+
+    # --- S3 (new) ---
+    if is_section_s3_key(key):
+        allowed = section_s3_owner_prefix(owner_email)
+        if not key.startswith(allowed):
+            raise HTTPException(
+                status_code=403,
+                detail="Not authorized to delete this file",
+            )
+        delete_section_s3_object(s3_key=key)
+        return
+
+    # --- Legacy Cloudinary ---
     prefix = owner_upload_prefix(owner_email)
-    if not str(public_id).startswith(prefix):
+    if not key.startswith(prefix):
         raise HTTPException(
             status_code=403,
             detail="Not authorized to delete this file",
         )
-    delete_file(public_id)
+    delete_file(key)
 
 
 def process_section_deleted_files(obj: Any, owner_email: str) -> None:

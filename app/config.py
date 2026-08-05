@@ -4,6 +4,30 @@ from pathlib import Path
 from datetime import timedelta
 import os
 
+from dotenv import load_dotenv
+
+# Thin VPS .env first, then AWS Parameter Store / Secrets Manager.
+load_dotenv()
+try:
+    from app.security.secrets_bootstrap import apply_aws_secrets_manager
+
+    apply_aws_secrets_manager()
+except Exception as _secrets_exc:
+    # Fail closed in production when any AWS secret source is configured.
+    _secret_id = (
+        os.getenv("AWS_SECRETS_MANAGER_SECRET_ID")
+        or os.getenv("SECRETS_MANAGER_SECRET_ID")
+        or ""
+    ).strip()
+    _ssm_path = (
+        os.getenv("AWS_SSM_PARAMETER_PATH") or os.getenv("SSM_PARAMETER_PATH") or ""
+    ).strip()
+    _env = (os.getenv("APP_ENV") or "development").strip().lower()
+    if (_secret_id or _ssm_path) and _env in {"production", "prod", "staging"}:
+        raise
+    print(f"⚠️ AWS secrets bootstrap skipped: {_secrets_exc}")
+
+
 class Settings(BaseSettings):
     # === Database ===
     MONGO_URL: str
@@ -110,8 +134,8 @@ class Settings(BaseSettings):
     # Default: allowed only in development. Set true/false to override.
     ADMIN_ALLOW_OWNER_COOKIE_FALLBACK: bool | None = None
 
-    # === Document vault (AI autofill uploads on VPS disk) ===
-    # Production: /var/storage/vault  |  Local: storage/vault (project-relative)
+    # === Document vault (AI autofill uploads) ===
+    # Production disk fallback / legacy: /var/storage/vault | Local: storage/vault
     VAULT_ROOT: str = "storage/vault"
     # Hard ceiling for all users combined (default 100 GB).
     VAULT_GLOBAL_QUOTA_GB: float = 100.0
@@ -121,6 +145,21 @@ class Settings(BaseSettings):
     AI_UPLOAD_MAX_MB: float = 15.0
     # 0 = keep forever (vault). >0 = expire uploads after N minutes.
     AI_UPLOAD_TTL_MINUTES: int = 0
+    # Primary blob store for new owner uploads (same AWS bucket as backups by default).
+    VAULT_S3_ENABLED: bool = False
+    VAULT_S3_BUCKET: str | None = None
+    VAULT_S3_PREFIX: str = "orderly-affairs/vault"
+    VAULT_S3_REGION: str | None = None
+    # Personal message media (audio / video / photo) — per-owner S3 folder.
+    MESSAGE_S3_ENABLED: bool = False
+    MESSAGE_S3_BUCKET: str | None = None
+    MESSAGE_S3_PREFIX: str = "orderly-affairs/messages"
+    MESSAGE_S3_REGION: str | None = None
+    # Section vault + feedback attachments (TextInputWithUpload, etc.).
+    SECTION_S3_ENABLED: bool = False
+    SECTION_S3_BUCKET: str | None = None
+    SECTION_S3_PREFIX: str = "orderly-affairs/sections"
+    SECTION_S3_REGION: str | None = None
 
     # === Weekly security monitoring ===
     WEEKLY_SECURITY_MONITOR_ENABLED: bool = True
@@ -142,20 +181,128 @@ class Settings(BaseSettings):
     BACKUP_RETENTION_DAYS: int = 14
     # Include on-disk VAULT_ROOT files in the package (can be large).
     BACKUP_INCLUDE_VAULT_FILES: bool = False
-    # Separate 32-byte key (base64). If unset, falls back to AES_256_KEY.
-    # Prefer a dedicated offline key for disaster recovery.
+    # Separate 32-byte key (base64). Required in production/staging.
+    # Dev may fall back to AES_256_KEY; prefer SSM /orderly-affairs/BACKUP_ENCRYPTION_KEY.
     BACKUP_ENCRYPTION_KEY: str | None = None
     # Optional AWS S3 upload (enable bucket versioning in AWS console).
     BACKUP_S3_ENABLED: bool = False
     BACKUP_S3_BUCKET: str | None = None
     BACKUP_S3_PREFIX: str = "orderly-affairs/backups"
     BACKUP_S3_REGION: str = "us-east-1"
+    # Shared AWS credentials (also used when BACKUP_S3_* bucket/region unset).
     AWS_ACCESS_KEY_ID: str | None = None
     AWS_SECRET_ACCESS_KEY: str | None = None
+    AWS_BUCKET: str | None = None
+    AWS_REGION: str | None = None
+    # Hostinger VPS: set secret id to pull MONGO/AES/JWT/Stripe/etc. from AWS.
+    # Thin .env keeps only AWS_* bootstrap keys + this id + non-secret config.
+    AWS_SECRETS_MANAGER_ENABLED: bool = True
+    AWS_SECRETS_MANAGER_SECRET_ID: str | None = None
+    AWS_SECRETS_MANAGER_REGION: str | None = None
+    # When true, Secrets Manager overwrites values already present in .env.
+    AWS_SECRETS_MANAGER_OVERRIDE: bool = False
 
     class Config:
         env_file = ".env"
         extra = "ignore"  # ignore stray lines that caused earlier dotenv errors
+
+    @property
+    def backup_s3_bucket_name(self) -> str | None:
+        name = (self.BACKUP_S3_BUCKET or self.AWS_BUCKET or "").strip()
+        return name or None
+
+    @property
+    def backup_s3_region_name(self) -> str:
+        return (self.BACKUP_S3_REGION or self.AWS_REGION or "us-east-1").strip()
+
+    @property
+    def backup_s3_active(self) -> bool:
+        """True when S3 upload should run (explicit flag or AWS_BUCKET + keys)."""
+        if not self.backup_s3_bucket_name:
+            return False
+        if self.BACKUP_S3_ENABLED:
+            return True
+        # Auto-enable when operators configure AWS_BUCKET + access keys.
+        return bool(self.AWS_ACCESS_KEY_ID and self.AWS_SECRET_ACCESS_KEY)
+
+    @property
+    def vault_s3_bucket_name(self) -> str | None:
+        name = (self.VAULT_S3_BUCKET or self.AWS_BUCKET or "").strip()
+        return name or None
+
+    @property
+    def vault_s3_region_name(self) -> str:
+        return (
+            self.VAULT_S3_REGION
+            or self.AWS_REGION
+            or self.BACKUP_S3_REGION
+            or "us-east-1"
+        ).strip()
+
+    @property
+    def vault_s3_active(self) -> bool:
+        """New owner autofill uploads go to S3 when configured."""
+        if not self.vault_s3_bucket_name:
+            return False
+        if self.VAULT_S3_ENABLED:
+            return True
+        return bool(self.AWS_ACCESS_KEY_ID and self.AWS_SECRET_ACCESS_KEY)
+
+    @property
+    def message_s3_bucket_name(self) -> str | None:
+        name = (
+            self.MESSAGE_S3_BUCKET or self.VAULT_S3_BUCKET or self.AWS_BUCKET or ""
+        ).strip()
+        return name or None
+
+    @property
+    def message_s3_region_name(self) -> str:
+        return (
+            self.MESSAGE_S3_REGION
+            or self.VAULT_S3_REGION
+            or self.AWS_REGION
+            or self.BACKUP_S3_REGION
+            or "us-east-1"
+        ).strip()
+
+    @property
+    def message_s3_active(self) -> bool:
+        """Personal message media goes to S3 when configured."""
+        if not self.message_s3_bucket_name:
+            return False
+        if self.MESSAGE_S3_ENABLED:
+            return True
+        # Same AWS wiring as vault — auto-enable with bucket + keys.
+        return bool(self.AWS_ACCESS_KEY_ID and self.AWS_SECRET_ACCESS_KEY)
+
+    @property
+    def section_s3_bucket_name(self) -> str | None:
+        name = (
+            self.SECTION_S3_BUCKET
+            or self.VAULT_S3_BUCKET
+            or self.AWS_BUCKET
+            or ""
+        ).strip()
+        return name or None
+
+    @property
+    def section_s3_region_name(self) -> str:
+        return (
+            self.SECTION_S3_REGION
+            or self.VAULT_S3_REGION
+            or self.AWS_REGION
+            or self.BACKUP_S3_REGION
+            or "us-east-1"
+        ).strip()
+
+    @property
+    def section_s3_active(self) -> bool:
+        """Section/feedback uploads go to S3 when configured."""
+        if not self.section_s3_bucket_name:
+            return False
+        if self.SECTION_S3_ENABLED:
+            return True
+        return bool(self.AWS_ACCESS_KEY_ID and self.AWS_SECRET_ACCESS_KEY)
 
     @property
     def VAULT_GLOBAL_QUOTA_BYTES(self) -> int:
@@ -180,7 +327,20 @@ class Settings(BaseSettings):
         """
         if self.ADMIN_ALLOW_OWNER_COOKIE_FALLBACK is not None:
             return bool(self.ADMIN_ALLOW_OWNER_COOKIE_FALLBACK)
-        return self.APP_ENV == "development"
+        return self.is_development
+
+    @property
+    def app_env_normalized(self) -> str:
+        return (self.APP_ENV or "development").strip().lower()
+
+    @property
+    def is_development(self) -> bool:
+        return self.app_env_normalized in {"development", "dev", "local", "test"}
+
+    @property
+    def is_hardened_runtime(self) -> bool:
+        """Production-like: sanitize errors, secure cookies, no OpenAPI."""
+        return self.app_env_normalized in {"production", "prod", "staging"}
 
 
 # --- Initialize Settings ---
@@ -215,5 +375,5 @@ if not settings.JWT_PREVIOUS_PUBLIC_KEY and previous_public_key_path.exists():
     settings.JWT_PREVIOUS_PUBLIC_KEY = previous_public_key_path.read_text()
 
 # Print to confirm (optional debug)
-if settings.APP_ENV == "development":
+if settings.is_development:
     print(f"Loaded config for {settings.APP_NAME}")

@@ -519,7 +519,14 @@ async def _finalize_autofill_success(
                     }
                 )
     elif payload.section == "insurance_policies":
-        vehicle_seed = seed_vehicles_from_insurance(result)
+        # If overview already paired Vehicles, force a thin bridge even when
+        # policy_type is blank / ambiguous so the client can badge New data.
+        force_vehicle_bridge = any(
+            item.get("section_key") == "vehicles" for item in additional_sections
+        )
+        vehicle_seed = seed_vehicles_from_insurance(
+            result, force_bridge=force_vehicle_bridge
+        )
         if vehicle_seed:
             cached_extractions["vehicles"] = merge_seed_into_cached(
                 cached_extractions.get("vehicles"),
@@ -702,15 +709,14 @@ async def _finalize_autofill_success(
             },
         )
 
-    # Only return FULL partner extracts here. Cross-seeds are bridges — the
-    # client must run a catalog extract per related section against the file.
+    # Include partner extracts AND cross-seeds. Seeds let the client badge
+    # Vehicles with "New data" when Insurance was primary; client still runs a
+    # full catalog extract to enrich thin bridges.
     partner_results: dict[str, dict] = {}
     for partner_key, partner_result in cached_extractions.items():
         if partner_key == payload.section:
             continue
         if not isinstance(partner_result, dict):
-            continue
-        if cached_extraction_needs_full_read(partner_key, partner_result):
             continue
         if partner_key in FAST_PARTNER_PREFETCH.get(payload.section, []) or any(
             item.get("section_key") == partner_key for item in additional_sections
@@ -828,9 +834,9 @@ async def autofill_section(
                 },
             )
 
-        # Heal stale absolute paths after VAULT_ROOT / cwd changes (vault only).
+        # Heal stale absolute paths after VAULT_ROOT / cwd changes (local vault only).
         if (
-            str(doc.get("storage") or "") != "cloudinary"
+            str(doc.get("storage") or "").lower() not in {"cloudinary", "s3"}
             and str(doc.get("path") or "") != file_path
         ):
             await ai_documents_collection.update_one(

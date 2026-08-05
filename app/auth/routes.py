@@ -3113,7 +3113,10 @@ async def delete_owner_account(
         step_up_token=payload.step_up_token,
     )
 
-    summary = await purge_owner_account(owner)
+    try:
+        summary = await purge_owner_account(owner)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # End session after wipe (user row already gone — only clear cookies).
     from app.security.cookie_auth import clear_auth_cookies

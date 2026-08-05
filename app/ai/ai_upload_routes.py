@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,15 +24,15 @@ from app.config import settings
 from app.database import ai_documents_collection
 from app.ai.ai_auth import get_user_id, get_vault_owner_for_ai
 from app.ai.ai_document_storage import (
-    ai_cloudinary_folder,
     destroy_ai_document_assets,
-    fetch_cloudinary_bytes,
-    upload_ai_bytes_to_cloudinary,
+    fetch_ai_document_bytes,
     write_temp_ai_file,
+    upload_ai_bytes_to_storage,
 )
 from app.ai.ai_extract_crypto import encrypt_extracted_text
 from app.ai.local_document_extract import extract_document_text
 from app.storage.vault import (
+    get_or_create_folder_uuid,
     recover_ai_document_path,
     user_quota_bytes,
     vault_quota_check,
@@ -41,7 +42,7 @@ from app.storage.vault import (
 
 router = APIRouter(prefix="/ai", tags=["ai-upload"])
 
-# 0 = permanent storage (Cloudinary + Mongo).
+# 0 = permanent storage (S3 / Cloudinary + Mongo).
 AI_UPLOAD_TTL_MINUTES = int(
     os.getenv("AI_UPLOAD_TTL_MINUTES", str(settings.AI_UPLOAD_TTL_MINUTES))
 )
@@ -76,7 +77,18 @@ def normalize_mongo_datetime(value):
 
 
 def normalize_document_topic(name: Optional[str]) -> str:
-    return " ".join(str(name or "").strip().lower().split())
+    """
+    Collapse common re-download / copy suffixes so Auto_Insurance.pdf and
+    Auto_Insurance (1).pdf count as the same replaceable topic.
+    """
+    raw = str(name or "").strip().lower()
+    # Drop extension for matching (pdf vs PNG of same stem still collide —
+    # prefer stem identity for "same document" replace).
+    stem = re.sub(r"\.[a-z0-9]{1,8}$", "", raw)
+    stem = re.sub(r"[\s._-]*\(\d+\)$", "", stem)
+    stem = re.sub(r"[\s._-]*(copy|副本)$", "", stem)
+    stem = re.sub(r"[\s._-]+$", "", stem)
+    return " ".join(stem.replace("_", " ").replace("-", " ").split())
 
 
 def content_hash_for_bytes(contents: bytes) -> str:
@@ -147,10 +159,16 @@ def serialize_ai_document(doc: dict) -> dict:
         "preview_url": f"/ai/document/{doc.get('_id')}/preview",
         "source": doc.get("source") or "upload",
         "section": doc.get("routed_section") or doc.get("section"),
+        "pending_sections": (
+            list(doc.get("pending_sections") or [])
+            if isinstance(doc.get("pending_sections"), list)
+            else []
+        ),
         "content_hash": doc.get("content_hash"),
         "extract_reuse": bool(doc.get("extract_reuse")),
         "storage": doc.get("storage") or "vault",
         "public_id": doc.get("public_id"),
+        "s3_key": doc.get("s3_key"),
     }
 
 
@@ -207,14 +225,16 @@ async def delete_same_topic_documents(
     user_id: str,
     original_filename: str,
     section: Optional[str] = None,
+    content_hash: Optional[str] = None,
 ) -> List[str]:
     """
-    Replace prior uploads of the same document topic for this owner.
-    Same topic = same normalized filename (+ matching section when provided).
-    Deletes Cloudinary + Mongo (and any legacy vault path).
+    Replace prior uploads of the same document for this owner.
+    Match by normalized filename stem and/or exact content hash.
+    Deletes Cloudinary/S3 + Mongo (and any legacy vault path).
     """
     topic = normalize_document_topic(original_filename)
-    if not topic:
+    hash_key = str(content_hash or "").strip()
+    if not topic and not hash_key:
         return []
 
     section_key = str(section).strip() if section is not None else ""
@@ -230,11 +250,18 @@ async def delete_same_topic_documents(
             "original_filename": 1,
             "section": 1,
             "routed_section": 1,
+            "content_hash": 1,
+            "s3_key": 1,
+            "storage": 1,
         },
     )
 
     async for doc in cursor:
-        if normalize_document_topic(doc.get("original_filename")) != topic:
+        same_name = bool(topic) and (
+            normalize_document_topic(doc.get("original_filename")) == topic
+        )
+        same_hash = bool(hash_key) and str(doc.get("content_hash") or "") == hash_key
+        if not same_name and not same_hash:
             continue
 
         if section_key:
@@ -317,9 +344,9 @@ async def upload_ai_document(
     section_key = str(section).strip() if section is not None else ""
     content_hash = content_hash_for_bytes(contents)
     email = str(current_user.get("email") or "").strip().lower()
-    folder = ai_cloudinary_folder(email, user_id)
+    folder_uuid = await get_or_create_folder_uuid(current_user)
     temp_path: Path | None = None
-    cloud_meta: dict | None = None
+    storage_meta: dict | None = None
 
     try:
         # Exact byte match — copy AI cache before topic cleanup deletes the prior row.
@@ -330,24 +357,36 @@ async def upload_ai_document(
         extract_reuse = bool(prior)
         reused_from_file_id = str(prior.get("_id")) if prior else None
 
-        # Same topic re-upload: delete previous Cloudinary + DB row, then add new.
+        # Same topic / same bytes re-upload: delete previous remote bytes + DB row.
         replaced_file_ids = await delete_same_topic_documents(
             user_id=user_id,
             original_filename=original_filename,
             section=section_key or None,
+            content_hash=content_hash,
         )
 
         # Local extract from a temp copy (TXT / searchable PDF / OCR).
         temp_path = write_temp_ai_file(contents, ext)
         local_extract = extract_document_text(temp_path, file.content_type)
 
-        cloud_meta = upload_ai_bytes_to_cloudinary(
+        storage_meta = upload_ai_bytes_to_storage(
             contents=contents,
-            folder=folder,
-            filename=original_filename,
+            folder_uuid=folder_uuid,
+            stored_filename=stored_filename,
             mime_type=file.content_type,
+            original_filename=original_filename,
+            email=email,
+            user_id=user_id,
         )
-        if not cloud_meta.get("public_id") or not cloud_meta.get("secure_url"):
+        storage_kind = str(storage_meta.get("storage") or "")
+        if storage_kind == "s3" and not storage_meta.get("s3_key"):
+            raise HTTPException(
+                status_code=500,
+                detail="Document upload to S3 failed.",
+            )
+        if storage_kind == "cloudinary" and (
+            not storage_meta.get("public_id") or not storage_meta.get("secure_url")
+        ):
             raise HTTPException(
                 status_code=500,
                 detail="Document upload to Cloudinary failed.",
@@ -365,6 +404,7 @@ async def upload_ai_document(
             "user_id": user_id,
             "owner_id": user_id,
             "role": "owner",
+            "folder_uuid": folder_uuid,
             "stored_filename": stored_filename,
             "original_filename": original_filename,
             "mime_type": file.content_type,
@@ -375,11 +415,6 @@ async def upload_ai_document(
             "expires_at": expires_at,
             "status": "uploaded",
             "source": "upload",
-            "storage": "cloudinary",
-            "public_id": cloud_meta["public_id"],
-            "secure_url": cloud_meta["secure_url"],
-            "resource_type": cloud_meta.get("resource_type") or "auto",
-            "cloudinary_folder": folder,
             "extracted_text": encrypt_extracted_text(
                 user_id=user_id,
                 file_id=file_id,
@@ -390,6 +425,22 @@ async def upload_ai_document(
             "needs_vision": bool(local_extract.get("needs_vision")),
             "extract_reuse": extract_reuse,
             "unchanged": extract_reuse,
+            **{
+                k: v
+                for k, v in storage_meta.items()
+                if k
+                in {
+                    "storage",
+                    "s3_bucket",
+                    "s3_key",
+                    "s3_region",
+                    "public_id",
+                    "secure_url",
+                    "resource_type",
+                    "cloudinary_folder",
+                }
+                and v is not None
+            },
         }
         if section_key:
             doc["section"] = section_key
@@ -428,29 +479,20 @@ async def upload_ai_document(
             "needs_vision": bool(local_extract.get("needs_vision")),
             "extract_method": local_extract.get("method"),
             "extract_quality": local_extract.get("quality_score"),
-            "storage": "cloudinary",
-            "public_id": cloud_meta["public_id"],
+            "storage": storage_kind,
+            "s3_key": storage_meta.get("s3_key"),
+            "public_id": storage_meta.get("public_id"),
         }
 
     except HTTPException:
-        if cloud_meta and cloud_meta.get("public_id"):
-            destroy_ai_document_assets(
-                {
-                    "public_id": cloud_meta.get("public_id"),
-                    "resource_type": cloud_meta.get("resource_type"),
-                }
-            )
+        if storage_meta:
+            destroy_ai_document_assets(storage_meta)
         raise
 
     except Exception as e:
         print("❌ AI document upload failed:", repr(e))
-        if cloud_meta and cloud_meta.get("public_id"):
-            destroy_ai_document_assets(
-                {
-                    "public_id": cloud_meta.get("public_id"),
-                    "resource_type": cloud_meta.get("resource_type"),
-                }
-            )
+        if storage_meta:
+            destroy_ai_document_assets(storage_meta)
         raise HTTPException(status_code=500, detail="Document upload failed.")
 
     finally:
@@ -486,23 +528,48 @@ async def list_owner_ai_documents(
 
     documents = []
     async for doc in cursor:
-        storage = str(doc.get("storage") or "")
-        if storage == "cloudinary" and doc.get("secure_url"):
+        storage = str(doc.get("storage") or "").lower()
+        if storage == "s3" and doc.get("s3_key"):
+            documents.append(serialize_ai_document(doc))
+            continue
+        if storage == "cloudinary" and (doc.get("secure_url") or doc.get("public_id")):
             documents.append(serialize_ai_document(doc))
             continue
         # Legacy vault rows — only list when bytes are recoverable locally.
         path = await recover_ai_document_path(doc)
-        if path or doc.get("secure_url"):
+        if path or doc.get("secure_url") or doc.get("s3_key"):
             documents.append(serialize_ai_document(doc))
 
     used = await vault_usage_bytes(user_id=user_id)
+    from app.storage.vault import message_media_usage_bytes, owner_storage_usage_bytes
+
+    email = str(current_user.get("email") or "").strip().lower()
+    media_used = await message_media_usage_bytes(owner_email=email) if email else 0
+    total_used = await owner_storage_usage_bytes(
+        user_id=user_id,
+        owner_email=email or None,
+    )
     return {
         "success": True,
         "documents": documents,
         "storage": {
-            "used_bytes": used,
+            "used_bytes": total_used,
+            "documents_bytes": used,
+            "message_media_bytes": media_used,
             "user_quota_bytes": user_quota_bytes(current_user),
             "global_quota_bytes": settings.VAULT_GLOBAL_QUOTA_BYTES,
+            "backend": "s3" if settings.vault_s3_active else "cloudinary",
+            "s3_bucket": settings.vault_s3_bucket_name if settings.vault_s3_active else None,
+            "s3_prefix": (
+                (settings.VAULT_S3_PREFIX or "orderly-affairs/vault").strip("/")
+                if settings.vault_s3_active
+                else None
+            ),
+            "message_s3_prefix": (
+                (settings.MESSAGE_S3_PREFIX or "orderly-affairs/messages").strip("/")
+                if settings.message_s3_active
+                else None
+            ),
         },
     }
 
@@ -532,17 +599,16 @@ async def preview_ai_document(
     filename = doc.get("original_filename") or doc.get("stored_filename") or "document"
     media_type = (doc.get("mime_type") or "").strip() or "application/octet-stream"
 
+    storage = str(doc.get("storage") or "").lower()
+    s3_key = str(doc.get("s3_key") or "").strip()
     secure_url = str(doc.get("secure_url") or "").strip()
     public_id = str(doc.get("public_id") or "").strip()
-    if public_id or secure_url:
+
+    if storage == "s3" or s3_key or public_id or secure_url:
         try:
-            payload = fetch_cloudinary_bytes(
-                public_id=public_id or None,
-                resource_type=doc.get("resource_type"),
-                secure_url=secure_url or None,
-            )
+            payload = fetch_ai_document_bytes(doc)
         except Exception as exc:
-            print(f"❌ Cloudinary preview fetch failed for {file_id}: {exc}")
+            print(f"❌ Document preview fetch failed for {file_id}: {exc}")
             raise HTTPException(
                 status_code=410,
                 detail=(
@@ -600,7 +666,14 @@ async def delete_uploaded_ai_document(
     user_id = get_user_id(current_user)
     doc = await ai_documents_collection.find_one(
         {"_id": file_id, "user_id": user_id},
-        {"path": 1, "public_id": 1, "resource_type": 1},
+        {
+            "path": 1,
+            "public_id": 1,
+            "resource_type": 1,
+            "storage": 1,
+            "s3_key": 1,
+            "s3_bucket": 1,
+        },
     )
 
     if not doc:

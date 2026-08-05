@@ -9,7 +9,7 @@ client = Client(
 
 
 def _dev_log(*args) -> None:
-    if settings.APP_ENV == "development":
+    if settings.is_development:
         print(*args)
 
 

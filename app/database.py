@@ -53,5 +53,5 @@ admin_dsar_collection = db["admin_dsar_requests"]
 admin_legacy_collection = db["admin_legacy_requests"]
 admin_security_alerts_collection = db["admin_security_alerts"]
 
-if settings.APP_ENV == "development":
+if settings.is_development:
     print("MongoDB connected successfully")

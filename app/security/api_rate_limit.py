@@ -23,7 +23,7 @@ API_RATE_LIMIT_WINDOW_MINUTES = 1
 
 
 async def enforce_api_rate_limit(request: Request, *, key: str) -> None:
-    if settings.APP_ENV == "development":
+    if settings.is_development:
         return
 
     now = datetime.utcnow()

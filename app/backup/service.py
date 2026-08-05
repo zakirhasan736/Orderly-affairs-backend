@@ -148,7 +148,7 @@ async def run_daily_backup(*, upload_s3: bool | None = None) -> dict[str, Any]:
     size = enc_path.stat().st_size
 
     s3_key = None
-    do_s3 = settings.BACKUP_S3_ENABLED if upload_s3 is None else upload_s3
+    do_s3 = settings.backup_s3_active if upload_s3 is None else upload_s3
     if do_s3:
         prefix = (settings.BACKUP_S3_PREFIX or "orderly-affairs/backups").strip("/")
         day = started.strftime("%Y/%m/%d")
@@ -232,7 +232,12 @@ def list_local_backups() -> dict[str, Any]:
     return {
         "backup_root": str(root),
         "backup_enabled": bool(settings.BACKUP_ENABLED),
-        "s3_enabled": bool(settings.BACKUP_S3_ENABLED),
+        "s3_enabled": bool(settings.backup_s3_active),
+        "s3_bucket": settings.backup_s3_bucket_name,
+        "s3_prefix": (settings.BACKUP_S3_PREFIX or "orderly-affairs/backups").strip(
+            "/"
+        ),
+        "s3_region": settings.backup_s3_region_name,
         "retention_days": int(settings.BACKUP_RETENTION_DAYS),
         "cron_utc": f"{int(settings.BACKUP_CRON_HOUR):02d}:{int(settings.BACKUP_CRON_MINUTE):02d}",
         "count": len(items),

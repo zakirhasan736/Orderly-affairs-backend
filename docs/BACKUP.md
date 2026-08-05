@@ -34,7 +34,7 @@ Restore **replaces** collections from the package (documents stay ciphertext). A
 | `BACKUP_CRON_HOUR` / `BACKUP_CRON_MINUTE` | `3` / `0` | Cron time (scheduler TZ = machine/UTC) |
 | `BACKUP_RETENTION_DAYS` | `14` | Delete older local `.oa1b` files |
 | `BACKUP_INCLUDE_VAULT_FILES` | `false` | Also copy `VAULT_ROOT` disk files |
-| `BACKUP_ENCRYPTION_KEY` | _(unset)_ | Preferred 32-byte key (base64). If unset, uses `AES_256_KEY` |
+| `BACKUP_ENCRYPTION_KEY` | _(required in prod)_ | 32-byte key (base64). Prefer SSM `/orderly-affairs/BACKUP_ENCRYPTION_KEY`. Dev may fall back to `AES_256_KEY`; production/staging refuse the fallback. |
 
 Generate a dedicated backup key (store offline / secrets manager — needed to open packages):
 
@@ -69,11 +69,23 @@ Opening vault ciphertext after import still requires `AES_256_KEY` (and previous
 
 ```env
 BACKUP_S3_ENABLED=true
-BACKUP_S3_BUCKET=your-bucket-name
+BACKUP_S3_BUCKET=orderly-affairs-s3-storage
 BACKUP_S3_PREFIX=orderly-affairs/backups
 BACKUP_S3_REGION=us-east-1
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
+# Optional aliases (used if BACKUP_S3_BUCKET / REGION unset):
+# AWS_BUCKET=orderly-affairs-s3-storage
+# AWS_REGION=us-east-1
+```
+
+When `AWS_BUCKET` + AWS keys are set, S3 upload also auto-enables even if
+`BACKUP_S3_ENABLED` is omitted.
+
+Objects land at:
+
+```text
+s3://{bucket}/{BACKUP_S3_PREFIX}/{YYYY}/{MM}/{DD}/orderly-backup-….oa1b
 ```
 
 Install dependency:

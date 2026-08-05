@@ -14,7 +14,7 @@ ADMIN_REFRESH_COOKIE = "oa_admin_refresh_token"
 def cookie_secure() -> bool:
     from app.config import settings
 
-    return settings.APP_ENV != "development"
+    return not settings.is_development
 
 
 def cookie_domain() -> str | None:
@@ -30,7 +30,7 @@ def cookie_domain() -> str | None:
     if explicit:
         return explicit
 
-    if settings.APP_ENV == "development":
+    if settings.is_development:
         return None
 
     try:

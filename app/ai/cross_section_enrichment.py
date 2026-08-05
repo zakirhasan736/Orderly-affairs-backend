@@ -49,17 +49,9 @@ def _policy_blob(policy: dict) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _is_auto_insurance_policy(policy: dict) -> bool:
+def _is_clearly_non_auto_policy(policy: dict) -> bool:
     policy_type = (as_plain_text(policy.get("policy_type")) or "").lower()
     blob = f"{policy_type} {_policy_blob(policy)}".lower()
-    is_vehicle = (
-        policy_type in {"vehicle", "auto"}
-        or "auto" in blob
-        or "vin" in blob
-        or "license plate" in blob
-        or "vehicle" in blob
-        or bool(_YMM_RE.search(blob))
-    )
     is_home = (
         "homeowner" in blob
         or "renter" in blob
@@ -70,7 +62,28 @@ def _is_auto_insurance_policy(policy: dict) -> bool:
         policy_type in {"life", "health", "medical/dental", "disability", "long term care"}
         or ("life insurance" in blob and "auto" not in blob and "vehicle" not in blob)
     )
-    return bool(is_vehicle and not is_home and not is_life_health)
+    return bool(is_home or is_life_health)
+
+
+def _is_auto_insurance_policy(policy: dict) -> bool:
+    policy_type = (as_plain_text(policy.get("policy_type")) or "").lower()
+    blob = f"{policy_type} {_policy_blob(policy)}".lower()
+    if _is_clearly_non_auto_policy(policy):
+        return False
+    is_vehicle = (
+        policy_type in {"vehicle", "auto"}
+        or "auto" in blob
+        or "vin" in blob
+        or "license plate" in blob
+        or "vehicle" in blob
+        or bool(_YMM_RE.search(blob))
+    )
+    if is_vehicle:
+        return True
+    # Ambiguous / blank type with a policy number — allow thin Vehicles bridge
+    # when the overview classifier already paired this doc with Vehicles.
+    policy_no = as_plain_text(policy.get("policy_number")) or ""
+    return bool(policy_no and policy_type in {"", "other", "unknown"})
 
 
 def _vehicle_identity_key(vehicle: dict) -> str:
@@ -295,7 +308,11 @@ def seed_insurance_from_vehicles(vehicle_result: dict | None) -> dict | None:
     }
 
 
-def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
+def seed_vehicles_from_insurance(
+    insurance_result: dict | None,
+    *,
+    force_bridge: bool = False,
+) -> dict | None:
     """Seed vehicle cards from auto insurance — one 5A row per distinct vehicle."""
     insurance_result = _enrich_items_in_place(
         insurance_result, "insurance_policies", "7A"
@@ -309,7 +326,14 @@ def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
 
     for policy in policies:
         if not _is_auto_insurance_policy(policy):
-            continue
+            if not force_bridge or _is_clearly_non_auto_policy(policy):
+                continue
+            # Classifier paired Vehicles — keep a policy-number bridge.
+            if not (
+                as_plain_text(policy.get("policy_number"))
+                or as_plain_text(policy.get("policy_company"))
+            ):
+                continue
 
         concepts = collect_concepts_from_item(policy)
         shared = apply_concepts_to_item({}, concepts, "vehicles")
@@ -322,6 +346,16 @@ def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
             for key, value in row.items():
                 if as_plain_text(value) and not as_plain_text(vehicle.get(key)):
                     vehicle[key] = value
+            if not vehicle:
+                # Ensure thin bridge still carries policy identity.
+                if as_plain_text(policy.get("policy_number")):
+                    vehicle["insurance_policy"] = as_plain_text(
+                        policy.get("policy_number")
+                    )
+                if as_plain_text(policy.get("policy_company")):
+                    vehicle["insurance_company"] = as_plain_text(
+                        policy.get("policy_company")
+                    )
             if not vehicle:
                 continue
             key = _vehicle_identity_key(vehicle) or (
@@ -357,7 +391,7 @@ def seed_vehicles_from_insurance(insurance_result: dict | None) -> dict | None:
         "section": "vehicles",
         "scope": "section",
         "subsection": None,
-        "confidence": 0.7,
+        "confidence": 0.75,
         "extraction_source": "cross_seed",
         "patch": {"5A": vehicles},
     }

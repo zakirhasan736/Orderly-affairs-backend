@@ -16,13 +16,27 @@ CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB plaintext per chunk
 AAD = b"orderly-affairs-backup-v1"
 
 
+def _app_env() -> str:
+    return (os.getenv("APP_ENV") or getattr(settings, "APP_ENV", "development") or "development").strip().lower()
+
+
 def resolve_backup_key() -> bytes:
-    """Prefer BACKUP_ENCRYPTION_KEY; otherwise reuse AES_256_KEY."""
+    """Prefer BACKUP_ENCRYPTION_KEY.
+
+    Production/staging require a dedicated BACKUP_ENCRYPTION_KEY (no AES_256_KEY
+    fallback) so a leaked app vault key alone cannot open offline packages.
+    """
     from dotenv import load_dotenv
 
     load_dotenv()
-    raw = (settings.BACKUP_ENCRYPTION_KEY or "").strip()
+    raw = (settings.BACKUP_ENCRYPTION_KEY or os.getenv("BACKUP_ENCRYPTION_KEY") or "").strip()
+    env = _app_env()
     if not raw:
+        if env in {"production", "prod", "staging"}:
+            raise RuntimeError(
+                "BACKUP_ENCRYPTION_KEY is required in production/staging "
+                "(set in SSM /orderly-affairs/BACKUP_ENCRYPTION_KEY)"
+            )
         raw = (os.getenv("AES_256_KEY") or "").strip()
     if not raw:
         raise RuntimeError(

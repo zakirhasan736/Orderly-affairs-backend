@@ -191,9 +191,17 @@ async def e2ee_migration_status(
 ):
     """Count vault sections still on server AES (v2) vs client E2EE (v3)."""
     if not _e2ee_enabled():
-        return {"enabled": False, "legacy_v2": 0, "e2ee_v3": 0}
+        return {
+            "enabled": False,
+            "legacy_v2": 0,
+            "e2ee_v3": 0,
+            "migration_complete": True,
+            "legacy_section_ids": [],
+            "legacy_slugs": [],
+        }
 
     from app.database import section_data_collection
+    from app.sections.e2ee_vault_gateway import SECTION_ID_TO_SLUG
     from app.security.section_e2ee import E2EE_VERSION
 
     decoded = decode_owner_or_nok_token(request, authorization)
@@ -207,16 +215,15 @@ async def e2ee_migration_status(
         raise HTTPException(401, "Unauthorized")
 
     owner_id = str(user["_id"])
-    legacy_v2 = await section_data_collection.count_documents(
-        {
-            "owner_id": owner_id,
-            "encrypted_data": {"$exists": True, "$ne": None},
-            "$or": [
-                {"encryption_version": {"$exists": False}},
-                {"encryption_version": {"$ne": E2EE_VERSION}},
-            ],
-        }
-    )
+    legacy_filter = {
+        "owner_id": owner_id,
+        "encrypted_data": {"$exists": True, "$ne": None},
+        "$or": [
+            {"encryption_version": {"$exists": False}},
+            {"encryption_version": {"$ne": E2EE_VERSION}},
+        ],
+    }
+    legacy_v2 = await section_data_collection.count_documents(legacy_filter)
     e2ee_v3 = await section_data_collection.count_documents(
         {
             "owner_id": owner_id,
@@ -224,11 +231,25 @@ async def e2ee_migration_status(
             "encrypted_data": {"$exists": True, "$ne": None},
         }
     )
+    legacy_ids: list[str] = []
+    async for doc in section_data_collection.find(legacy_filter, {"section_id": 1}):
+        sid = str(doc.get("section_id") or "").strip()
+        if sid and sid not in legacy_ids:
+            legacy_ids.append(sid)
+
+    legacy_slugs = [
+        SECTION_ID_TO_SLUG[sid]
+        for sid in legacy_ids
+        if sid in SECTION_ID_TO_SLUG
+    ]
+
     return {
         "enabled": True,
         "legacy_v2": legacy_v2,
         "e2ee_v3": e2ee_v3,
-        "migration_complete": legacy_v2 == 0 and e2ee_v3 >= 0,
+        "migration_complete": legacy_v2 == 0,
+        "legacy_section_ids": legacy_ids,
+        "legacy_slugs": legacy_slugs,
     }
 
 

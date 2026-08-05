@@ -46,8 +46,16 @@ class LetterUpdate(BaseModel):
         return self
 
 class MediaDeleteRequest(BaseModel):
-    public_id: str
+    public_id: Optional[str] = None
+    s3_key: Optional[str] = None
     resource_type: Optional[str] = None
+    storage: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_media_id(self):
+        if not (self.public_id or self.s3_key):
+            raise ValueError("public_id or s3_key is required")
+        return self
 
 class LetterDB(BaseModel):
     owner_id: str

@@ -88,8 +88,11 @@ async def _cancel_stripe_for_owner(owner: dict) -> dict:
     return summary
 
 
-async def _purge_ai_documents(owner: dict) -> int:
+async def _purge_ai_documents(owner: dict) -> tuple[int, dict[str, int]]:
     from app.ai.ai_document_storage import destroy_ai_document_assets
+    from app.storage.vault_s3 import purge_owner_vault_s3_prefix
+    from app.storage.message_s3 import purge_owner_message_s3_prefix
+    from app.storage.section_s3 import purge_owner_section_s3_prefix
 
     owner_id = str(owner["_id"])
     deleted = 0
@@ -100,7 +103,38 @@ async def _purge_ai_documents(owner: dict) -> int:
         deleted += 1
     # Remove the whole vault folder (covers legacy orphans + uuid layout).
     await purge_owner_vault_dir(owner)
-    return deleted
+
+    s3_counts: dict[str, int] = {}
+    errors: list[str] = []
+
+    try:
+        s3_counts["vault"] = purge_owner_vault_s3_prefix(
+            folder_uuid=owner.get("folder_uuid")
+        )
+    except Exception as exc:
+        errors.append(f"vault_s3: {exc}")
+
+    try:
+        s3_counts["messages"] = purge_owner_message_s3_prefix(
+            folder_uuid=owner.get("folder_uuid")
+        )
+    except Exception as exc:
+        errors.append(f"message_s3: {exc}")
+
+    try:
+        s3_counts["sections"] = purge_owner_section_s3_prefix(
+            owner_email=owner.get("email")
+        )
+    except Exception as exc:
+        errors.append(f"section_s3: {exc}")
+
+    if errors:
+        raise RuntimeError(
+            "Account purge aborted: S3 prefix wipe failed — "
+            + "; ".join(errors)
+        )
+
+    return deleted, s3_counts
 
 
 async def purge_owner_account(owner: dict) -> dict:
@@ -108,8 +142,8 @@ async def purge_owner_account(owner: dict) -> dict:
     Irreversibly remove an owner and all owned data:
     - Cloudinary orderly_affairs/{email}/ folder
     - Message / letter media public_ids
-    - VPS vault AI autofill uploads
-    - Mongo: sections, kits, letters, messages, NOKs, tokens, support, OTPs
+    - VPS vault AI autofill uploads + S3 prefixes (fail-closed)
+    - Mongo: sections, kits, letters, messages, NOKs, tokens, support, OTPs, feedback
     - Stripe subscription + customer (best effort)
     """
     owner_id = str(owner["_id"])
@@ -129,13 +163,15 @@ async def purge_owner_account(owner: dict) -> dict:
         owner_email=email,
         message_public_ids=media_ids,
     )
-    ai_deleted = await _purge_ai_documents(owner)
+    ai_deleted, s3_counts = await _purge_ai_documents(owner)
     stripe_summary = await _cancel_stripe_for_owner(owner)
 
     # Next-of-kin accounts linked to this owner.
     nextkin_result = await users_collection.delete_many(
         {"role": "nextkin", "owner_id": owner_id},
     )
+
+    from app.database import feedback_collection
 
     mongo_counts = {
         "sections": (
@@ -174,6 +210,23 @@ async def purge_owner_account(owner: dict) -> dict:
         ).deleted_count
         if email
         else 0,
+        "feedback": (
+            await feedback_collection.delete_many(
+                {
+                    "$or": [
+                        {"owner_id": {"$in": owner_refs}},
+                        {"user_id": {"$in": owner_refs}},
+                        {"email": email},
+                    ]
+                }
+            )
+        ).deleted_count
+        if email
+        else (
+            await feedback_collection.delete_many(
+                {"owner_id": {"$in": owner_refs}}
+            )
+        ).deleted_count,
     }
 
     # Support threads owned by this user (best effort by email / user_id).
@@ -214,5 +267,6 @@ async def purge_owner_account(owner: dict) -> dict:
         "purged_at": datetime.utcnow().isoformat() + "Z",
         "cloudinary": cloudinary_summary,
         "stripe": stripe_summary,
+        "s3": s3_counts,
         "mongo": mongo_counts,
     }
