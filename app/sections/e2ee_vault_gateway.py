@@ -67,7 +67,7 @@ SECTION_ID_TO_SLUG: dict[str, str] = {
 
 
 def _require_e2ee_feature() -> None:
-    if not getattr(settings, "E2EE_ENABLED", True):
+    if not getattr(settings, "E2EE_ENABLED", False):
         raise HTTPException(400, "E2EE is disabled on this server")
 
 

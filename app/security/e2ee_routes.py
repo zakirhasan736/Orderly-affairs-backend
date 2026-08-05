@@ -36,7 +36,7 @@ class E2eeNokWrapBody(BaseModel):
 
 
 def _e2ee_enabled() -> bool:
-    return bool(getattr(settings, "E2EE_ENABLED", True))
+    return bool(getattr(settings, "E2EE_ENABLED", False))
 
 
 @e2ee_router.get("/status")
