@@ -1,5 +1,5 @@
 from app.security.token_resolver import decode_owner_or_nok_token
-from fastapi import APIRouter, HTTPException, UploadFile, File, Header, Query, Request
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Header, Query, Request
 from datetime import datetime
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -41,16 +41,33 @@ def is_allowed_message_media(file: UploadFile) -> bool:
         return True
 
     filename = (file.filename or "").lower()
-    return any(filename.endswith(ext) for ext in MESSAGE_MEDIA_EXTENSIONS)
+    if any(filename.endswith(ext) for ext in MESSAGE_MEDIA_EXTENSIONS):
+        return True
+
+    # Recorders sometimes send empty / octet-stream MIME with a .webm blob.
+    if content_type in {"", "application/octet-stream", "binary/octet-stream"}:
+        return any(
+            token in filename
+            for token in ("audio-", "video-", "photo-", ".webm", ".mp4", ".m4a")
+        )
+    return False
 
 
-def classify_message_media_kind(file: UploadFile) -> str:
+def classify_message_media_kind(
+    file: UploadFile,
+    *,
+    kind_hint: str | None = None,
+) -> str:
+    hint = str(kind_hint or "").strip().lower()
+    if hint in {"audio", "video", "image"}:
+        return hint
+
     content_type = (file.content_type or "").lower().split(";", 1)[0].strip()
     filename = (file.filename or "").lower()
 
     if content_type.startswith("image/") or filename.endswith(
         (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif")
-    ):
+    ) or filename.startswith("photo-"):
         return "image"
 
     # Filename from recorder / picker wins when browsers mislabel MIME
@@ -59,8 +76,8 @@ def classify_message_media_kind(file: UploadFile) -> str:
         (".mp3", ".m4a", ".wav", ".aac", ".ogg")
     ):
         return "audio"
-    if filename.startswith("video-") or filename.startswith("photo-"):
-        return "image" if filename.startswith("photo-") else "video"
+    if filename.startswith("video-"):
+        return "video"
 
     if content_type.startswith("audio/"):
         return "audio"
@@ -533,12 +550,13 @@ async def refresh_message_media_signed_url(
 async def upload_message_media(
     request: Request,
     file: UploadFile = File(...),
+    kind: str | None = Form(default=None),
     authorization: str | None = Header(default=None),
 ):
     owner_email = await resolve_message_owner_id(request, authorization, write=True)
     print(
         f"📤 Message media upload start owner={owner_email!r} "
-        f"name={file.filename!r} type={file.content_type!r}"
+        f"name={file.filename!r} type={file.content_type!r} kind_hint={kind!r}"
     )
 
     if not is_allowed_message_media(file):
@@ -557,14 +575,15 @@ async def upload_message_media(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    kind = classify_message_media_kind(file)
+    media_kind = classify_message_media_kind(file, kind_hint=kind)
 
     if not settings.message_s3_active:
         raise HTTPException(
             status_code=503,
             detail=(
                 "Media storage is not configured. Set AWS_BUCKET / MESSAGE_S3_* "
-                "and restart the API."
+                "(and MESSAGE_S3_ENABLED=true if using an IAM role without static keys), "
+                "then restart the API."
             ),
         )
 
@@ -593,19 +612,29 @@ async def upload_message_media(
         uploaded = upload_message_bytes_to_s3(
             contents=contents,
             folder_uuid=folder_uuid,
-            mime_type=normalize_message_mime(file.content_type, kind=kind),
+            mime_type=normalize_message_mime(file.content_type, kind=media_kind),
             original_filename=file.filename,
-            kind=kind,
+            kind=media_kind,
         )
     except Exception as exc:
         print("❌ Message S3 upload failed:", repr(exc))
-        raise HTTPException(
-            status_code=500,
-            detail="Could not store media on S3. Please try again.",
-        ) from exc
+        err_name = type(exc).__name__
+        err_text = str(exc)
+        if "NoSuchBucket" in err_text or "NoSuchBucket" in err_name:
+            detail = "S3 bucket not found. Check AWS_BUCKET / MESSAGE_S3_BUCKET."
+        elif "AccessDenied" in err_text or "InvalidAccessKeyId" in err_text:
+            detail = (
+                "S3 access denied. Check AWS credentials / IAM permissions "
+                "for PutObject on the media bucket."
+            )
+        elif "Could not connect" in err_text or "EndpointConnection" in err_name:
+            detail = "Could not reach S3. Check network / AWS region settings."
+        else:
+            detail = "Could not store media on S3. Please try again."
+        raise HTTPException(status_code=500, detail=detail) from exc
 
     print(
-        f"✅ Message media uploaded kind={kind} key={uploaded.get('s3_key')!r} "
+        f"✅ Message media uploaded kind={media_kind} key={uploaded.get('s3_key')!r} "
         f"bytes={size}"
     )
     return {
@@ -614,7 +643,7 @@ async def upload_message_media(
         "s3_key": uploaded.get("s3_key"),
         "s3_bucket": uploaded.get("s3_bucket"),
         "storage": "s3",
-        "type": uploaded.get("type") or kind,
+        "type": uploaded.get("type") or media_kind,
         "format": uploaded.get("format"),
         "size": uploaded.get("size") or size,
         "mime_type": uploaded.get("mime_type"),

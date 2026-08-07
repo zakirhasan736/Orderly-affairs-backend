@@ -11,6 +11,7 @@ from app.security.section_file_cleanup import process_section_deleted_files
 
 from .schemas import Section21EstatePlanningPayload
 
+# Matches production / committed FastAPI slug (hyphenated final-wishes).
 router = APIRouter(
     prefix="/sections/section21-estate-planning-final-wishes",
     tags=["Section 21 – Estate Planning & Final Wishes"],
@@ -111,3 +112,13 @@ async def delete_section21(request: Request,
     await SectionRepository.delete(str(user["_id"]), SECTION_ID)
 
     return {"message": "Section 21 deleted"}
+
+
+# E2EE / older FE slug (finalwishes)
+alias_router = APIRouter(
+    prefix="/sections/section21-estate-planning-finalwishes",
+    tags=["Section 21 – Estate Planning & Final Wishes"],
+)
+alias_router.add_api_route("", save_section21, methods=["POST"])
+alias_router.add_api_route("", get_section21, methods=["GET"])
+alias_router.add_api_route("", delete_section21, methods=["DELETE"])

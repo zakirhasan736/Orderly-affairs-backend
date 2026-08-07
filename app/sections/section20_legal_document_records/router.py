@@ -11,6 +11,7 @@ from app.security.section_file_cleanup import process_section_deleted_files
 
 from .schemas import Section20LegalDocumentsPayload
 
+# Matches production / committed FastAPI slug (plural "documents").
 router = APIRouter(
     prefix="/sections/section20-legal-documents-records",
     tags=["Section 20 – Legal Documents & Records"],
@@ -116,3 +117,13 @@ async def delete_section20(request: Request,
     await SectionRepository.delete(str(user["_id"]), SECTION_ID)
 
     return {"message": "Section 20 deleted"}
+
+
+# E2EE / older FE slug (singular "document")
+alias_router = APIRouter(
+    prefix="/sections/section20-legal-document-records",
+    tags=["Section 20 – Legal Documents & Records"],
+)
+alias_router.add_api_route("", save_section20, methods=["POST"])
+alias_router.add_api_route("", get_section20, methods=["GET"])
+alias_router.add_api_route("", delete_section20, methods=["DELETE"])

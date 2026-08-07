@@ -276,13 +276,19 @@ class Settings(BaseSettings):
 
     @property
     def message_s3_active(self) -> bool:
-        """Personal message media goes to S3 when configured."""
+        """Personal message media goes to S3 when a bucket is configured.
+
+        Auto-enables when MESSAGE_S3_ENABLED, static AWS keys, or vault S3
+        is already active (same bucket / IAM role on the VPS).
+        """
         if not self.message_s3_bucket_name:
             return False
         if self.MESSAGE_S3_ENABLED:
             return True
-        # Same AWS wiring as vault — auto-enable with bucket + keys.
-        return bool(self.AWS_ACCESS_KEY_ID and self.AWS_SECRET_ACCESS_KEY)
+        if self.AWS_ACCESS_KEY_ID and self.AWS_SECRET_ACCESS_KEY:
+            return True
+        # EC2/ECS instance role: vault uploads already use the same credentials.
+        return bool(self.VAULT_S3_ENABLED or self.vault_s3_bucket_name)
 
     @property
     def section_s3_bucket_name(self) -> str | None:

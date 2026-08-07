@@ -58,6 +58,18 @@ Keep `APP_ENV=development` locally so cookies work on `http://localhost` and red
 
 Your reverse proxy must forward `X-Forwarded-Proto: https` to the API.
 
+### Nginx upload size (message media)
+
+`POST /message/media` accepts recordings up to **150MB**. Nginx’s default `client_max_body_size` is **1m**, which returns **413** before the request reaches FastAPI.
+
+In the API (and any Next.js) `server` / `location` blocks that proxy uploads:
+
+```nginx
+client_max_body_size 160m;
+```
+
+Then `sudo nginx -t && sudo systemctl reload nginx`.
+
 ---
 
 ## `ENABLE_EDGE_SESSION_CHECK` (frontend)

@@ -94,8 +94,14 @@ from app.sections.section16_credit_cards_debt.router import router as section16_
 from app.sections.section17_family_treasured_connections.router import router as section17_router
 from app.sections.section18_employment_business.router import router as section18_router
 from app.sections.section19_assets_valuables.router import router as section19_router
-from app.sections.section20_legal_document_records.router import router as section20_router
-from app.sections.section21_estate_planning_finalwishes.router import router as section21_router
+from app.sections.section20_legal_document_records.router import (
+    router as section20_router,
+    alias_router as section20_alias_router,
+)
+from app.sections.section21_estate_planning_finalwishes.router import (
+    router as section21_router,
+    alias_router as section21_alias_router,
+)
 
 from app.ai.ai_upload_routes import router as ai_upload_router
 from app.ai.ai_autofill_routes import router as ai_autofill_router
@@ -269,7 +275,9 @@ app.include_router(section17_router)
 app.include_router(section18_router)
 app.include_router(section19_router)
 app.include_router(section20_router)
+app.include_router(section20_alias_router)
 app.include_router(section21_router)
+app.include_router(section21_alias_router)
 app.include_router(message_of_nextkin_letters_router)
 app.include_router(onboarding_router)
 
