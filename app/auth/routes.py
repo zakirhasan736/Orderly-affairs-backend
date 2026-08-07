@@ -4,6 +4,11 @@ from typing import List, Union
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 from random import randint
+from app.auth.notification_prefs import (
+    get_owner_notification_prefs,
+    merge_notification_prefs_patch,
+    vault_push_session_payload,
+)
 from app.auth.death_detection import (
     record_nextkin_last_login,
     record_owner_last_login,
@@ -2088,6 +2093,7 @@ async def get_nextkin_access(
         "nok_letter_received": nextkin.get("nok_letter_received", False),
         "owner_id": nextkin["owner_id"],
         "owner": owner_summary,
+        "vault_push": vault_push_session_payload(owner),
         "nextkin": {
             "id": str(nextkin["_id"]),
             "email": nextkin["email"],
@@ -2880,6 +2886,17 @@ async def get_session(request: Request):
                 payload["access_level"] = user.get("access_level")
                 payload["full_name"] = user.get("full_name")
                 payload["returning_user"] = user_is_returning_for_session(user)
+
+            owner_doc = None
+            owner_id = user.get("owner_id")
+            if owner_id:
+                try:
+                    owner_doc = await users_collection.find_one(
+                        {"_id": ObjectId(str(owner_id)), "role": "owner"}
+                    )
+                except Exception:
+                    owner_doc = None
+            payload["vault_push"] = vault_push_session_payload(owner_doc)
         if role == "owner":
             from app.billing.access import billing_session_flags
 
@@ -2894,6 +2911,8 @@ async def get_session(request: Request):
             payload["lock_message"] = flags["lock_message"]
             payload["full_name"] = user.get("full_name")
             payload["returning_user"] = user_is_returning_for_session(user)
+            payload["vault_push"] = vault_push_session_payload(user)
+            payload["notification_prefs"] = get_owner_notification_prefs(user)
         candidates.append(payload)
 
     if not candidates:
@@ -2910,6 +2929,168 @@ async def get_session(request: Request):
         if payload.get("role") == "nextkin":
             return payload
     return candidates[0]
+
+
+class NotificationPreferencesPatch(BaseModel):
+    in_app_enabled: bool | None = None
+    email_reminders_enabled: bool | None = None
+    push_state: str | None = None
+    push_for_collaborators: bool | None = None
+
+
+@router.get("/notification-preferences")
+async def get_notification_preferences(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Owner vault notification policy (device permission is still per-browser)."""
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Owner only")
+    owner = await users_collection.find_one(
+        {"email": decoded["sub"], "role": "owner"}
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+    prefs = get_owner_notification_prefs(owner)
+    return {
+        **prefs,
+        "vault_push": vault_push_session_payload(owner),
+    }
+
+
+@router.patch("/notification-preferences")
+async def patch_notification_preferences(
+    body: NotificationPreferencesPatch,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Persist owner vault notification policy for family / NOK prompts."""
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Owner only")
+    owner = await users_collection.find_one(
+        {"email": decoded["sub"], "role": "owner"}
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+
+    try:
+        next_prefs = merge_notification_prefs_patch(
+            owner.get("notification_prefs"),
+            body.model_dump(exclude_unset=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    await users_collection.update_one(
+        {"_id": owner["_id"]},
+        {
+            "$set": {
+                "notification_prefs": next_prefs,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+    return {
+        **next_prefs,
+        "vault_push": vault_push_session_payload(
+            {**owner, "notification_prefs": next_prefs}
+        ),
+    }
+
+
+class PushSubscriptionBody(BaseModel):
+    endpoint: str
+    keys: dict
+    user_agent: str | None = None
+
+
+class PushUnsubscribeBody(BaseModel):
+    endpoint: str
+
+
+async def _resolve_session_user(decoded: dict):
+    role = decoded.get("role") or "owner"
+    if role == "nextkin":
+        try:
+            return await users_collection.find_one(
+                {"_id": ObjectId(decoded["sub"]), "role": "nextkin"}
+            )
+        except (InvalidId, KeyError, TypeError):
+            return None
+    return await users_collection.find_one(
+        {"email": decoded.get("sub"), "role": "owner"}
+    )
+
+
+@router.get("/vapid-public-key")
+async def get_vapid_public_key_route():
+    """Public VAPID key for PushManager.subscribe (safe to expose)."""
+    from app.notifications.web_push import get_vapid_public_key, vapid_configured
+
+    if not vapid_configured():
+        return {
+            "configured": False,
+            "publicKey": None,
+            "message": "Web Push VAPID keys are not configured on the server.",
+        }
+    return {
+        "configured": True,
+        "publicKey": get_vapid_public_key(),
+    }
+
+
+@router.post("/push-subscribe")
+async def push_subscribe(
+    body: PushSubscriptionBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Store a browser PushSubscription for the signed-in owner / family / NOK."""
+    from app.notifications.web_push import upsert_push_subscription, vapid_configured
+
+    if not vapid_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Web Push is not configured (missing VAPID keys).",
+        )
+
+    decoded = decode_owner_or_nok_token(request, authorization)
+    user = await _resolve_session_user(decoded)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    try:
+        await upsert_push_subscription(
+            user["_id"],
+            {
+                "endpoint": body.endpoint,
+                "keys": body.keys,
+                "user_agent": body.user_agent,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"ok": True, "message": "Push subscription saved"}
+
+
+@router.post("/push-unsubscribe")
+async def push_unsubscribe(
+    body: PushUnsubscribeBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    from app.notifications.web_push import remove_push_subscription
+
+    decoded = decode_owner_or_nok_token(request, authorization)
+    user = await _resolve_session_user(decoded)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    await remove_push_subscription(user["_id"], body.endpoint)
+    return {"ok": True}
 
 
 # ============================================================

@@ -31,18 +31,48 @@ MESSAGE_MEDIA_EXTENSIONS = (
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif",
 )
 
+MESSAGE_MEDIA_MIME_PREFIXES = ("audio/", "video/", "image/")
+
 
 def is_allowed_message_media(file: UploadFile) -> bool:
-    content_type = (file.content_type or "").lower()
-    filename = (file.filename or "").lower()
-
-    if content_type.startswith(("video/", "audio/", "image/")):
+    """Accept audio / video / image uploads for personal messages."""
+    content_type = (file.content_type or "").lower().split(";", 1)[0].strip()
+    if any(content_type.startswith(prefix) for prefix in MESSAGE_MEDIA_MIME_PREFIXES):
         return True
 
-    if content_type in {"", "application/octet-stream"}:
-        return filename.endswith(MESSAGE_MEDIA_EXTENSIONS)
+    filename = (file.filename or "").lower()
+    return any(filename.endswith(ext) for ext in MESSAGE_MEDIA_EXTENSIONS)
 
-    return filename.endswith(MESSAGE_MEDIA_EXTENSIONS)
+
+def classify_message_media_kind(file: UploadFile) -> str:
+    content_type = (file.content_type or "").lower().split(";", 1)[0].strip()
+    filename = (file.filename or "").lower()
+
+    if content_type.startswith("image/") or filename.endswith(
+        (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif")
+    ):
+        return "image"
+
+    # Filename from recorder / picker wins when browsers mislabel MIME
+    # (e.g. audio clips as video/webm).
+    if filename.startswith("audio-") or filename.endswith(
+        (".mp3", ".m4a", ".wav", ".aac", ".ogg")
+    ):
+        return "audio"
+    if filename.startswith("video-") or filename.startswith("photo-"):
+        return "image" if filename.startswith("photo-") else "video"
+
+    if content_type.startswith("audio/"):
+        return "audio"
+
+    if content_type.startswith("video/"):
+        return "video"
+
+    # Extension fallback when MIME is missing / octet-stream.
+    if filename.endswith((".mp4", ".mov", ".m4v", ".webm")):
+        return "video"
+
+    return "video"
 
 
 def parse_message_id(letter_id: str) -> ObjectId:
@@ -506,6 +536,10 @@ async def upload_message_media(
     authorization: str | None = Header(default=None),
 ):
     owner_email = await resolve_message_owner_id(request, authorization, write=True)
+    print(
+        f"📤 Message media upload start owner={owner_email!r} "
+        f"name={file.filename!r} type={file.content_type!r}"
+    )
 
     if not is_allowed_message_media(file):
         raise HTTPException(
@@ -523,15 +557,7 @@ async def upload_message_media(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    content_type = (file.content_type or "").lower()
-    filename = (file.filename or "").lower()
-    is_image = content_type.startswith("image/") or filename.endswith(
-        (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif")
-    )
-    is_audio = content_type.startswith("audio/") or filename.endswith(
-        (".mp3", ".m4a", ".wav", ".aac", ".ogg")
-    )
-    kind = "image" if is_image else ("audio" if is_audio else "video")
+    kind = classify_message_media_kind(file)
 
     if not settings.message_s3_active:
         raise HTTPException(
@@ -544,18 +570,30 @@ async def upload_message_media(
 
     owner = await load_owner_user_by_email(owner_email)
     user_id = str(owner.get("_id"))
-    await vault_quota_check(
-        user=owner,
-        user_id=user_id,
-        incoming_bytes=size,
-        owner_email=owner_email,
-    )
+    try:
+        await vault_quota_check(
+            user=owner,
+            user_id=user_id,
+            incoming_bytes=size,
+            owner_email=owner_email,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("❌ Message media quota check failed:", repr(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Could not verify storage quota. Please try again.",
+        ) from exc
+
     folder_uuid = await get_or_create_folder_uuid(owner)
     try:
+        from app.storage.message_s3 import normalize_message_mime
+
         uploaded = upload_message_bytes_to_s3(
             contents=contents,
             folder_uuid=folder_uuid,
-            mime_type=file.content_type or "application/octet-stream",
+            mime_type=normalize_message_mime(file.content_type, kind=kind),
             original_filename=file.filename,
             kind=kind,
         )
@@ -566,6 +604,10 @@ async def upload_message_media(
             detail="Could not store media on S3. Please try again.",
         ) from exc
 
+    print(
+        f"✅ Message media uploaded kind={kind} key={uploaded.get('s3_key')!r} "
+        f"bytes={size}"
+    )
     return {
         "url": uploaded.get("url"),
         "public_id": uploaded.get("public_id"),

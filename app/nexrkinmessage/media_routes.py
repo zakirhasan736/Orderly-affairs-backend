@@ -1,51 +1,18 @@
-from fastapi import APIRouter, UploadFile, File, Header, HTTPException, Request
-from app.security.token_resolver import decode_access_token
-from app.security.cloudinary_service import (
-    signed_media_delivery_url,
-    upload_file,
-)
+"""Deprecated duplicate of POST /message/media.
+
+Personal-message audio/video/image uploads live on
+`app.nexrkinmessage.routes.upload_message_media` (S3).
+This module is intentionally not registered in `app.main`.
+"""
+
+from fastapi import APIRouter, HTTPException
 
 router = APIRouter(prefix="/message/media", tags=["Message Media"])
 
 
 @router.post("")
-async def upload_letter_media(
-    request: Request,
-    file: UploadFile = File(...),
-    authorization: str | None = Header(default=None),
-):
-    decoded = decode_access_token(request, authorization)
-
-    if decoded.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only owners can upload message media")
-
-    if not file.content_type or not file.content_type.startswith(("video/", "audio/")):
-        raise HTTPException(400, "Only audio/video allowed")
-
-    uploaded = upload_file(
-        file.file,
-        folder="letters/media",
-        access_mode="authenticated",
-        type="authenticated",
+async def upload_letter_media_deprecated():
+    raise HTTPException(
+        status_code=410,
+        detail="Use POST /message/media — media is stored on S3.",
     )
-
-    public_id = uploaded.get("public_id")
-    delivery = uploaded.get("secure_url")
-    if public_id:
-        try:
-            delivery = signed_media_delivery_url(
-                str(public_id),
-                resource_type=uploaded.get("resource_type"),
-            ) or delivery
-        except Exception:
-            pass
-
-    return {
-        "url": delivery,
-        "public_id": public_id,
-        "type": uploaded["resource_type"],
-        "format": uploaded.get("format"),
-        "size": uploaded.get("bytes"),
-        "access_mode": "authenticated",
-        "url_expires_in": 900,
-    }

@@ -33,6 +33,49 @@ def _documents_bag_info(doc: Dict[str, Any]) -> str:
     return value
 
 
+def dedupe_consecutive_name_words(name: str) -> str:
+    parts = [p for p in str(name or "").strip().split() if p]
+    if len(parts) < 2:
+        return " ".join(parts)
+    out: list[str] = []
+    for part in parts:
+        if out and out[-1].lower() == part.lower():
+            continue
+        out.append(part)
+    return " ".join(out)
+
+
+def format_nok_letter_salutation(greeting: object, letter_to: object) -> str:
+    """Build 'Dear Amber Furst,' without duplicating a first name already in greeting."""
+    raw_greeting = str(greeting or "Dear").strip() or "Dear"
+    raw_to = dedupe_consecutive_name_words(
+        str(letter_to or "").strip() or "[Next of Kin Name]"
+    )
+
+    def with_comma(value: str) -> str:
+        return value if value.endswith(",") else f"{value},"
+
+    greeting_lower = raw_greeting.lower()
+    to_lower = raw_to.lower()
+
+    if (
+        greeting_lower == to_lower
+        or greeting_lower.endswith(f" {to_lower}")
+        or greeting_lower.endswith(to_lower)
+    ):
+        return with_comma(raw_greeting)
+
+    first_name = raw_to.split()[0] if raw_to.split() else ""
+    if first_name and first_name.lower() != to_lower:
+        first_lower = first_name.lower()
+        if greeting_lower == first_lower or greeting_lower.endswith(f" {first_lower}"):
+            without_first = raw_greeting[: len(raw_greeting) - len(first_name)].rstrip()
+            base = without_first or "Dear"
+            return with_comma(f"{base} {raw_to}")
+
+    return with_comma(f"{raw_greeting} {raw_to}")
+
+
 def render_letter_text(doc: Dict[str, Any]) -> str:
     def fmt_date(v):
         if not v:
@@ -53,10 +96,14 @@ def render_letter_text(doc: Dict[str, Any]) -> str:
     )
 
     signer = str(doc.get("signer_name") or doc.get("owner_name") or "").strip() or "[Your name]"
+    salutation = format_nok_letter_salutation(
+        doc.get("letter_greeting"),
+        doc.get("letter_to"),
+    )
 
     return f"""{fmt_date(doc.get("letter_date"))}
 
-{doc.get("letter_greeting") or "Dear"} {doc.get("letter_to") or "[Next of Kin Name]"},
+{salutation}
 
 
 {doc.get("letter_opening") or "I'm writing you this note as someone I trust deeply.\n\nAs my next of kin, the executor of my will, a close friend, my attorney, or someone who cares—I want you to know that I've prepared something to help guide you through what comes next."}
@@ -140,11 +187,16 @@ def _support_footer_line() -> str:
 
 def render_email_html(doc: Dict[str, Any], *, owner_name: str | None = None) -> str:
     """NOK death / scheduled letter — paper/ink design (fluid max-width)."""
-    greeting = (doc.get("letter_greeting") or "Dear").strip()
-    to_name = (doc.get("letter_to") or "there").strip()
+    headline = format_nok_letter_salutation(
+        doc.get("letter_greeting"),
+        doc.get("letter_to") or "there",
+    )
+    to_name = dedupe_consecutive_name_words(
+        str(doc.get("letter_to") or "there").strip() or "there"
+    )
     if not to_name or _is_placeholder(to_name):
         to_name = "there"
-    headline = f"{greeting} {to_name},"
+        headline = format_nok_letter_salutation(doc.get("letter_greeting"), to_name)
 
     body_parts: list[str] = []
     opening = doc.get("letter_opening")

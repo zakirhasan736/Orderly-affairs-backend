@@ -31,7 +31,7 @@ Important global rules:
 - Do not explain.
 
 15A field meanings:
-- primary_health_insurance = primary insurance company, plan name, policy number, member ID, group number, insurance card details, contact info, or document location.
+- primary_health_insurance = short readable summary of the PRIMARY health card: company, plan name, member name, member ID, group number, RxBIN/RxPCN/RxGRP, payer ID, and key deductible/OOP/coinsurance lines. Prefer a compact multi-line note. Do NOT invent values. Detailed structured card fields are also extracted into Insurance Policies (section insurance_policies) — still fill this summary so Health Information shows the card at a glance.
 - secondary_health_insurance = secondary insurance, supplemental plan, policy/member/group number, insurance card details, contact info, or document location.
 - medicare_medicaid = Medicare, Medicaid, Medicare Advantage, supplement plan, card number, member ID, plan details, or document location.
 - current_conditions = current diagnoses, chronic illnesses, medical history, ongoing health problems, or condition notes.

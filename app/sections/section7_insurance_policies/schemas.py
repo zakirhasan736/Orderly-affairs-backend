@@ -21,6 +21,18 @@ class InsurancePolicy(BaseModel):
     premium_info: Optional[str] = None
     policy_documents: UploadValue = None
     notes: Optional[str] = None
+    # Health / dental / medical card fields
+    member_name: Optional[str] = None
+    member_id: Optional[str] = None
+    group_number: Optional[str] = None
+    plan_name: Optional[str] = None
+    covered_relationship: Optional[str] = None
+    rx_bin: Optional[str] = None
+    rx_pcn: Optional[str] = None
+    rx_grp: Optional[str] = None
+    payer_id: Optional[str] = None
+    pharmacy_benefit_manager: Optional[str] = None
+    benefit_summary: Optional[str] = None
     # Emails selected for expiry reminders (owner + immediate-access people).
     # None = default all; [] = nobody; list of emails = explicit selection.
     reminder_recipients: Optional[List[str]] = None

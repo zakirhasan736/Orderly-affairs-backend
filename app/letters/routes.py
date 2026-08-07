@@ -273,6 +273,12 @@ async def apply_autofill(owner_id: str, payload: NOKLetterIn, nok_id: Optional[s
         if not data.get("letter_to"):
             data["letter_to"] = nok.get("full_name")
 
+        # Collapse accidental "Amber Amber Furst" style duplicates.
+        if data.get("letter_to"):
+            from app.letters.email_utils import dedupe_consecutive_name_words
+
+            data["letter_to"] = dedupe_consecutive_name_words(str(data["letter_to"]))
+
         if not data.get("nok_email"):
             data["nok_email"] = nok.get("email")
 

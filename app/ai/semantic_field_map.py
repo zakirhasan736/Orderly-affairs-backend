@@ -58,6 +58,68 @@ SEMANTIC_CONCEPTS: dict[str, dict[str, Any]] = {
             "insurance_policies": "policy_number",
         },
     },
+    "member_id": {
+        "label": "Health plan member ID",
+        "aliases": [
+            "member_id",
+            "member_number",
+            "member_no",
+            "member #",
+            "subscriber_id",
+            "subscriber_number",
+        ],
+        "targets": {
+            "insurance_policies": "member_id",
+        },
+    },
+    "group_number": {
+        "label": "Insurance group number",
+        "aliases": [
+            "group_number",
+            "group_no",
+            "group_num",
+            "group #",
+            "grp",
+            "grp_number",
+            "employer_group",
+        ],
+        "targets": {
+            "insurance_policies": "group_number",
+        },
+    },
+    "plan_name": {
+        "label": "Health plan name",
+        "aliases": [
+            "plan_name",
+            "plan",
+            "product_name",
+            "plan_type",
+            "choice_plus",
+        ],
+        "targets": {
+            "insurance_policies": "plan_name",
+        },
+    },
+    "rx_bin": {
+        "label": "Pharmacy RxBIN",
+        "aliases": ["rx_bin", "rxbin", "bin", "rx bin"],
+        "targets": {"insurance_policies": "rx_bin"},
+    },
+    "rx_pcn": {
+        "label": "Pharmacy RxPCN",
+        "aliases": ["rx_pcn", "rxpcn", "pcn", "rx pcn"],
+        "targets": {"insurance_policies": "rx_pcn"},
+    },
+    "member_name": {
+        "label": "Insured / member name",
+        "aliases": [
+            "member_name",
+            "insured_name",
+            "subscriber_name",
+            "cardholder_name",
+        ],
+        "targets": {"insurance_policies": "member_name"},
+    },
     "policy_company": {
         "label": "Insurance company",
         "aliases": [

@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     # Optional public support phone shown in NOK letter footers
     SUPPORT_PHONE: str | None = None
 
+    # === Web Push (VAPID) ===
+    # Generate with: python scripts/generate_vapid_keys.py
+    # Public key also goes in frontend NEXT_PUBLIC_VAPID_PUBLIC_KEY
+    VAPID_PUBLIC_KEY: str | None = None
+    VAPID_PRIVATE_KEY: str | None = None
+    VAPID_SUBJECT: str = "mailto:support@orderly-affairs.com"
+
     # === Cloudinary ===
     CLOUDINARY_CLOUD_NAME: str
     CLOUDINARY_API_KEY: str

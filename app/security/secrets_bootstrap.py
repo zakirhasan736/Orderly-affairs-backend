@@ -47,6 +47,10 @@ MANAGED_SECRET_KEYS: frozenset[str] = frozenset(
         "ADMIN_DEFAULT_EMAIL",
         "ADMIN_DEFAULT_PASSWORD",
         "ADMIN_EMAILS",
+        # Web Push (VAPID) — PEM private key may use literal \n in SSM
+        "VAPID_PUBLIC_KEY",
+        "VAPID_PRIVATE_KEY",
+        "VAPID_SUBJECT",
     }
 )
 

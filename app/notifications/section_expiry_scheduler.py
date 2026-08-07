@@ -23,7 +23,10 @@ from app.notifications.display_names import (
     resolve_nextkin_display_name,
     resolve_owner_display_name,
 )
+from app.auth.notification_prefs import get_owner_notification_prefs
 from app.notifications.expiry_reminder_emails import send_expiry_reminder_email
+from app.notifications.web_push import send_web_push_to_email, vapid_configured
+from app.config import settings
 from app.security.section_crypto import decrypt_section_data
 
 REMINDER_DAYS = (10, 5, 1, 0)
@@ -316,10 +319,19 @@ def _selected_recipients(event: dict, defaults: list[dict]) -> list[dict]:
 async def process_section_expiry_reminders() -> None:
     now = datetime.utcnow()
     today = datetime(now.year, now.month, now.day)
+    frontend = (settings.FRONTEND_URL or "").rstrip("/")
 
     owners = users_collection.find({"role": "owner"})
     async for owner in owners:
         owner_id = str(owner["_id"])
+        prefs = get_owner_notification_prefs(owner)
+        email_enabled = bool(prefs.get("email_reminders_enabled", True))
+        push_enabled = (
+            vapid_configured() and str(prefs.get("push_state") or "") == "active"
+        )
+        if not email_enabled and not push_enabled:
+            continue
+
         defaults = await _default_recipient_emails(owner)
         owner_name = await resolve_owner_display_name(owner)
 
@@ -369,25 +381,55 @@ async def process_section_expiry_reminders() -> None:
                 section_title = SECTION_TITLES.get(section_id, f"Section {section_id}")
                 item_label = event["label"]
                 sent_any = False
+                when = (
+                    "today"
+                    if days_until == 0
+                    else f"in {days_until} day{'s' if days_until != 1 else ''}"
+                )
+                push_title = f"{item_label} — due {when}"
+                push_body = (
+                    f"{section_title}: {item_label} expires {expiry_iso}."
+                )
+                push_url = f"{frontend}/dashboard"
+                push_tag = f"expiry-{fingerprint}-{days_until}"
 
                 for recipient in recipients:
-                    try:
-                        send_expiry_reminder_email(
-                            to_email=recipient["email"],
-                            recipient_name=recipient.get("name") or "",
-                            owner_name=owner_name,
-                            section_title=section_title,
-                            item_label=item_label,
-                            field_label=_human_field_label(event["field_key"]),
-                            expiry_date=expiry_iso,
-                            days_before=days_until,
-                        )
-                        sent_any = True
-                    except Exception as exc:
-                        print(
-                            "expiry reminder email failed "
-                            f"to={recipient.get('email')} owner={owner_id}: {exc}"
-                        )
+                    if email_enabled:
+                        try:
+                            send_expiry_reminder_email(
+                                to_email=recipient["email"],
+                                recipient_name=recipient.get("name") or "",
+                                owner_name=owner_name,
+                                section_title=section_title,
+                                item_label=item_label,
+                                field_label=_human_field_label(event["field_key"]),
+                                expiry_date=expiry_iso,
+                                days_before=days_until,
+                            )
+                            sent_any = True
+                        except Exception as exc:
+                            print(
+                                "expiry reminder email failed "
+                                f"to={recipient.get('email')} owner={owner_id}: {exc}"
+                            )
+
+                    if push_enabled:
+                        try:
+                            pushed = await send_web_push_to_email(
+                                recipient["email"],
+                                title=push_title,
+                                body=push_body,
+                                url=push_url,
+                                tag=push_tag,
+                                owner_id=owner_id,
+                            )
+                            if pushed:
+                                sent_any = True
+                        except Exception as exc:
+                            print(
+                                "expiry reminder push failed "
+                                f"to={recipient.get('email')} owner={owner_id}: {exc}"
+                            )
 
                 if sent_any:
                     await _mark_sent(

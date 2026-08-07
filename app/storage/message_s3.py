@@ -1,31 +1,57 @@
 """Personal-message media (audio / video / photo) on AWS S3.
 
 Key layout (per owner folder_uuid):
-  {MESSAGE_S3_PREFIX}/{folder_uuid}/{file_id}{ext}
+  {MESSAGE_S3_PREFIX}/{folder_uuid}/{audio|video|image}/{file_id}{ext}
 
+Legacy keys without the kind segment are still accepted for delete / presign.
 Same AWS bucket as vault docs & backups by default; separate prefix.
 Playback uses short-lived presigned GET URLs.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app.config import settings
 
+_KIND_SEGMENTS = frozenset({"audio", "video", "image"})
+
 
 def message_s3_prefix() -> str:
     return (settings.MESSAGE_S3_PREFIX or "orderly-affairs/messages").strip("/")
 
 
-def build_message_s3_key(*, folder_uuid: str, stored_filename: str) -> str:
+def normalize_message_mime(mime_type: str | None, *, kind: str = "video") -> str:
+    """Strip codec params so S3 Content-Type stays simple (video/webm;codecs=… → video/webm)."""
+    raw = (mime_type or "").strip().lower()
+    if raw:
+        base = raw.split(";", 1)[0].strip()
+        if "/" in base and not base.startswith("application/octet-stream"):
+            return base
+    if kind == "audio":
+        return "audio/webm"
+    if kind == "image":
+        return "image/jpeg"
+    return "video/webm"
+
+
+def build_message_s3_key(
+    *,
+    folder_uuid: str,
+    stored_filename: str,
+    kind: str = "video",
+) -> str:
     safe_folder = str(folder_uuid).strip().replace("\\", "/").strip("/")
     name = str(stored_filename).replace("\\", "/").split("/")[-1]
+    kind_seg = str(kind or "video").strip().lower()
+    if kind_seg not in _KIND_SEGMENTS:
+        kind_seg = "video"
     if not safe_folder or ".." in safe_folder or not name or ".." in name:
         raise ValueError("Invalid message S3 key components")
-    return f"{message_s3_prefix()}/{safe_folder}/{name}"
+    return f"{message_s3_prefix()}/{safe_folder}/{kind_seg}/{name}"
 
 
 def _s3_client():
@@ -48,9 +74,10 @@ def _s3_client():
 def _ext_for_upload(*, filename: str, mime_type: str, kind: str) -> str:
     name = (filename or "").strip()
     suffix = Path(name).suffix.lower() if name else ""
-    if suffix and len(suffix) <= 8:
+    # Guard against "webm;codecs=vp9" style suffixes leaking from bad filenames.
+    if suffix and len(suffix) <= 8 and re.fullmatch(r"\.[a-z0-9]+", suffix):
         return suffix
-    mime = (mime_type or "").lower()
+    mime = normalize_message_mime(mime_type, kind=kind)
     if mime.startswith("image/"):
         return {
             "image/jpeg": ".jpg",
@@ -58,7 +85,7 @@ def _ext_for_upload(*, filename: str, mime_type: str, kind: str) -> str:
             "image/webp": ".webp",
             "image/gif": ".gif",
         }.get(mime, ".jpg")
-    if mime.startswith("audio/"):
+    if mime.startswith("audio/") or kind == "audio":
         return {
             "audio/mpeg": ".mp3",
             "audio/mp4": ".m4a",
@@ -66,13 +93,13 @@ def _ext_for_upload(*, filename: str, mime_type: str, kind: str) -> str:
             "audio/wav": ".wav",
             "audio/webm": ".webm",
             "audio/ogg": ".ogg",
-        }.get(mime, ".m4a")
+        }.get(mime, ".webm" if "webm" in mime else ".m4a")
     if mime.startswith("video/") or kind == "video":
         return {
             "video/mp4": ".mp4",
             "video/webm": ".webm",
             "video/quicktime": ".mov",
-        }.get(mime, ".mp4")
+        }.get(mime, ".webm" if "webm" in mime else ".mp4")
     return ".bin"
 
 
@@ -91,26 +118,32 @@ def upload_message_bytes_to_s3(
     if not bucket:
         raise RuntimeError("MESSAGE_S3_BUCKET or AWS_BUCKET is required")
 
+    kind_seg = str(kind or "video").strip().lower()
+    if kind_seg not in _KIND_SEGMENTS:
+        kind_seg = "video"
+
+    clean_mime = normalize_message_mime(mime_type, kind=kind_seg)
     file_id = uuid.uuid4().hex
     ext = _ext_for_upload(
         filename=original_filename or "",
-        mime_type=mime_type,
-        kind=kind,
+        mime_type=clean_mime,
+        kind=kind_seg,
     )
     stored_filename = f"{file_id}{ext}"
     key = build_message_s3_key(
         folder_uuid=folder_uuid,
         stored_filename=stored_filename,
+        kind=kind_seg,
     )
 
     client = _s3_client()
     extra_args: dict[str, Any] = {
-        "ContentType": mime_type or "application/octet-stream",
+        "ContentType": clean_mime,
         "ServerSideEncryption": "AES256",
         "Metadata": {
             "app": "orderly-affairs",
             "kind": "personal-message-media",
-            "media_kind": kind,
+            "media_kind": kind_seg,
         },
     }
     if original_filename:
@@ -139,10 +172,10 @@ def upload_message_bytes_to_s3(
         "stored_filename": stored_filename,
         "url": url,
         "public_id": key,  # stable id for FE replace/delete comparison
-        "type": kind,
+        "type": kind_seg,
         "format": fmt,
         "size": len(contents),
-        "mime_type": mime_type,
+        "mime_type": clean_mime,
         "access_mode": "private",
         "url_expires_in": 900,
     }
@@ -189,6 +222,7 @@ def delete_message_s3_object(
 
 
 def key_belongs_to_owner_folder(*, s3_key: str, folder_uuid: str) -> bool:
+    """True for current `{prefix}/{folder}/{kind}/…` and legacy `{prefix}/{folder}/…` keys."""
     key = str(s3_key or "").strip().replace("\\", "/")
     folder = str(folder_uuid or "").strip()
     if not key or not folder:
