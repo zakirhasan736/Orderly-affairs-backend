@@ -1,0 +1,18 @@
+# Example nginx snippet for Orderly Affairs (portal + API hosts).
+#
+# The browser 413 "Request Entity Too Large" on /oa-api/message/media means
+# nginx rejected the body BEFORE FastAPI. Default client_max_body_size is 1m.
+#
+# Apply on BOTH:
+#   - portal.orderly-affairs.com (proxies /oa-api → Next / API)
+#   - api.orderly-affairs.com (FastAPI upstream)
+#
+# Then: sudo nginx -t && sudo systemctl reload nginx
+
+# Inside the relevant `http`, `server`, or `location` block:
+client_max_body_size 0;   # 0 = unlimited (product requirement for message media)
+
+# Optional: longer timeouts for large video uploads
+proxy_read_timeout 600s;
+proxy_send_timeout 600s;
+client_body_timeout 600s;

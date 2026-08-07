@@ -60,15 +60,25 @@ Your reverse proxy must forward `X-Forwarded-Proto: https` to the API.
 
 ### Nginx upload size (message media)
 
-`POST /message/media` accepts recordings up to **150MB**. Nginx’s default `client_max_body_size` is **1m**, which returns **413** before the request reaches FastAPI.
+Personal message recordings have **no app-level file-size cap**. Nginx’s default
+`client_max_body_size` is still **1m**, which returns **413** before FastAPI.
 
-In the API (and any Next.js) `server` / `location` blocks that proxy uploads:
+On **portal** and **API** nginx configs (see `deploy/nginx-upload-size.conf.example`):
 
 ```nginx
-client_max_body_size 160m;
+client_max_body_size 0;
+proxy_read_timeout 600s;
+proxy_send_timeout 600s;
 ```
 
-Then `sudo nginx -t && sudo systemctl reload nginx`.
+Then:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Redeploy the portal after raising Next.js `proxyClientMaxBodySize` (already set to 5gb
+in `next.config.ts`) and excluding `/oa-api` from middleware body buffering.
 
 ---
 

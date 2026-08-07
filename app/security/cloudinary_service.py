@@ -5,7 +5,7 @@ import cloudinary.uploader
 import cloudinary.utils
 from app.config import settings
 
-MESSAGE_MEDIA_MAX_BYTES = 150 * 1024 * 1024  # 150 MB
+MESSAGE_MEDIA_MAX_BYTES = 0  # 0 = no app-level cap (nginx / vault quota still apply)
 MESSAGE_MEDIA_FOLDER = "messages/media"
 
 cloudinary.config(
@@ -114,8 +114,12 @@ def fetch_authenticated_bytes(
 
 
 def validate_message_media_size(size: int) -> None:
-    if size > MESSAGE_MEDIA_MAX_BYTES:
-        raise ValueError("File too large. Maximum size is 150 MB.")
+    if size <= 0:
+        raise ValueError("Uploaded file is empty.")
+    if MESSAGE_MEDIA_MAX_BYTES > 0 and size > MESSAGE_MEDIA_MAX_BYTES:
+        raise ValueError(
+            f"File too large. Maximum size is {MESSAGE_MEDIA_MAX_BYTES // (1024 * 1024)} MB."
+        )
 
 
 def generate_message_media_upload_signature(
@@ -148,7 +152,7 @@ def generate_message_media_upload_signature(
 
 
 def upload_media_file(file, folder: str):
-    """Upload audio/video up to 150 MB as authenticated media; large files use chunked upload."""
+    """Upload audio/video as authenticated media; large files use chunked upload."""
     file.seek(0, 2)
     size = file.tell()
     file.seek(0)

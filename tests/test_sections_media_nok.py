@@ -52,8 +52,10 @@ class TestSection6UploadField:
 class TestMediaAndUploads:
     def test_message_media_size_limit(self):
         validate_message_media_size(1000)
-        with pytest.raises(ValueError, match="large"):
-            validate_message_media_size(151 * 1024 * 1024)
+        # MESSAGE_MEDIA_MAX_BYTES=0 → no app-level cap
+        validate_message_media_size(151 * 1024 * 1024)
+        with pytest.raises(ValueError, match="empty"):
+            validate_message_media_size(0)
 
     def test_normalize_resource_type(self):
         assert _normalize_resource_type("audio") == "video"
