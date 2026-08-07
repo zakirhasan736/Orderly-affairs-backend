@@ -766,6 +766,10 @@ async def signup(user: SignupRequest, request: Request):
 
     await enforce_auth_rate_limit(request, key=f"signup:{email}")
 
+    from app.auth.deleted_account_registry import assert_identity_not_deleted
+
+    await assert_identity_not_deleted(email=email)
+
     # real user already exists
     existing_user = await users_collection.find_one({"email": email})
     if existing_user:
@@ -806,6 +810,7 @@ async def signup(user: SignupRequest, request: Request):
             pending_signup_collection=pending_signup_collection,
             exclude_pending_email=email,
         )
+        await assert_identity_not_deleted(email=email, phone=phone)
 
     hashed_pw = hash_password(user.password)
 
@@ -3314,7 +3319,11 @@ async def delete_owner_account(
     )
 
     try:
-        summary = await purge_owner_account(owner)
+        summary = await purge_owner_account(
+            owner,
+            deleted_by="self",
+            reason="owner_self_delete",
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

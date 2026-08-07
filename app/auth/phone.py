@@ -90,8 +90,12 @@ async def ensure_phone_available(
     exclude_user_id: Any | None = None,
     exclude_pending_email: str | None = None,
 ) -> None:
-    """Raise ValueError if E.164 phone is already used by another owner / pending signup."""
+    """Raise if E.164 phone is used by another owner, pending signup, or closed account."""
     from fastapi import HTTPException
+
+    from app.auth.deleted_account_registry import assert_identity_not_deleted
+
+    await assert_identity_not_deleted(phone=phone)
 
     query: dict = {"phone": phone, "role": "owner"}
     if exclude_user_id is not None:

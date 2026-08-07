@@ -9,16 +9,54 @@ from app.config import settings
 from app.database import users_collection
 from app.security.password_handler import hash_password
 
+_WEAK_PASSWORDS = frozenset(
+    {
+        "admin@123456",
+        "admin123",
+        "password",
+        "changeme",
+        "admin@123456//",
+        "orderly",
+        "orderlyaffairs",
+    }
+)
+
+
+def _clean_bootstrap_password(raw: str) -> str:
+    """Strip accidental comment / slash junk from thin .env values."""
+    value = (raw or "").strip()
+    if " #" in value:
+        value = value.split(" #", 1)[0].rstrip()
+    if "#" in value and " " not in value.split("#", 1)[0]:
+        # rare: PASSWORD=secret#comment with no space
+        pass
+    while value.endswith("//"):
+        value = value[:-2].rstrip()
+    return value.strip()
+
+
+def _is_weak_bootstrap_password(password: str) -> bool:
+    lowered = password.lower()
+    if lowered in _WEAK_PASSWORDS:
+        return True
+    if password == "Admin@123456":
+        return True
+    if len(password) < 12:
+        return True
+    return False
+
 
 async def seed_default_admin() -> None:
     """
     Create a system-owner admin only when ADMIN_DEFAULT_EMAIL + ADMIN_DEFAULT_PASSWORD
-    are both set in the environment and that email does not exist yet.
+    are both set in the environment.
 
-    Never overwrites an existing password. Never uses hardcoded credentials.
+    Never overwrites an existing password unless ADMIN_DEFAULT_RESET_PASSWORD=true.
+    Never uses hardcoded credentials.
     """
     email = (settings.ADMIN_DEFAULT_EMAIL or "").strip().lower()
-    password = (settings.ADMIN_DEFAULT_PASSWORD or "").strip()
+    password = _clean_bootstrap_password(settings.ADMIN_DEFAULT_PASSWORD or "")
+    reset_password = bool(getattr(settings, "ADMIN_DEFAULT_RESET_PASSWORD", False))
 
     if not email and not password:
         return
@@ -30,12 +68,10 @@ async def seed_default_admin() -> None:
         )
         return
 
-    # Refuse known weak / documented demo passwords even if set in env.
-    weak = {"admin@123456", "admin123", "password", "changeme"}
-    if password.lower() in weak or password == "Admin@123456":
+    if _is_weak_bootstrap_password(password):
         print(
             "[admin] Refusing weak ADMIN_DEFAULT_PASSWORD — "
-            "set a strong unique password or leave unset."
+            "use 12+ chars (not Admin@123456 / common demos), or leave unset."
         )
         return
 
@@ -43,23 +79,31 @@ async def seed_default_admin() -> None:
     existing = await users_collection.find_one({"email": email, "role": "owner"})
 
     if existing:
-        # Keep current password. Only ensure admin flags stay intact.
+        updates: dict = {
+            "is_admin": True,
+            "role_admin": True,
+            "admin_role": existing.get("admin_role") or "super_admin",
+            "admin_areas": existing.get("admin_areas") or ["*"],
+            "suspended": False,
+            "access_revoked": False,
+            "updated_at": now,
+        }
+        if reset_password:
+            updates["password"] = hash_password(password)
         await users_collection.update_one(
             {"_id": existing["_id"]},
             {
-                "$set": {
-                    "is_admin": True,
-                    "role_admin": True,
-                    "admin_role": existing.get("admin_role") or "super_admin",
-                    "admin_areas": existing.get("admin_areas") or ["*"],
-                    "suspended": False,
-                    "access_revoked": False,
-                    "updated_at": now,
-                },
+                "$set": updates,
                 "$unset": {"deleted_at": ""},
             },
         )
-        if settings.is_development:
+        if reset_password:
+            print(
+                f"[admin] Reset bootstrap admin password: {email} "
+                "(set ADMIN_DEFAULT_RESET_PASSWORD=false and remove "
+                "ADMIN_DEFAULT_PASSWORD from env; enable admin MFA)"
+            )
+        elif settings.is_development:
             print(f"[admin] Admin flags ensured (password unchanged): {email}")
         return
 

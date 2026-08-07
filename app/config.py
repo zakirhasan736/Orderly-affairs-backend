@@ -135,8 +135,11 @@ class Settings(BaseSettings):
     ADMIN_EMAILS: str = ""
     # Optional first-boot bootstrap only. Leave unset — never ship a default password.
     # If both are set and the email is missing, creates that admin once (does not reset).
+    # Set ADMIN_DEFAULT_RESET_PASSWORD=true only when intentionally resetting the
+    # bootstrap admin password from env (then turn it off and remove the password).
     ADMIN_DEFAULT_EMAIL: str | None = None
     ADMIN_DEFAULT_PASSWORD: str | None = None
+    ADMIN_DEFAULT_RESET_PASSWORD: bool = False
     # When True, admin-flagged owner cookies can hit /admin APIs.
     # Default: allowed only in development. Set true/false to override.
     ADMIN_ALLOW_OWNER_COOKIE_FALLBACK: bool | None = None

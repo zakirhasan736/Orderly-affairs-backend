@@ -280,9 +280,19 @@ async def delete_user(
     user_id: str,
     request: Request,
     authorization: str | None = Header(default=None),
-    hard: bool = Query(default=False),
+    hard: bool = Query(
+        default=True,
+        description="Hard-purge all owned data (default). soft=false is revoke-only.",
+    ),
     reason: str | None = Query(default=None, max_length=500),
 ):
+    """
+    Hard-delete owner by default: vault/S3/Cloudinary/Stripe + NOK/family/letters/
+    messages/sections, while retaining a hashed identity tombstone for rejoin detection.
+    Pass hard=false only to soft-revoke access without wiping data.
+    """
+    from app.auth.account_purge_service import purge_owner_account
+
     admin = await require_system_owner(request, authorization)
     if not (reason or "").strip():
         raise HTTPException(400, "reason is required for account deletion")
@@ -295,15 +305,34 @@ async def delete_user(
 
     now = datetime.utcnow()
     if hard:
-        await revoke_all_user_refresh_tokens(str(user["_id"]))
-        await users_collection.delete_one({"_id": user["_id"]})
+        try:
+            summary = await purge_owner_account(
+                user,
+                deleted_by="admin",
+                reason=reason,
+                deleted_by_email=admin.get("email"),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
         await log_admin_action(
             admin.get("email") or "",
             "user_hard_delete",
-            target=str(user["_id"]),
-            meta={"email": user.get("email"), "reason": reason},
+            target=user_id,
+            meta={
+                "email": user.get("email"),
+                "reason": reason,
+                "tombstone": summary.get("tombstone"),
+                "mongo": summary.get("mongo"),
+                "s3": summary.get("s3"),
+                "stripe": summary.get("stripe"),
+            },
         )
-        return {"message": "User permanently deleted", "id": user_id}
+        return {
+            "message": "User and all linked data permanently deleted",
+            "id": user_id,
+            "summary": summary,
+        }
 
     await users_collection.update_one(
         {"_id": user["_id"]},

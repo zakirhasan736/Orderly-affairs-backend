@@ -29,6 +29,10 @@ BACKUP_COLLECTIONS: tuple[str, ...] = (
     "admin_dsar_requests",
     "admin_legacy_requests",
     "admin_security_alerts",
+    # Hashed identity tombstones after hard delete (no vault content).
+    "deleted_accounts",
+    "nok_letters",
+    "scheduled_letters",
 )
 
 # Ephemeral / high-churn auth state — not useful for disaster recovery.
