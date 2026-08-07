@@ -57,6 +57,28 @@ class TestMediaAndUploads:
         with pytest.raises(ValueError, match="empty"):
             validate_message_media_size(0)
 
+    def test_delete_media_file_removes_s3_object(self):
+        from app.nexrkinmessage.routes import delete_media_file
+
+        with patch(
+            "app.nexrkinmessage.routes.delete_message_s3_object",
+            return_value=True,
+        ) as delete_s3:
+            ok = delete_media_file(
+                {
+                    "storage": "s3",
+                    "s3_key": "orderly-affairs/messages/folder/video/abc.webm",
+                    "public_id": "orderly-affairs/messages/folder/video/abc.webm",
+                    "type": "video",
+                }
+            )
+            assert ok is True
+            delete_s3.assert_called_once()
+            assert (
+                delete_s3.call_args.kwargs["s3_key"]
+                == "orderly-affairs/messages/folder/video/abc.webm"
+            )
+
     def test_normalize_resource_type(self):
         assert _normalize_resource_type("audio") == "video"
         assert _normalize_resource_type("image") == "image"

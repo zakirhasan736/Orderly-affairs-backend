@@ -136,33 +136,61 @@ def refresh_media_delivery(media: dict | None) -> dict | None:
     return refreshed
 
 
+def _message_media_s3_key(media: dict | None) -> str:
+    if not isinstance(media, dict):
+        return ""
+    return (
+        str(media.get("s3_key") or "").strip()
+        or str(media.get("public_id") or "").strip()
+    )
+
+
+def _looks_like_message_s3_key(key: str) -> bool:
+    key = str(key or "").strip().replace("\\", "/")
+    if not key:
+        return False
+    prefix = message_s3_prefix()
+    if prefix and (key == prefix or key.startswith(prefix + "/")):
+        return True
+    # Broader fallback for older / env-mismatched prefixes.
+    return "/messages/" in key or key.startswith("orderly-affairs/messages")
+
+
 def delete_media_file(media: dict | None) -> bool:
     """Delete remote bytes for message media (S3 and/or Cloudinary)."""
-    if not media:
+    if not isinstance(media, dict):
         return True
 
     ok = True
     s3_key = str(media.get("s3_key") or "").strip()
     storage = str(media.get("storage") or "").lower()
     public_id = str(media.get("public_id") or "").strip()
+    key = s3_key or public_id
+    bucket = str(media.get("s3_bucket") or "").strip() or None
 
-    if s3_key or storage == "s3":
-        key = s3_key or public_id
-        if key and key.startswith(message_s3_prefix()):
-            if not delete_message_s3_object(
-                s3_key=key,
-                bucket=str(media.get("s3_bucket") or "").strip() or None,
-            ):
-                ok = False
-            return ok
+    is_s3 = storage == "s3" or bool(s3_key) or _looks_like_message_s3_key(key)
+    if is_s3 and key:
+        if not delete_message_s3_object(s3_key=key, bucket=bucket):
+            print(f"⚠️ Failed to delete message media from S3: {key}")
+            ok = False
+        return ok
 
-    if public_id and not public_id.startswith(message_s3_prefix() + "/"):
+    if public_id and not _looks_like_message_s3_key(public_id):
         deleted = delete_file(public_id, media.get("type"))
         if not deleted:
             print(f"⚠️ Failed to hard-delete message media from Cloudinary: {public_id}")
             ok = False
 
     return ok
+
+
+def _letter_media(letter: dict | None) -> dict | None:
+    """Resolve media dict from a raw Mongo letter document."""
+    if not letter:
+        return None
+    decrypted = load_message(letter) or letter
+    media = decrypted.get("media")
+    return media if isinstance(media, dict) else None
 
 
 async def resolve_message_owner_id(
@@ -268,7 +296,7 @@ async def delete_all_letters(request: Request, authorization: str | None = Heade
     }).to_list(None)
 
     for letter in letters:
-        delete_media_file(letter.get("media"))
+        delete_media_file(_letter_media(letter))
 
     if letters:
         await messageofnextkin_collection.update_many(
@@ -305,12 +333,12 @@ async def update_letter(
     update_data = payload.model_dump(exclude_unset=True)
 
     if "media" in update_data:
-        old_media = letter.get("media")
+        old_media = _letter_media(letter)
         new_media = update_data.get("media")
         old_id = media_identity(old_media)
-        new_id = media_identity(new_media)
+        new_id = media_identity(new_media if isinstance(new_media, dict) else None)
 
-        # Replace: delete previous remote object after identity changes.
+        # Replace or clear: delete previous remote object when identity changes.
         if old_id and old_id != new_id:
             delete_media_file(old_media)
 
@@ -358,7 +386,7 @@ async def delete_letter(letter_id: str, request: Request, authorization: str | N
     if not letter:
         raise HTTPException(status_code=404, detail="Letter not found")
 
-    delete_media_file(letter.get("media"))
+    delete_media_file(_letter_media(letter))
 
     await messageofnextkin_collection.update_one(
         {"_id": letter_oid, "owner_id": owner_id},
@@ -387,7 +415,7 @@ async def delete_letter_media(letter_id: str, request: Request, authorization: s
     if not letter:
         raise HTTPException(status_code=404, detail="Letter not found")
 
-    delete_media_file(letter.get("media"))
+    delete_media_file(_letter_media(letter))
 
     await messageofnextkin_collection.update_one(
         {"_id": letter_oid, "owner_id": owner_id},

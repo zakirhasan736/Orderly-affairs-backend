@@ -62,11 +62,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["ai-autofill"])
 
-# Prefetch insurance when filling vehicles. Do NOT auto-prefetch vehicles for
-# every insurance doc (life/home/health) — only classification/auto signals add vehicles.
+# Prefetch related sections in the same autofill pass so partner fills can
+# reuse cached_extractions after status moves to "ready".
+# Do NOT auto-prefetch vehicles for every insurance doc (life/home/health) —
+# only classification / auto signals add vehicles.
 FAST_PARTNER_PREFETCH: dict[str, list[str]] = {
     "vehicles": ["insurance_policies"],
+    # Health cards classify as insurance and/or healthcare — keep both warm.
+    "insurance_policies": ["health_information"],
+    "health_information": ["insurance_policies"],
 }
+
+# Document rows stay reusable after the first fill (status becomes "ready").
+AI_DOCUMENT_REUSABLE_STATUSES = (
+    "uploaded",
+    "ready",
+    "processing",
+    "extracting",
+    "classifying",
+    "queued",
+)
 
 
 def _document_text_hint(file_path: str | None, mime_type: str | None, doc: dict | None = None) -> str:
@@ -775,7 +790,7 @@ async def autofill_section(
         {
             "_id": payload.file_id,
             "user_id": user_id,
-            "status": "uploaded",
+            "status": {"$in": list(AI_DOCUMENT_REUSABLE_STATUSES)},
         }
     )
 
@@ -846,7 +861,11 @@ async def autofill_section(
             )
 
         latest_doc = await ai_documents_collection.find_one(
-            {"_id": payload.file_id, "user_id": user_id, "status": "uploaded"},
+            {
+                "_id": payload.file_id,
+                "user_id": user_id,
+                "status": {"$in": list(AI_DOCUMENT_REUSABLE_STATUSES)},
+            },
         )
         if latest_doc:
             doc = latest_doc
