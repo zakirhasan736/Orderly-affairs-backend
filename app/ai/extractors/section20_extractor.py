@@ -34,16 +34,18 @@ Important global rules:
 - Do not explain.
 
 20A Personal Legal Documents field meanings:
-- birth_certificate = birth certificate details, certificate copy note, issuing location, date, document location, or uploaded copy note.
-- social_security_card = Social Security card details, masked SSN only if shown, card location, or uploaded copy note.
-- passport = passport details, passport number only if shown, expiration date, country, document location, or uploaded copy note.
-- drivers_license = driver's license or state ID details, license number only if shown, expiration date, state, document location, or uploaded copy note.
-- marriage_certificate = marriage certificate details, spouse name, marriage date/location, certificate location, or uploaded copy note.
-- divorce_decree = divorce decree, legal separation document, court/order details, decree date, case note, document location, or uploaded copy note.
+- identity_documents = array of identity cards. Each card: assigned_to (Self|Spouse/Partner|Dependent|Other), assigned_to_name (required when not Self), full_legal_name, date_of_birth, document_type (Passport|Birth certificate|SSN/SIN card|Driver's license|Marriage certificate|Divorce certificate|Naturalization|Immigration|Other), document_number, issue_date, expiration_date, issuing_authority, document_location, last_updated.
+- Prefer identity_documents[] for passport / birth certificate / SSN card / license / marriage / divorce / naturalization / immigration — do not only dump text into legacy string slots.
+- birth_certificate = legacy note/location only when a structured identity card is not possible.
+- social_security_card = legacy note/location only when a structured identity card is not possible.
+- passport = legacy note/location only when a structured identity card is not possible.
+- drivers_license = legacy note/location only when a structured identity card is not possible.
+- marriage_certificate = legacy note/location only when a structured identity card is not possible.
+- divorce_decree = legacy note/location only when a structured identity card is not possible.
 - name_change_documents = legal name change documents, court order details, prior/current names, document location, or uploaded copy note.
-- naturalization_certificate = naturalization/citizenship certificate details, certificate number only if shown, country, date, document location, or uploaded copy note.
-- immigration_documents = green card, visa, immigration status document, work authorization, document location, expiration, or uploaded copy note.
-- children_birth_certificates = children birth certificate details, children names, document location, or uploaded copy note.
+- naturalization_certificate = legacy note only when not using identity_documents with document_type Naturalization.
+- immigration_documents = legacy note only when not using identity_documents with document_type Immigration.
+- children_birth_certificates = legacy note when not using identity_documents.
 - adoption_documents = adoption papers, guardianship documents, court records, document location, or uploaded copy note.
 - custody_agreements = custody agreement, visitation agreement, court order, document location, or uploaded copy note.
 
@@ -141,16 +143,23 @@ If subsection is FULL_SECTION, return patch["20A"], patch["20B"], and patch["20C
 Required 20A patch shape:
 {{
   "20A": {{
-    "birth_certificate": null,
-    "social_security_card": null,
-    "passport": null,
-    "drivers_license": null,
-    "marriage_certificate": null,
-    "divorce_decree": null,
+    "identity_documents": [
+      {{
+        "assigned_to": null,
+        "assigned_to_name": null,
+        "full_legal_name": null,
+        "date_of_birth": null,
+        "document_type": null,
+        "document_number": null,
+        "issue_date": null,
+        "expiration_date": null,
+        "issuing_authority": null,
+        "document_location": null,
+        "last_updated": null,
+        "document_upload": null
+      }}
+    ],
     "name_change_documents": null,
-    "naturalization_certificate": null,
-    "immigration_documents": null,
-    "children_birth_certificates": null,
     "adoption_documents": null,
     "custody_agreements": null
   }}

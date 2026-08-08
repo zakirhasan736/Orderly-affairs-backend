@@ -495,20 +495,30 @@ def require_step_up_auth(
 ) -> None:
     """Sensitive actions require recent password proof or a short-lived step-up token."""
     email = user["email"]
+    plain = (password or "").strip()
 
-    stored = (
-        user.get("password")
-        or user.get("password_hash")
-        or ""
-    )
-    if password and stored and verify_password(password, stored):
-        return
+    # Owners store `password`; family/NOK accounts often use `password_hash`.
+    # Try each independently so a stale unused field cannot block the real hash.
+    if plain:
+        for key in ("password", "password_hash"):
+            stored = user.get(key) or ""
+            if isinstance(stored, str) and stored and verify_password(plain, stored):
+                return
 
     if verify_mfa_challenge_token(mfa_challenge_token, email):
         return
 
     if verify_step_up_token(step_up_token, email):
         return
+
+    if plain:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Incorrect account password. Use the password you sign in to "
+                "Orderly Affairs with — not this person's login password."
+            ),
+        )
 
     raise HTTPException(
         status_code=403,
@@ -3031,18 +3041,26 @@ async def _resolve_session_user(decoded: dict):
 
 @router.get("/vapid-public-key")
 async def get_vapid_public_key_route():
-    """Public VAPID key for PushManager.subscribe (safe to expose)."""
+    """Public VAPID key for PushManager.subscribe (safe to expose).
+
+    Private key may live only in AWS Secrets / SSM — clients only need the public key.
+    """
     from app.notifications.web_push import get_vapid_public_key, vapid_configured
 
-    if not vapid_configured():
+    public = get_vapid_public_key()
+    if not public:
         return {
             "configured": False,
             "publicKey": None,
-            "message": "Web Push VAPID keys are not configured on the server.",
+            "message": "Web Push VAPID public key is not configured on the server.",
         }
+    ready = vapid_configured()
     return {
-        "configured": True,
-        "publicKey": get_vapid_public_key(),
+        "configured": ready,
+        "publicKey": public,
+        "message": None
+        if ready
+        else "VAPID public key is available; ensure VAPID_PRIVATE_KEY is loaded from secrets for delivery.",
     }
 
 

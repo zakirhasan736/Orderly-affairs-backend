@@ -23,10 +23,15 @@ from app.notifications.display_names import (
     resolve_nextkin_display_name,
     resolve_owner_display_name,
 )
+from app.auth.access_types import resolve_access_type
 from app.auth.notification_prefs import get_owner_notification_prefs
 from app.notifications.expiry_reminder_emails import send_expiry_reminder_email
-from app.notifications.web_push import send_web_push_to_email, vapid_configured
-from app.config import settings
+from app.notifications.web_push import (
+    default_push_click_url,
+    send_web_push_to_email,
+    vapid_configured,
+)
+from app.security.access_control import nok_has_section_access
 from app.security.section_crypto import decrypt_section_data
 
 REMINDER_DAYS = (10, 5, 1, 0)
@@ -256,7 +261,8 @@ async def _mark_sent(
     )
 
 
-async def _default_recipient_emails(owner: dict) -> list[dict]:
+async def _default_recipients(owner: dict) -> list[dict]:
+    """Owner + immediate-access NOK/family (with user docs for ACL + deep links)."""
     recipients: list[dict] = []
     owner_email = (owner.get("email") or "").strip().lower()
     if owner_email:
@@ -265,6 +271,8 @@ async def _default_recipient_emails(owner: dict) -> list[dict]:
                 "email": owner_email,
                 "name": await resolve_owner_display_name(owner),
                 "role": "owner",
+                "access_type": "owner",
+                "user": owner,
             }
         )
 
@@ -274,6 +282,7 @@ async def _default_recipient_emails(owner: dict) -> list[dict]:
             "role": "nextkin",
             "owner_id": owner_id,
             "immediate_access": True,
+            "access_revoked": {"$ne": True},
         }
     )
     async for nok in cursor:
@@ -285,6 +294,8 @@ async def _default_recipient_emails(owner: dict) -> list[dict]:
                 "email": email,
                 "name": resolve_nextkin_display_name(nok),
                 "role": "nextkin",
+                "access_type": resolve_access_type(nok),
+                "user": nok,
             }
         )
 
@@ -316,10 +327,18 @@ def _selected_recipients(event: dict, defaults: list[dict]) -> list[dict]:
     return defaults
 
 
+def _recipient_can_receive_section(recipient: dict, section_id: str) -> bool:
+    if recipient.get("role") == "owner":
+        return True
+    user = recipient.get("user")
+    if not isinstance(user, dict):
+        return False
+    return nok_has_section_access(user, section_id)
+
+
 async def process_section_expiry_reminders() -> None:
     now = datetime.utcnow()
     today = datetime(now.year, now.month, now.day)
-    frontend = (settings.FRONTEND_URL or "").rstrip("/")
 
     owners = users_collection.find({"role": "owner"})
     async for owner in owners:
@@ -329,10 +348,11 @@ async def process_section_expiry_reminders() -> None:
         push_enabled = (
             vapid_configured() and str(prefs.get("push_state") or "") == "active"
         )
+        push_for_collaborators = bool(prefs.get("push_for_collaborators", True))
         if not email_enabled and not push_enabled:
             continue
 
-        defaults = await _default_recipient_emails(owner)
+        defaults = await _default_recipients(owner)
         owner_name = await resolve_owner_display_name(owner)
 
         cursor = section_data_collection.find(
@@ -374,7 +394,11 @@ async def process_section_expiry_reminders() -> None:
                 ):
                     continue
 
-                recipients = _selected_recipients(event, defaults)
+                recipients = [
+                    item
+                    for item in _selected_recipients(event, defaults)
+                    if _recipient_can_receive_section(item, section_id)
+                ]
                 if not recipients:
                     continue
 
@@ -390,10 +414,10 @@ async def process_section_expiry_reminders() -> None:
                 push_body = (
                     f"{section_title}: {item_label} expires {expiry_iso}."
                 )
-                push_url = f"{frontend}/dashboard"
                 push_tag = f"expiry-{fingerprint}-{days_until}"
 
                 for recipient in recipients:
+                    is_owner = recipient.get("role") == "owner"
                     if email_enabled:
                         try:
                             send_expiry_reminder_email(
@@ -413,7 +437,11 @@ async def process_section_expiry_reminders() -> None:
                                 f"to={recipient.get('email')} owner={owner_id}: {exc}"
                             )
 
-                    if push_enabled:
+                    recipient_push = push_enabled and (
+                        is_owner or push_for_collaborators
+                    )
+                    if recipient_push:
+                        push_url = default_push_click_url(recipient.get("user"))
                         try:
                             pushed = await send_web_push_to_email(
                                 recipient["email"],

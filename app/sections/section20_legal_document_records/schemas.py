@@ -20,7 +20,26 @@ class UploadField(BaseModel):
 
 # ---------- 20A — Personal Legal Documents ----------
 
+class IdentityDocumentCard(BaseModel):
+    assigned_to: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+    category: Optional[str] = "identity"
+    full_legal_name: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    document_type: Optional[str] = None
+    document_number: Optional[str] = None
+    issue_date: Optional[str] = None
+    expiration_date: Optional[str] = None
+    issuing_authority: Optional[str] = None
+    document_location: Optional[str] = None
+    last_updated: Optional[str] = None
+    document_upload: Optional[UploadField] = None
+    model_config = {"extra": "ignore"}
+
+
 class Section20A(BaseModel):
+    identity_documents: Optional[List[IdentityDocumentCard]] = None
+    # Legacy upload-only slots (migrated to identity_documents on the client)
     birth_certificate: Optional[UploadField] = None
     social_security_card: Optional[UploadField] = None
     passport: Optional[UploadField] = None

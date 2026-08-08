@@ -22,6 +22,28 @@ SECTION20_FULL_SCHEMA = {
                 "20A": {
                     "type": "object",
                     "properties": {
+                        "identity_documents": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "assigned_to": {"type": ["string", "null"]},
+                                    "assigned_to_name": {"type": ["string", "null"]},
+                                    "full_legal_name": {"type": ["string", "null"]},
+                                    "date_of_birth": {"type": ["string", "null"]},
+                                    "document_type": {"type": ["string", "null"]},
+                                    "document_number": {"type": ["string", "null"]},
+                                    "issue_date": {"type": ["string", "null"]},
+                                    "expiration_date": {"type": ["string", "null"]},
+                                    "issuing_authority": {"type": ["string", "null"]},
+                                    "document_location": {"type": ["string", "null"]},
+                                    "last_updated": {"type": ["string", "null"]},
+                                    "document_upload": {"type": ["string", "object", "null"]},
+                                    "category": {"type": ["string", "null"]},
+                                },
+                                "additionalProperties": False,
+                            },
+                        },
                         "birth_certificate": {"type": ["string", "null"]},
                         "social_security_card": {"type": ["string", "null"]},
                         "passport": {"type": ["string", "null"]},

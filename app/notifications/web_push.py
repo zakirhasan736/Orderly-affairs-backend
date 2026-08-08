@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 from typing import Any
 
+from app.auth.access_types import is_nextkin_collaborator
 from app.config import settings
 from app.database import users_collection
 
@@ -25,6 +26,17 @@ def vapid_configured() -> bool:
 def get_vapid_public_key() -> str | None:
     key = (settings.VAPID_PUBLIC_KEY or "").strip()
     return key or None
+
+
+def default_push_click_url(user: dict[str, Any] | None = None) -> str:
+    """
+    Deep-link target when a Web Push notification is clicked.
+    True Next-of-Kin use the NOK portal; owners + family use /dashboard.
+    """
+    frontend = (settings.FRONTEND_URL or "").rstrip("/")
+    if user and is_nextkin_collaborator(user):
+        return f"{frontend}/next-kin/dashboard"
+    return f"{frontend}/dashboard"
 
 
 def _normalize_vapid_private_key(raw: str | None) -> str:
@@ -172,11 +184,10 @@ async def send_web_push_to_user(
     if not subs:
         return 0
 
-    frontend = (settings.FRONTEND_URL or "").rstrip("/")
     payload = {
         "title": title or settings.APP_NAME or "Orderly Affairs",
         "body": body or "",
-        "url": url or f"{frontend}/dashboard",
+        "url": (url or "").strip() or default_push_click_url(user),
         "tag": tag or "orderly-reminder",
     }
 

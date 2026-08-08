@@ -34,6 +34,12 @@ SECTION17_17C_PROPERTIES = {
     "backup_caregivers": nullable_string(),
     "special_needs": nullable_string(),
     "future_care_plans": nullable_string(),
+    "school_name": nullable_string(),
+    "grade": nullable_string(),
+    "enrollment_contact": nullable_string(),
+    "iep_or_504": nullable_string(),
+    "iep_504_details": nullable_string(),
+    "emergency_pickup_list": nullable_string(),
     "legal_documents": nullable_string(),
     "financial_accounts": nullable_string(),
 }
