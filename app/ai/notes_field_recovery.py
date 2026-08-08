@@ -157,14 +157,17 @@ def recover_item_fields(item: dict, section_key: str) -> dict:
     # Vehicle identity buried in insurance/vehicle notes
     if section_key == "vehicles":
         if not as_plain_text(next_item.get("vin")):
-            vin_match = re.search(
-                r"\b(?:VIN|vehicle\s*id(?:entification)?\s*(?:no\.?|number|#)?)\s*[:#]?\s*"
-                r"([A-HJ-NPR-Z0-9]{11,17})\b",
-                blob,
-                re.IGNORECASE,
-            )
-            if vin_match:
-                next_item["vin"] = vin_match.group(1).upper()
+            from app.ai.vin_utils import first_vin_in_text, normalize_vin
+
+            for alias in ("vehicle_vin", "insured_vin", "vin_number"):
+                alias_val = normalize_vin(next_item.get(alias))
+                if alias_val:
+                    next_item["vin"] = alias_val
+                    break
+            if not as_plain_text(next_item.get("vin")):
+                harvested = first_vin_in_text(blob)
+                if harvested:
+                    next_item["vin"] = harvested
         if not as_plain_text(next_item.get("license_plate")):
             plate_match = re.search(
                 r"\b(?:license\s*plate|lic(?:ense)?\.?\s*plate|plate(?:\s*#)?|tag)\s*[:#]?\s*"

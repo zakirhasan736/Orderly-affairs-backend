@@ -39,6 +39,7 @@ Important rules:
 - If subsection is provided, only fill that subsection.
 - Keep keys exactly as required by schema.
 - Fill EVERY clearly visible identity field that maps to the schema (name, DOB, phone, email, last-4 SSN, etc.). Do not leave matched values blank.
+- The BACK of a driver's license / state ID (magnetic stripe, barcodes, CLASS/REST/END, vertical DOB, roadside assistance phone line) is still an identity document — extract DOB and any readable identity fields. Do not treat it as a roadside assistance membership card.
 - Never invent passwords, PINs, full SSNs, contact names, phone numbers, emails, or addresses.
 - For password/PIN schema fields: never return the raw secret; use "Stored in uploaded document" when the document shows or references one.
 - For social_security_number: use last 4 digits only, or "Stored in uploaded document" — never a full 9-digit SSN.
@@ -56,19 +57,31 @@ Subsection meanings:
 vital_info field meanings (fill when present in the document):
 - full_legal_name = legal name, name as it appears on ID/passport/discharge (e.g. "Jordan Michael Casey").
 - other_names = aliases, maiden names, aka.
-- date_of_birth = DOB; prefer ISO YYYY-MM-DD when possible (e.g. March 14, 1979 → 1979-03-14).
+- date_of_birth = DOB only (the birth date labeled DOB / Date of Birth). Never use ISS / issue date or EXP / expiration date as DOB — those go in drivers_license_issue_date / drivers_license_expiration_date. Prefer ISO YYYY-MM-DD (e.g. September 15, 1978 → 1978-09-15). Do not shift the day.
 - social_security_number = last 4 only (e.g. from 923-45-6781 → 6781) or storage note.
+- drivers_license_number = driver's license / state ID number (DL # / LIC # / ID #) when printed.
+- drivers_license_dd_number = DD / document discriminator / audit number (common on Texas licenses, often labeled "DD").
+- drivers_license_class = license class (e.g. C, A, B, M) from CLASS: on the front or back.
+- drivers_license_issue_date = issue / ISS date; prefer ISO YYYY-MM-DD.
+- drivers_license_expiration_date = expiration / EXP date; prefer ISO YYYY-MM-DD.
 - phone_number = primary phone.
 - phone_password / voicemail_pin / computer_password / email passwords / google_id_password / apple_id_password / frequent_pins / safe_code = "Stored in uploaded document" when shown; never raw secrets.
 - primary_email_username / secondary_email_username / google_id_username / apple_id_username = usernames or email addresses.
 - safe_location / safe_keys / security_question_answers = locations, key notes, or Q&A text when present.
+
+When the document is a driver's license or state ID (front or back), fill EVERY clearly visible license field above — do not leave DL #, DD, CLASS, ISS, or EXP only in a prose summary.
 
 Example vital_info patch shape when identity fields are visible:
 {
   "vital_info": {
     "full_legal_name": "Jordan Michael Casey",
     "date_of_birth": "1979-03-14",
-    "social_security_number": "6781"
+    "social_security_number": "6781",
+    "drivers_license_number": "12345678",
+    "drivers_license_dd_number": "00",
+    "drivers_license_class": "C",
+    "drivers_license_issue_date": "2020-11-10",
+    "drivers_license_expiration_date": "2030-09-15"
   }
 }
 """

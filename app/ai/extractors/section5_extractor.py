@@ -24,6 +24,8 @@ Important rules:
 - A distinct vehicle is identified by its own year/make/model and/or VIN. Two rows or blocks on an insurance card usually mean two vehicles.
 - If multiple vehicles share the same insurance policy number or insurance company, copy those shared values into each vehicle object.
 - Place year, make, model, color, vin, and license_plate into their dedicated fields — never leave vehicle identity only in notes when it is clearly printed.
+- VIN is critical: auto insurance cards and declarations almost always print a VIN (or Veh ID / Vehicle Identification Number / Serial No.) for each vehicle in a schedule or table. Extract it into `vin` for every vehicle whenever shown — do not leave VIN only in notes.
+- VIN values are typically 17 characters (letters and digits, never I/O/Q). Copy exactly as printed, including when shown with spaces or dashes (normalize into the vin field without spaces).
 - Keep keys exactly as required by schema.
 - Never invent VIN, license plate, insurance policy number, loan information, or ownership details.
 - If a value is unclear, return null.
@@ -35,7 +37,7 @@ Vehicle fields (exact placement):
 - make = vehicle manufacturer, for example Toyota, Honda, Ford, BMW.
 - model = vehicle model.
 - color = vehicle color.
-- vin = Vehicle Identification Number.
+- vin = Vehicle Identification Number / VIN / Veh ID / Vehicle ID / Serial No. (required whenever printed for that vehicle).
 - license_plate = current license plate number.
 - registration_expiry = registration expiration / "valid through" / "expires" date.
   Also use the END date of a clearly labeled registration period or policy/registration period

@@ -276,7 +276,18 @@ SEMANTIC_CONCEPTS: dict[str, dict[str, Any]] = {
     },
     "vehicle_vin": {
         "label": "VIN",
-        "aliases": ["vin", "vehicle_identification_number", "vin_number"],
+        "aliases": [
+            "vin",
+            "vehicle_identification_number",
+            "vin_number",
+            "vehicle_vin",
+            "insured_vin",
+            "veh_id",
+            "vehicle_id",
+            "vehicle_id_number",
+            "serial_number",
+            "identification_number",
+        ],
         "targets": {"vehicles": "vin"},
     },
     "license_plate": {

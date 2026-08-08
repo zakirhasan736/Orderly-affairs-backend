@@ -10,12 +10,8 @@ from app.ai.semantic_field_map import (
     collect_concepts_from_item,
     flatten_detected_facts_from_result,
 )
+from app.ai.vin_utils import find_vins_in_text
 
-_VIN_RE = re.compile(
-    r"\b(?:VIN|vehicle\s*id(?:entification)?\s*(?:no\.?|number|#)?)\s*[:#]?\s*"
-    r"([A-HJ-NPR-Z0-9]{11,17})\b",
-    re.IGNORECASE,
-)
 _PLATE_RE = re.compile(
     r"\b(?:license\s*plate|lic(?:ense)?\.?\s*plate|plate(?:\s*#)?|tag)\s*[:#]?\s*"
     r"([A-Z0-9\-]{2,10})\b",
@@ -159,7 +155,7 @@ def _parse_vehicles_from_policy_text(blob: str) -> list[dict]:
             }
         )
 
-    vins = [m.group(1).upper() for m in _VIN_RE.finditer(text)]
+    vins = find_vins_in_text(text)
     plates = [m.group(1).upper() for m in _PLATE_RE.finditer(text)]
 
     # Attach VINs/plates to parsed vehicles in order; leftover VINs become rows.
@@ -813,9 +809,54 @@ def insurance_cache_missing_policy_number(result: dict | None) -> bool:
     return not bool(concepts.get("policy_number"))
 
 
-def enrich_primary_result(result: dict | None, section_key: str) -> dict | None:
+def _merge_parsed_vehicles_into_result(
+    result: dict | None,
+    parsed: list[dict],
+) -> dict | None:
+    """Merge year/make/model/VIN rows harvested from document text into 5A."""
+    if not parsed:
+        return result
+
+    base = result if isinstance(result, dict) else {
+        "section": "vehicles",
+        "patch": {"5A": []},
+    }
+    patch = base.get("patch") if isinstance(base.get("patch"), dict) else {}
+    existing = patch.get("5A")
+    if isinstance(existing, dict):
+        existing_items = [existing]
+    elif isinstance(existing, list):
+        existing_items = [dict(item) for item in existing if isinstance(item, dict)]
+    else:
+        existing_items = []
+
+    seed = {
+        "section": "vehicles",
+        "extraction_source": "document_text",
+        "patch": {"5A": parsed},
+    }
+    if not existing_items:
+        merged = dict(base)
+        merged_patch = dict(patch)
+        merged_patch["5A"] = parsed
+        merged["patch"] = merged_patch
+        if "section" not in merged:
+            merged["section"] = "vehicles"
+        return merged
+
+    return merge_seed_into_cached(base, seed, array_key="5A") or base
+
+
+def enrich_primary_result(
+    result: dict | None,
+    section_key: str,
+    *,
+    document_text: str | None = None,
+) -> dict | None:
     """Canonicalize fields on the primary extraction before cache/return."""
+    from app.ai.drivers_license_utils import recover_drivers_license_for_vital_result
     from app.ai.notes_field_recovery import recover_fields_from_notes
+    from app.ai.vin_utils import recover_vins_for_vehicle_result
 
     enriched = result
     if section_key == "vehicles":
@@ -834,7 +875,34 @@ def enrich_primary_result(result: dict | None, section_key: str) -> dict | None:
             result, "passwords_online_accounts", "13A"
         )
 
-    return recover_fields_from_notes(enriched, section_key) or enriched
+    recovered = recover_fields_from_notes(enriched, section_key) or enriched
+    if section_key == "vehicles":
+        # Empty LLM patch is common on insurance cards — start from a shell so
+        # document-text harvest can still create 5A rows.
+        if not isinstance(recovered, dict):
+            recovered = {"section": "vehicles", "patch": {"5A": []}}
+        elif not isinstance(recovered.get("patch"), dict):
+            recovered = {**recovered, "patch": {"5A": []}}
+
+        # When the model returns empty/thin 5A, harvest year/make/model + VIN
+        # directly from OCR/document text (Allstate cards, declarations, etc.).
+        if document_text and vehicles_result_is_thin(recovered):
+            parsed = _parse_vehicles_from_policy_text(document_text)
+            if parsed:
+                recovered = (
+                    _merge_parsed_vehicles_into_result(recovered, parsed) or recovered
+                )
+        recovered = (
+            recover_vins_for_vehicle_result(recovered, document_text) or recovered
+        )
+    elif section_key == "vital_information":
+        if not isinstance(recovered, dict):
+            recovered = {"section": "vital_information", "patch": {"vital_info": {}}}
+        recovered = (
+            recover_drivers_license_for_vital_result(recovered, document_text)
+            or recovered
+        )
+    return recovered
 
 
 def build_detected_facts_payload(

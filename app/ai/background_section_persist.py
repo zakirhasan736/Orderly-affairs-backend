@@ -225,10 +225,75 @@ def _insurance_vehicle_fingerprint(item: dict) -> str:
     return ""
 
 
+def _parse_insurance_vehicle_fingerprint(fp: str) -> tuple[str, str, str]:
+    """Return (vin, brand, model) from a fingerprint string."""
+    if not fp:
+        return "", "", ""
+    if fp.startswith("vin:"):
+        return fp[4:], "", ""
+    if fp.startswith("brand:"):
+        return "", fp[6:], ""
+    if fp.startswith("ymm:"):
+        parts = fp[4:].split("|")
+        make = parts[1] if len(parts) > 1 else ""
+        model = parts[2] if len(parts) > 2 else ""
+        return "", make, model
+    return "", "", ""
+
+
+def _insurance_vehicle_fingerprints_match(a: str, b: str) -> bool:
+    """Treat ymm:|bmw|ix and brand:bmw as the same car when models don't conflict."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+
+    vin_a, brand_a, model_a = _parse_insurance_vehicle_fingerprint(a)
+    vin_b, brand_b, model_b = _parse_insurance_vehicle_fingerprint(b)
+
+    if vin_a or vin_b:
+        return bool(vin_a and vin_b and vin_a == vin_b)
+
+    if not brand_a or not brand_b or brand_a != brand_b:
+        return False
+
+    if (
+        model_a
+        and model_b
+        and model_a != model_b
+        and model_a not in model_b
+        and model_b not in model_a
+    ):
+        return False
+
+    return True
+
+
+def _insurance_types_compatible(
+    existing_type: str,
+    incoming_type: str,
+    existing_other: str,
+    incoming_other: str,
+) -> bool:
+    if not existing_type or not incoming_type or existing_type != incoming_type:
+        return False
+    if (
+        existing_type == "other"
+        and existing_other
+        and incoming_other
+        and existing_other != incoming_other
+    ):
+        return False
+    return True
+
+
 def _insurance_identity_conflicts(existing: dict, incoming: dict) -> bool:
     vehicle_a = _insurance_vehicle_fingerprint(existing)
     vehicle_b = _insurance_vehicle_fingerprint(incoming)
-    if vehicle_a and vehicle_b and vehicle_a != vehicle_b:
+    if vehicle_a and vehicle_b:
+        if _insurance_vehicle_fingerprints_match(vehicle_a, vehicle_b):
+            # Same insured vehicle → ignore noisy OCR note/name differences.
+            return False
         return True
 
     name_a = _insurance_display_name(existing)
@@ -240,7 +305,14 @@ def _insurance_identity_conflicts(existing: dict, incoming: dict) -> bool:
         and name_a not in name_b
         and name_b not in name_a
     ):
-        return True
+        match_a = _VEHICLE_BRAND_RE.search(name_a)
+        match_b = _VEHICLE_BRAND_RE.search(name_b)
+        brand_a = (match_a.group(1) if match_a else "").lower()
+        brand_b = (match_b.group(1) if match_b else "").lower()
+        # Only conflict when names clearly name different vehicles.
+        # Generic OCR titles must not block company+type merges.
+        if brand_a and brand_b and brand_a != brand_b:
+            return True
 
     notes_a = _insurance_notes(existing)
     notes_b = _insurance_notes(incoming)
@@ -251,7 +323,12 @@ def _insurance_identity_conflicts(existing: dict, incoming: dict) -> bool:
         and notes_a not in notes_b
         and notes_b not in notes_a
     ):
-        return True
+        match_a = _VEHICLE_BRAND_RE.search(notes_a)
+        match_b = _VEHICLE_BRAND_RE.search(notes_b)
+        brand_a = (match_a.group(1) if match_a else "").lower()
+        brand_b = (match_b.group(1) if match_b else "").lower()
+        if brand_a and brand_b and brand_a != brand_b:
+            return True
 
     return False
 
@@ -278,27 +355,48 @@ def _insurance_policies_are_duplicates(existing: dict, incoming: dict) -> bool:
         incoming.get("policy_type_other") or incoming.get("type_other")
     )
 
+    types_match = _insurance_types_compatible(
+        existing_type, incoming_type, existing_other, incoming_other
+    )
+    companies_compatible = (
+        not existing_company
+        or not incoming_company
+        or _companies_match(existing_company, incoming_company)
+    )
     company_and_type_match = bool(
         existing_company
         and incoming_company
-        and existing_type
-        and incoming_type
+        and types_match
         and _companies_match(existing_company, incoming_company)
-        and existing_type == incoming_type
-        and not (
-            existing_type == "other"
-            and existing_other
-            and incoming_other
-            and existing_other != incoming_other
-        )
     )
+
+    vehicle_a = _insurance_vehicle_fingerprint(existing)
+    vehicle_b = _insurance_vehicle_fingerprint(incoming)
+    if vehicle_a and vehicle_b:
+        if not _insurance_vehicle_fingerprints_match(vehicle_a, vehicle_b):
+            return False
+        # Same car: merge when types align and companies don't contradict.
+        # UI often shows "Bmw · Vehicle" cards with no policy_company.
+        return types_match and companies_compatible
 
     if not company_and_type_match:
         return False
 
-    # One-sided policy number or no numbers: only thin seed ↔ fuller extract.
-    # Two full Vehicle policies (Honda / Jeep / Toyota) stay separate.
-    return _is_thin_insurance_card(existing) or _is_thin_insurance_card(incoming)
+    is_vehicle_type = existing_type in {"vehicle", "auto"} or incoming_type in {
+        "vehicle",
+        "auto",
+    }
+    if not is_vehicle_type:
+        return True
+
+    if vehicle_a or vehicle_b:
+        return _is_thin_insurance_card(existing) or _is_thin_insurance_card(
+            incoming
+        )
+
+    # Neither card identifies a vehicle. Prefer collapsing OCR re-accepts of the
+    # same carrier shell over keeping anonymous multi-car placeholders.
+    return True
 
 
 def _named_items_are_duplicates(existing: dict, incoming: dict, keys: list[str]) -> bool:

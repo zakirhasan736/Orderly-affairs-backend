@@ -206,6 +206,11 @@ SECTION_PREVIEW_FIELD_KEYS: dict[str, list[str]] = {
     "vital_information": [
         "full_legal_name",
         "date_of_birth",
+        "drivers_license_number",
+        "drivers_license_dd_number",
+        "drivers_license_class",
+        "drivers_license_issue_date",
+        "drivers_license_expiration_date",
         "phone_number",
         "primary_email_username",
         "current_address",

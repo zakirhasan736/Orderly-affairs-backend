@@ -69,7 +69,7 @@ Exact field placement (required):
 - notes = any other important insurance-policy-related information clearly present that does not fit another field.
   For Vehicle / auto policies that list insured vehicles, ALSO put each vehicle on its own concise line in notes using this exact format so Vehicles section can be filled accurately:
   "Vehicle: YYYY Make Model; VIN: <vin>; Plate: <plate>"
-  One line per distinct vehicle. Copy shared policy_company / policy_number only in their dedicated fields (not duplicated per vehicle line).
+  One line per distinct vehicle. Always include VIN when the declarations page or card shows it (look in vehicle schedule tables for VIN / Veh ID / Identification No.). Copy shared policy_company / policy_number only in their dedicated fields (not duplicated per vehicle line).
 
 Health / medical / dental insurance CARD fields (fill whenever shown — never dump these only into notes):
 - member_name = member / subscriber / insured name printed on the card (e.g. "Sebastian Shahvandi").

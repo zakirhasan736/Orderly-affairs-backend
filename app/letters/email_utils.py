@@ -46,34 +46,35 @@ def dedupe_consecutive_name_words(name: str) -> str:
 
 
 def format_nok_letter_salutation(greeting: object, letter_to: object) -> str:
-    """Build 'Dear Amber Furst,' without duplicating a first name already in greeting."""
+    """Build 'Dear Amber,' using only the recipient's first name."""
     raw_greeting = str(greeting or "Dear").strip() or "Dear"
     raw_to = dedupe_consecutive_name_words(
         str(letter_to or "").strip() or "[Next of Kin Name]"
     )
+    first_name = raw_to.split()[0] if raw_to.split() else raw_to
 
     def with_comma(value: str) -> str:
         return value if value.endswith(",") else f"{value},"
 
     greeting_lower = raw_greeting.lower()
+    first_lower = first_name.lower()
     to_lower = raw_to.lower()
 
     if (
-        greeting_lower == to_lower
+        greeting_lower == first_lower
+        or greeting_lower == to_lower
+        or greeting_lower.endswith(f" {first_lower}")
         or greeting_lower.endswith(f" {to_lower}")
         or greeting_lower.endswith(to_lower)
     ):
+        # If greeting still has a full name, trim to first name only.
+        if greeting_lower.endswith(f" {to_lower}") or greeting_lower == to_lower:
+            without_full = raw_greeting[: len(raw_greeting) - len(raw_to)].rstrip()
+            base = without_full or "Dear"
+            return with_comma(f"{base} {first_name}".strip())
         return with_comma(raw_greeting)
 
-    first_name = raw_to.split()[0] if raw_to.split() else ""
-    if first_name and first_name.lower() != to_lower:
-        first_lower = first_name.lower()
-        if greeting_lower == first_lower or greeting_lower.endswith(f" {first_lower}"):
-            without_first = raw_greeting[: len(raw_greeting) - len(first_name)].rstrip()
-            base = without_first or "Dear"
-            return with_comma(f"{base} {raw_to}")
-
-    return with_comma(f"{raw_greeting} {raw_to}")
+    return with_comma(f"{raw_greeting} {first_name}")
 
 
 def render_letter_text(doc: Dict[str, Any]) -> str:

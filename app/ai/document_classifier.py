@@ -212,7 +212,26 @@ _HOME_DOC_RE = re.compile(
 _VITAL_ID_DOC_RE = re.compile(
     r"\b("
     r"passport|birth\s*certificate|social\s*security\s*card|ssn\s*card|"
-    r"driver'?s?\s*license|state\s*id\s*card|national\s*id"
+    r"driver'?s?\s*license|driving\s*licen[cs]e|state\s*id\s*card|national\s*id|"
+    # Back-of-license cues (magnetic stripe side) — still a driver's license.
+    r"class\s*:\s*[a-z0-9]|rest\s*:\s*|end\s*:\s*|organ\s*donor|"
+    r"pdf417|magnetic\s*stripe|license\s*number|dl\s*(?:#|no|number)|"
+    r"texas\s*roadside\s*assistance|roadside\s*assistance\s*:\s*1-?800"
+    r")\b",
+    re.I,
+)
+
+# Standalone "roadside assistance" phone lines on state ID backs are NOT a separate card type.
+_ROADSIDE_ASSIST_CARD_RE = re.compile(
+    r"\broadside\s*assistance\s*card\b|\bthis\s+document\s+is\s+a\s+[^.]*roadside\s*assistance\b",
+    re.I,
+)
+_DRIVER_LICENSE_BACK_RE = re.compile(
+    r"\b("
+    r"class\s*:\s*[a-z0-9]|rest\s*:\s*(?:none|none\b)|end\s*:\s*(?:none|none\b)|"
+    r"driver'?s?\s*licen[cs]e|driving\s*licen[cs]e|state\s*(?:id|identification)|"
+    r"magnetic\s*stripe|pdf417|organ\s*donor|"
+    r"dob\s*:\s*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
     r")\b",
     re.I,
 )
@@ -226,6 +245,59 @@ def _classification_text_blob(classification: dict) -> str:
             parts.append(str(item.get("section_key") or ""))
     parts.append(str(classification.get("best_section_key") or ""))
     return " ".join(parts)
+
+
+def correct_identity_document_summary(
+    classification: dict,
+    document_text: str | None = None,
+) -> dict:
+    """
+    Fix common mislabels on state ID / driver's license backs.
+
+    Texas (and other) license backs print a roadside-assistance phone number.
+    Models often call the whole image a "Roadside Assistance card" — rewrite
+    that when classic DL-back cues are present.
+    """
+    if not isinstance(classification, dict):
+        return classification
+
+    summary = str(classification.get("document_summary") or "").strip()
+    blob = f"{document_text or ''} {summary}"
+    looks_dl_back = bool(_DRIVER_LICENSE_BACK_RE.search(blob))
+    mislabeled = bool(_ROADSIDE_ASSIST_CARD_RE.search(summary)) or (
+        bool(re.search(r"\broadside\s*assistance\b", summary, re.I))
+        and looks_dl_back
+        and not re.search(
+            r"\b(driver'?s?\s*licen[cs]e|driving\s*licen[cs]e|state\s*id)\b",
+            summary,
+            re.I,
+        )
+    )
+
+    if not (looks_dl_back and mislabeled):
+        return classification
+
+    dob_match = re.search(
+        r"\b(?:DOB|date\s*of\s*birth)\s*[:#]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
+        blob,
+        re.I,
+    )
+    dob_bit = f" Date of birth shown: {dob_match.group(1)}." if dob_match else ""
+    classification["document_summary"] = (
+        "This is the back of a state driver's license / photo ID "
+        "(magnetic stripe, barcodes, class/restrictions)."
+        f"{dob_bit} "
+        "The roadside assistance phone number printed on many state IDs is a "
+        "help line on the license, not a separate roadside assistance card."
+    ).strip()
+
+    # Prefer Vital Information when this was clearly an ID scan.
+    best = classification.get("best_section_key")
+    if best not in {"vital_information", "legal_documents_records"}:
+        classification["best_section_key"] = "vital_information"
+        classification["confidence"] = classification.get("confidence") or "high"
+
+    return classification
 
 
 def _ensure_additional_section(
@@ -393,7 +465,10 @@ def harden_vehicle_insurance_routing(
         if isinstance(item, dict) and item.get("section_key") not in (None, best)
     ]
 
-    return classification
+    return correct_identity_document_summary(
+        classification,
+        document_text=document_text,
+    )
 
 
 def enforce_upload_section_first(
@@ -509,7 +584,9 @@ CRITICAL SECTION ROUTING (do not violate):
    - NEVER use vital_information just because a person's name appears on the policy
 3) main_residence is ONLY for property/home documents (deed, mortgage, homeowners/renters policy, property tax, utility bill for the home).
    - A vehicle / auto insurance document is NOT main_residence even if it shows a garaging address.
-4) vital_information is ONLY for personal identity / vital records (passport, driver's license ID page, birth certificate, SSN card metadata, personal contact sheet).
+4) vital_information is ONLY for personal identity / vital records (passport, driver's license front OR back, birth certificate, SSN card metadata, personal contact sheet).
+   - The BACK of a driver's license / state ID (magnetic stripe, 1D/2D barcodes, CLASS/REST/END, vertical DOB) is still a driver's license — NOT a "roadside assistance card".
+   - Many U.S. licenses print a roadside-assistance phone number (e.g. "TEXAS ROADSIDE ASSISTANCE: 1-800-…") on the back. That line is printed help text on the ID, not the document type.
    - A name printed on an insurance card does NOT make the document vital_information.
 5) Homeowners/renters insurance: best_section_key="insurance_policies" with additional_sections including main_residence (and NOT vehicles unless a vehicle is also listed).
 
@@ -531,12 +608,14 @@ Rules:
   - Health insurance card: health_information + insurance_policies
   - Brokerage statement: investment_accounts + banking_financial_accounts
   - ID / passport / birth certificate: vital_information
+  - Driver's license BACK (stripe, barcodes, CLASS/REST/END, roadside assistance phone line): vital_information — summarize as the back of a driver's license / state ID, never as a roadside assistance card
 - When the user uploaded in section X and X has data, set best_section_key=X and put other sections in additional_sections.
 - additional_sections must NOT include {requested_section_key}.
 - If the document is clearly only for a different section and has no useful data for {requested_section_key}, set matches_requested_section=false and set best_section_key to that other section.
 - document_summary is shown to the owner on a review screen. Write 2–5 clear sentences (about 80–500 characters) that summarize what was uploaded:
-  document type (e.g. bank statement, auto insurance card, DD-214), who/what institution it is from, key people named, important account/policy/VIN numbers when clearly shown, date range or expiry when shown, and what the vault can fill from it.
+  document type (e.g. bank statement, auto insurance card, DD-214, driver's license back), who/what institution it is from, key people named, important account/policy/VIN numbers when clearly shown, date range or expiry when shown, and what the vault can fill from it.
   Do NOT invent facts. Prefer concrete details from the document over vague wording. No markdown, no bullet lists — flowing prose only.
+  Never label a driver's license / state ID (front or back) as a "roadside assistance card" just because a roadside assistance phone number is printed on it.
 - Return JSON only.
 """
 

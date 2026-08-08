@@ -21,6 +21,7 @@ from app.ai.cross_section_enrichment import (
     seed_insurance_from_vehicles,
     seed_vehicles_from_insurance,
     sync_vehicle_insurance_shared_fields,
+    vehicles_result_is_thin,
 )
 from app.ai.document_classifier import (
     build_additional_sections_payload,
@@ -474,7 +475,25 @@ async def _finalize_autofill_success(
     ]
 
     # Canonicalize wording → exact section field keys before cache/cross-seed.
-    result = enrich_primary_result(result, payload.section) or result
+    local_path = None
+    if isinstance(source_doc, dict):
+        local_path = source_doc.get("local_path") or source_doc.get("file_path")
+    doc_text_for_enrich = (
+        str(extract_meta.get("document_text") or "").strip()
+        or _document_text_hint(
+            local_path,
+            source_doc.get("mime_type") if isinstance(source_doc, dict) else None,
+            source_doc,
+        )
+    )
+    result = (
+        enrich_primary_result(
+            result,
+            payload.section,
+            document_text=doc_text_for_enrich or None,
+        )
+        or result
+    )
     if not from_cache:
         result = mark_full_extraction(result) or result
 
@@ -533,6 +552,21 @@ async def _finalize_autofill_success(
                         "data_summary": "Insurance policy details found on this vehicle document.",
                     }
                 )
+
+        # Insurance cards often fill Insurance cache first (or only). If Vehicles
+        # is still empty, seed 5A from that auto policy so the client can add cards.
+        if vehicles_result_is_thin(result):
+            vehicle_seed = seed_vehicles_from_insurance(
+                cached_extractions.get("insurance_policies"),
+                force_bridge=True,
+            )
+            if vehicle_seed:
+                cached_extractions["vehicles"] = merge_seed_into_cached(
+                    cached_extractions.get("vehicles"),
+                    vehicle_seed,
+                    array_key="5A",
+                ) or vehicle_seed
+                result = cached_extractions["vehicles"]
     elif payload.section == "insurance_policies":
         # If overview already paired Vehicles, force a thin bridge even when
         # policy_type is blank / ambiguous so the client can badge New data.
