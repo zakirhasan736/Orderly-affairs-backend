@@ -179,6 +179,20 @@ async def notify_immediate_access_on_section_update(
                 owner=owner,
                 section_id=section_id,
             )
+            try:
+                from app.notifications.push_bridge import notify_web_push
+                from app.notifications.email_layout import portal_url
+
+                await notify_web_push(
+                    nextkin,
+                    title="Vault section updated",
+                    body=f"A section in the shared kit was updated. Open to review.",
+                    tag=f"section-update-{section_id}",
+                    url=portal_url(),
+                    urgency="normal",
+                )
+            except Exception as push_exc:
+                print("⚠️ Section update web push failed:", push_exc)
         except Exception as exc:
             print(
                 "⚠️ Section update notification failed:",

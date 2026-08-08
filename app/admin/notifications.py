@@ -90,6 +90,23 @@ async def broadcast_notification(
                     "audience": payload.audience,
                 }
             )
+            try:
+                from app.notifications.push_bridge import notify_web_push_email
+                from app.notifications.email_layout import portal_url
+
+                preview = (payload.body or "").strip().replace("\n", " ")
+                if len(preview) > 120:
+                    preview = preview[:117] + "..."
+                await notify_web_push_email(
+                    email,
+                    title=payload.subject,
+                    body=preview or "You have a new message from Orderly Affairs support.",
+                    tag="admin-broadcast",
+                    url=portal_url(),
+                    urgency="normal",
+                )
+            except Exception as push_exc:
+                print(f"admin broadcast push failed for {email}: {push_exc}")
         except Exception as exc:
             failed.append(email)
             print(f"admin broadcast failed for {email}: {exc}")

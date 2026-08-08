@@ -263,6 +263,39 @@ async def admin_reply_thread(
             "$inc": {"unread_owner": 1},
         },
     )
+
+    # Notify the kit owner that support replied.
+    try:
+        from app.database import users_collection
+        from app.notifications.push_bridge import notify_web_push
+        from app.notifications.email_layout import portal_url
+
+        owner_id = thread.get("owner_id") or thread.get("user_id")
+        owner = None
+        if owner_id:
+            try:
+                owner = await users_collection.find_one({"_id": ObjectId(str(owner_id))})
+            except Exception:
+                owner = await users_collection.find_one({"_id": owner_id})
+        if not owner and thread.get("owner_email"):
+            owner = await users_collection.find_one(
+                {"email": str(thread["owner_email"]).lower().strip()}
+            )
+        if owner:
+            preview = text.strip().replace("\n", " ")
+            if len(preview) > 100:
+                preview = preview[:97] + "..."
+            await notify_web_push(
+                owner,
+                title="Support replied",
+                body=preview or "You have a new reply from Orderly Affairs support.",
+                tag="support-reply",
+                url=f"{portal_url().rstrip('/')}/dashboard",
+                urgency="high",
+            )
+    except Exception as push_exc:
+        print("⚠️ Support reply web push failed:", push_exc)
+
     return {"message": _serialize_message(doc)}
 
 

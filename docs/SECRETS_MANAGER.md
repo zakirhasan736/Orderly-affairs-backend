@@ -27,6 +27,29 @@
 
 Startup should show: `applied=17` … `sources=ssm:/orderly-affairs/ (17 params)`.
 
+## Web Push VAPID (add these SecureString params)
+
+Code already loads these via `MANAGED_SECRET_KEYS` in `app/security/secrets_bootstrap.py`.
+They are **required for browser push** (section expiry reminders). Generate with:
+
+```bash
+python scripts/generate_vapid_keys.py
+```
+
+| AWS parameter | App env var | Notes |
+|---------------|-------------|--------|
+| `/orderly-affairs/VAPID_PUBLIC_KEY` | `VAPID_PUBLIC_KEY` | URL-safe base64; also returned by `GET /auth/vapid-public-key` |
+| `/orderly-affairs/VAPID_PRIVATE_KEY` | `VAPID_PRIVATE_KEY` | PEM; store with literal `\n` or real newlines (app normalizes both). **Never** put in frontend. |
+| `/orderly-affairs/VAPID_SUBJECT` | `VAPID_SUBJECT` | e.g. `mailto:support@orderly-affairs.com` |
+
+After adding, restart the API and confirm:
+
+1. Startup log includes the three VAPID keys in the applied set (count rises above 17).
+2. `GET /auth/vapid-public-key` returns `{ "configured": true, "publicKey": "..." }`.
+3. Vault Settings → enable push succeeds (no 503 “missing VAPID keys”).
+
+Do **not** put `VAPID_PRIVATE_KEY` in Hostinger `.env` once SSM is the source of truth (`AWS_SECRETS_MANAGER_OVERRIDE=true`).
+
 Keep an **offline copy** of `BACKUP_ENCRYPTION_KEY` (disaster recovery). Local optional:
 `storage/BACKUP_ENCRYPTION_KEY.offline.txt` (gitignored under `/storage/`).
 

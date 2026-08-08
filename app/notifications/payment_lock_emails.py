@@ -60,3 +60,16 @@ async def send_payment_lock_email(*, user: dict, reason: str = "trial_ended_unpa
         html_content=html,
     )
     sg.send(message)
+
+    try:
+        from app.notifications.push_bridge import notify_web_push
+
+        await notify_web_push(
+            user,
+            title=subject,
+            body="Action needed — open Orderly Affairs to update billing.",
+            tag=f"billing-lock-{reason}",
+            urgency="high",
+        )
+    except Exception as exc:
+        print("⚠️ Payment-lock web push failed:", exc)

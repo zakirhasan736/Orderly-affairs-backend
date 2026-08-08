@@ -137,6 +137,19 @@ async def send_trial_email(*, user: dict, event: TrialEmailEvent):
     )
     sg.send(message)
 
+    try:
+        from app.notifications.push_bridge import notify_web_push
+
+        await notify_web_push(
+            user,
+            title=subject_map[event],
+            body="Open Orderly Affairs to review your trial and billing.",
+            tag=f"trial-{event.value}",
+            urgency="high" if event == TrialEmailEvent.ENDED else "normal",
+        )
+    except Exception as exc:
+        print("⚠️ Trial web push failed:", exc)
+
 
 def _next_day(dt: datetime | None) -> datetime | None:
     if not dt:

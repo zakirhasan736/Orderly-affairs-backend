@@ -153,6 +153,7 @@ def _send_one(subscription: dict[str, Any], payload: dict[str, Any]) -> str | No
                 "sub": (settings.VAPID_SUBJECT or "mailto:support@orderly-affairs.com").strip()
             },
             ttl=12 * 60 * 60,
+            headers={"urgency": str(payload.get("urgency") or "normal")},
         )
         return None
     except Exception as exc:
@@ -171,6 +172,7 @@ async def send_web_push_to_user(
     body: str,
     url: str | None = None,
     tag: str | None = None,
+    urgency: str = "normal",
 ) -> int:
     """Send to all stored subscriptions for a user. Returns successful send count."""
     if not user or not vapid_configured():
@@ -184,11 +186,16 @@ async def send_web_push_to_user(
     if not subs:
         return 0
 
+    urgency_norm = (urgency or "normal").strip().lower()
+    if urgency_norm not in {"very-low", "low", "normal", "high"}:
+        urgency_norm = "normal"
+
     payload = {
         "title": title or settings.APP_NAME or "Orderly Affairs",
         "body": body or "",
         "url": (url or "").strip() or default_push_click_url(user),
         "tag": tag or "orderly-reminder",
+        "urgency": urgency_norm,
     }
 
     sent = 0
@@ -222,6 +229,7 @@ async def send_web_push_to_email(
     url: str | None = None,
     tag: str | None = None,
     owner_id: str | None = None,
+    urgency: str = "normal",
 ) -> int:
     from bson import ObjectId
 
@@ -249,5 +257,5 @@ async def send_web_push_to_email(
         user = await users_collection.find_one({"email": email})
 
     return await send_web_push_to_user(
-        user, title=title, body=body, url=url, tag=tag
+        user, title=title, body=body, url=url, tag=tag, urgency=urgency
     )

@@ -756,6 +756,21 @@ async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
 
         sg.send(message)
 
+        try:
+            from app.notifications.push_bridge import notify_web_push
+            from app.notifications.email_layout import access_url
+
+            await notify_web_push(
+                owner,
+                title="Next-of-Kin access alert",
+                body=f"{nk_label} opened your kit.",
+                tag="nok-login",
+                url=access_url(),
+                urgency="high",
+            )
+        except Exception as push_exc:
+            print("⚠️ NOK login web push failed:", push_exc)
+
     except Exception as e:
         # Never block login
         print("Owner login notification failed:", e)

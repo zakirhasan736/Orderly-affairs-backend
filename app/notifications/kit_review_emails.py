@@ -59,6 +59,19 @@ async def send_kit_review_email(*, user: dict) -> None:
     )
     SendGridAPIClient(settings.SENDGRID_API_KEY).send(message)
 
+    try:
+        from app.notifications.push_bridge import notify_web_push
+
+        await notify_web_push(
+            user,
+            title="Is this still true?",
+            body="It’s time for a quick kit review — bank, insurance, and key contacts.",
+            tag="kit-review",
+            urgency="low",
+        )
+    except Exception as exc:
+        print("⚠️ Kit review web push failed:", exc)
+
 
 def _anchor_date(user: dict) -> datetime | None:
     billing = user.get("billing") or {}

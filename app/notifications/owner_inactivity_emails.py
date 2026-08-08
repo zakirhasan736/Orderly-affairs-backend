@@ -42,3 +42,16 @@ async def send_owner_inactivity_check_email(*, owner: dict) -> None:
 
     sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
     sg.send(message)
+
+    try:
+        from app.notifications.push_bridge import notify_web_push
+
+        await notify_web_push(
+            owner,
+            title="Please confirm you are okay",
+            body="Sign in within 15 days so your kit stays active for your trusted people.",
+            tag="owner-inactivity",
+            urgency="high",
+        )
+    except Exception as exc:
+        print("⚠️ Inactivity web push failed:", exc)

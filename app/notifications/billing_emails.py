@@ -79,3 +79,16 @@ async def send_billing_email(*, user: dict, event: BillingEmailEvent):
         html_content=body_map[event],
     )
     sg.send(message)
+
+    try:
+        from app.notifications.push_bridge import notify_web_push
+
+        await notify_web_push(
+            user,
+            title=subject_map[event],
+            body="Open Orderly Affairs to review your subscription.",
+            tag=f"billing-{event.value}",
+            urgency="normal",
+        )
+    except Exception as exc:
+        print("⚠️ Billing web push failed:", exc)

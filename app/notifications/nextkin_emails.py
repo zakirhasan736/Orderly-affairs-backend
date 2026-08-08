@@ -414,6 +414,39 @@ async def send_nextkin_email(
     except Exception as e:
         print(f"NextKin email failed ({event}):", e)
 
+    # Browser push for access-state changes (never for password / invite secrets).
+    if event in (
+        NextKinEmailEvent.ACCESS_APPROVED,
+        NextKinEmailEvent.ACCESS_REVOKED,
+        NextKinEmailEvent.OWNER_DECEASED,
+    ):
+        try:
+            from app.notifications.push_bridge import notify_web_push
+
+            body_map = {
+                NextKinEmailEvent.ACCESS_APPROVED: "You can open the shared kit now.",
+                NextKinEmailEvent.ACCESS_REVOKED: "Your kit access was revoked.",
+                NextKinEmailEvent.OWNER_DECEASED: "Kit access is now available — sign in when ready.",
+            }
+            await notify_web_push(
+                nextkin,
+                title=subject,
+                body=body_map.get(event, "Open Orderly Affairs for details."),
+                tag=f"nok-{getattr(event, 'value', event)}",
+                url=login,
+                urgency=(
+                    "high"
+                    if event
+                    in (
+                        NextKinEmailEvent.ACCESS_REVOKED,
+                        NextKinEmailEvent.OWNER_DECEASED,
+                    )
+                    else "normal"
+                ),
+            )
+        except Exception as push_exc:
+            print("⚠️ NextKin web push failed:", push_exc)
+
 
 async def send_family_invite_email(
     *,
