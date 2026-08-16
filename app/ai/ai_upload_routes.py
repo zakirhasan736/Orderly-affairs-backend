@@ -24,6 +24,10 @@ from fastapi.responses import FileResponse, Response
 from app.config import settings
 from app.database import ai_documents_collection
 from app.ai.ai_auth import get_user_id, get_vault_owner_for_ai
+from app.ai.document_topic import (
+    delete_matching_topic_documents,
+    fingerprint_from_parts,
+)
 from app.ai.ai_document_storage import (
     destroy_ai_document_assets,
     fetch_ai_document_bytes,
@@ -247,61 +251,32 @@ async def delete_same_topic_documents(
     original_filename: str,
     section: Optional[str] = None,
     content_hash: Optional[str] = None,
+    keep_file_id: Optional[str] = None,
+    classification: Optional[dict] = None,
+    extractions: Optional[dict] = None,
+    extra_text: Optional[str] = None,
 ) -> List[str]:
     """
-    Replace prior uploads of the same document for this owner.
-    Match by normalized filename stem and/or exact content hash.
-    Deletes Cloudinary/S3 + Mongo (and any legacy vault path).
+    Replace prior uploads of the same topic for this owner.
+    Match by filename stem, Jeep-insurance-style kind+vehicle, or exact bytes.
+    Deletes S3/Cloudinary + Mongo.
     """
-    topic = normalize_document_topic(original_filename)
-    hash_key = str(content_hash or "").strip()
-    if not topic and not hash_key:
-        return []
-
-    section_key = str(section).strip() if section is not None else ""
-    replaced: List[str] = []
-
-    cursor = ai_documents_collection.find(
-        {"user_id": user_id},
-        {
-            "_id": 1,
-            "path": 1,
-            "public_id": 1,
-            "resource_type": 1,
-            "original_filename": 1,
-            "section": 1,
-            "routed_section": 1,
-            "content_hash": 1,
-            "s3_key": 1,
-            "storage": 1,
-        },
+    incoming = fingerprint_from_parts(
+        filename=original_filename,
+        summary=str((classification or {}).get("document_summary") or ""),
+        section_key=str(
+            (classification or {}).get("best_section_key") or section or ""
+        ),
+        extra_text=extra_text,
+        fields=extractions,
     )
-
-    async for doc in cursor:
-        same_name = bool(topic) and (
-            normalize_document_topic(doc.get("original_filename")) == topic
-        )
-        same_hash = bool(hash_key) and str(doc.get("content_hash") or "") == hash_key
-        if not same_name and not same_hash:
-            continue
-
-        if section_key:
-            doc_section = str(
-                doc.get("section") or doc.get("routed_section") or ""
-            ).strip()
-            # Keep other sections' copies; replace overview/unscoped + same section.
-            if doc_section and doc_section not in (section_key, "overview"):
-                continue
-
-        file_id = str(doc.get("_id") or "")
-        if not file_id:
-            continue
-
-        destroy_ai_document_assets(doc)
-        await ai_documents_collection.delete_one({"_id": doc["_id"]})
-        replaced.append(file_id)
-
-    return replaced
+    return await delete_matching_topic_documents(
+        user_id=user_id,
+        incoming=incoming,
+        keep_file_id=keep_file_id,
+        section=section,
+        content_hash=content_hash,
+    )
 
 
 async def cleanup_expired_ai_documents():
@@ -492,6 +467,10 @@ async def upload_ai_document(
         }
         if section_key:
             doc["section"] = section_key
+        doc["topic_fingerprint"] = fingerprint_from_parts(
+            filename=original_filename,
+            section_key=section_key or None,
+        )
 
         if prior:
             for key in (

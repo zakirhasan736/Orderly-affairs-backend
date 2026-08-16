@@ -36,6 +36,7 @@ from app.ai.field_catalog import (
 )
 from app.ai.llm_generate import (
     LLMServiceUnavailableError,
+    USER_SAFE_FAIL_MESSAGE,
     is_quota_exhausted_error,
 )
 from app.ai.ai_auth import get_current_owner, get_user_id
@@ -54,6 +55,10 @@ from app.database import ai_documents_collection
 from app.ai.ai_document_storage import (
     destroy_ai_document_assets,
     materialize_ai_document_file,
+)
+from app.ai.document_topic import (
+    delete_matching_topic_documents,
+    fingerprint_from_mongo_doc,
 )
 from app.ai.ai_extract_crypto import read_extracted_text
 
@@ -120,6 +125,34 @@ def _document_text_hint(file_path: str | None, mime_type: str | None, doc: dict 
         return str(meta.get("text") or "")[:20000]
     except Exception:
         return ""
+
+
+async def _replace_same_topic_uploads(
+    *,
+    user_id: str,
+    doc: dict,
+    keep_file_id: str,
+    classification: dict | None = None,
+    extractions: dict | None = None,
+    extra_text: str | None = None,
+) -> list[str]:
+    incoming = fingerprint_from_mongo_doc(
+        {**doc, "_id": keep_file_id},
+        classification=classification,
+        extractions=extractions,
+        extra_text=extra_text,
+    )
+    replaced = await delete_matching_topic_documents(
+        user_id=user_id,
+        incoming=incoming,
+        keep_file_id=keep_file_id,
+        content_hash=str(doc.get("content_hash") or ""),
+    )
+    await ai_documents_collection.update_one(
+        {"_id": keep_file_id, "user_id": user_id},
+        {"$set": {"topic_fingerprint": incoming}},
+    )
+    return replaced
 
 
 class AutofillSectionRequest(BaseModel):
@@ -707,6 +740,18 @@ async def _finalize_autofill_success(
         {"_id": file_id, "user_id": user_id},
         {"$set": update_fields},
     )
+    replaced_file_ids = await _replace_same_topic_uploads(
+        user_id=user_id,
+        doc=source_doc,
+        keep_file_id=file_id,
+        classification=classification if isinstance(classification, dict) else None,
+        extractions=cached_extractions,
+        extra_text=str(
+            extract_meta.get("document_text")
+            or read_extracted_text(source_doc)
+            or ""
+        ),
+    )
 
     # Day-to-day skill growth: remember successful OCR→JSON fills for own model.
     if not from_cache:
@@ -843,6 +888,8 @@ async def _finalize_autofill_success(
         "read_source": read_source,
         "extract_method": extract_meta.get("method"),
         "extract_meta": extract_meta,
+        "replaced_file_ids": replaced_file_ids,
+        "replaced": bool(replaced_file_ids),
     }
 
 
@@ -1047,6 +1094,13 @@ async def autofill_section(
                 )
             )
             keep_document = True
+            replaced_file_ids = await _replace_same_topic_uploads(
+                user_id=user_id,
+                doc=doc,
+                keep_file_id=payload.file_id,
+                classification=classification,
+                extra_text=_document_text_hint(file_path, mime_type, doc),
+            )
             return {
                 "success": True,
                 "classified_only": True,
@@ -1065,6 +1119,8 @@ async def autofill_section(
                 "file_id": payload.file_id,
                 "mime_type": mime_type,
                 "file_kept": True,
+                "replaced_file_ids": replaced_file_ids,
+                "replaced": bool(replaced_file_ids),
             }
 
         classification = await classify_document_for_section(
@@ -1148,6 +1204,13 @@ async def autofill_section(
             )
 
             keep_document = True
+            replaced_file_ids = await _replace_same_topic_uploads(
+                user_id=user_id,
+                doc=doc,
+                keep_file_id=payload.file_id,
+                classification=classification,
+                extra_text=doc_text_hint,
+            )
             _schedule_classify_skill(
                 user_id=user_id,
                 requested_section=payload.section,
@@ -1171,6 +1234,8 @@ async def autofill_section(
                 "file_id": payload.file_id,
                 "mime_type": mime_type,
                 "file_kept": True,
+                "replaced_file_ids": replaced_file_ids,
+                "replaced": bool(replaced_file_ids),
             }
 
         # Block only when the document has no data for the requested section.
@@ -1339,7 +1404,7 @@ async def autofill_section(
             status_code=503,
             detail={
                 "code": "ai_service_unavailable",
-                "message": str(error),
+                "message": USER_SAFE_FAIL_MESSAGE,
             },
         ) from error
 
@@ -1354,7 +1419,7 @@ async def autofill_section(
                 status_code=503,
                 detail={
                     "code": "ai_service_unavailable",
-                    "message": "Our AI is finishing other documents right now. Please wait about a minute, then try again. Your upload is saved — nothing is wrong with your file.",
+                    "message": USER_SAFE_FAIL_MESSAGE,
                 },
             ) from error
 

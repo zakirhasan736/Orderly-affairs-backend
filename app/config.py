@@ -153,12 +153,31 @@ class Settings(BaseSettings):
     VAULT_USER_QUOTA_MB: float = 5120.0  # 5 GB
     # Max size of a single AI upload.
     AI_UPLOAD_MAX_MB: float = 15.0
-    # Document AI: OCR first, GPT-5.6 Sol maps fields, GPT-5.6 Terra reads bad pages.
+    # Document AI: OCR first, Sol maps fields, Terra reads bad pages, GPT-4o fallback.
+    DOCUMENT_AI_PIPELINE_VERSION: str = "multi_model"
+    DOCUMENT_SEMANTIC_MODEL: str = "gpt-5.6-sol"
     DOCUMENT_REASONING_MODEL: str = "gpt-5.6-sol"
+    DOCUMENT_VISION_MODEL: str = "gpt-5.6-terra"
     DOCUMENT_VISION_FALLBACK_MODEL: str = "gpt-5.6-terra"
+    DOCUMENT_SIMPLE_EXTRACTION_MODEL: str = "gpt-5.6-luna"
+    DOCUMENT_LEGACY_MODEL: str = "gpt-4o"
     OPENAI_MODEL: str | None = None
     OPENAI_MODEL_SOL: str | None = None
     OPENAI_MODEL_TERRA: str | None = None
+    OPENAI_MODEL_LUNA: str | None = None
+    OPENAI_MODEL_GPT4O: str | None = None
+    ENABLE_SOL: bool = True
+    ENABLE_TERRA: bool = True
+    ENABLE_LUNA: bool = True
+    ENABLE_GPT4O: bool = True
+    ENABLE_LUNA_SIMPLE_DOCUMENT_ROUTING: bool = False
+    SOL_MAX_CONCURRENCY: int = 4
+    TERRA_MAX_CONCURRENCY: int = 2
+    LUNA_MAX_CONCURRENCY: int = 4
+    GPT4O_MAX_CONCURRENCY: int = 4
+    AI_MAX_RETRIES: int = 3
+    AI_SOL_TIMEOUT_SECONDS: float = 180.0
+    AI_VISION_TIMEOUT_SECONDS: float = 180.0
     AI_PREFER_LOCAL_TEXT_EXTRACT: bool = True
     AI_ALLOW_VISION_FALLBACK: bool = True
     AI_OCR_GOOD_MIN_CONFIDENCE: float = 0.58
