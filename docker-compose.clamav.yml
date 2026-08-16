@@ -1,0 +1,28 @@
+# Optional signature scanner for vault / AI document uploads.
+# Cloudflare Turnstile/WAF does not scan file contents — this does.
+#
+# Start:
+#   docker compose -f docker-compose.clamav.yml up -d
+# Then in .env:
+#   CLAMD_HOST=127.0.0.1
+#   CLAMD_REQUIRED=true
+# Restart the API. First boot can take a few minutes while virus defs download.
+
+services:
+  clamav:
+    image: clamav/clamav:stable
+    container_name: orderly-clamav
+    ports:
+      - "127.0.0.1:3310:3310"
+    volumes:
+      - clamav-db:/var/lib/clamav
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
+volumes:
+  clamav-db:

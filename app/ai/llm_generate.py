@@ -1,5 +1,5 @@
 # app/ai/llm_generate.py
-"""Orderly fill brain — OpenAI gpt-4o-mini (or future own model). No Gemini."""
+"""Orderly fill brain — GPT-5.6 Sol (text) + Terra (vision fallback)."""
 
 from __future__ import annotations
 
@@ -7,21 +7,34 @@ import json
 import logging
 import os
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import requests
 
 from app.ai.llm_context import get_llm_settings
+from app.ai.llm_models import (
+    DEFAULT_OPENAI_MODEL,
+    DEFAULT_SOL_MODEL,
+    DEFAULT_TERRA_MODEL,
+    model_rate_hint,
+    reasoning_model,
+    uses_max_completion_tokens,
+    vision_fallback_model,
+)
+
+# Re-exported for llm_providers / older imports.
+assert DEFAULT_OPENAI_MODEL and DEFAULT_TERRA_MODEL
 
 logger = logging.getLogger(__name__)
 
 PROVIDERS = ("openai", "own")
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OWN_MODEL = "orderly-fill-v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 
+LLMRole = Literal["sol", "terra"]
+
 _RATE_HINTS: dict[str, tuple[float, float]] = {
-    "openai": (0.15, 0.60),
+    "openai": (5.0, 30.0),
     "own": (0.0, 0.0),
 }
 
@@ -47,14 +60,16 @@ def active_brain_info() -> dict[str, Any]:
         "provider": provider,
         "model": model,
         "configured": configured,
+        "sol_model": reasoning_model() if provider == "openai" else model,
+        "terra_model": vision_fallback_model() if provider == "openai" else model,
         "mode": (
-            "openai_gpt4o_mini"
+            "openai_gpt56_sol_terra"
             if provider == "openai"
             else "own_model_openai_compatible"
         ),
         "notes": (
-            "Local OCR/PDF text → gpt-4o-mini JSON fill. "
-            "Weak OCR on images/PDF falls back to GPT vision. "
+            "Local OCR/PDF text → GPT-5.6 Sol JSON fill. "
+            "Weak OCR on images/PDF is read by GPT-5.6 Terra, then Sol maps fields. "
             "Successful fills are stored as Orderly skill training JSON."
         ),
     }
@@ -85,8 +100,8 @@ def resolve_provider_and_model(
     model = (
         (explicit_model or "").strip()
         or str(ctx.get("model") or "").strip()
-        or (os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL).strip()
-        or DEFAULT_OPENAI_MODEL
+        or reasoning_model()
+        or DEFAULT_SOL_MODEL
     )
     return "openai", model
 
@@ -119,8 +134,12 @@ def estimate_llm_usd(
     provider: str,
     prompt_tokens: int,
     candidates_tokens: int,
+    model: str | None = None,
 ) -> float:
-    in_rate, out_rate = _RATE_HINTS.get(provider, (0.15, 0.60))
+    if model:
+        in_rate, out_rate = model_rate_hint(model)
+    else:
+        in_rate, out_rate = _RATE_HINTS.get(provider, (5.0, 30.0))
     return (max(0, prompt_tokens) / 1_000_000.0) * in_rate + (
         max(0, candidates_tokens) / 1_000_000.0
     ) * out_rate
@@ -144,6 +163,7 @@ def log_llm_call_usage(
         provider=provider,
         prompt_tokens=prompt,
         candidates_tokens=candidates + thoughts,
+        model=model,
     )
     parts = [
         f"LLM COST op={operation}",
@@ -244,22 +264,33 @@ def contents_to_text_prompt(contents: list[Any]) -> str:
     return joined
 
 
-def build_system_prompt(*, vision: bool = False) -> str:
-    base = (
-        "You are the Orderly Affairs document fill brain. "
-        "Map values into the exact Orderly section field keys. "
-        "Prefer dedicated fields over notes. "
-        "Do not invent facts that are not in the document. "
-        "Do not return passwords, full SSN, or full card numbers. "
-        "Reply with valid JSON only."
-    )
-    if vision:
-        return (
-            base
-            + " Read the attached document image(s) carefully, including small print. "
-            "If OCR text is also provided, treat the image as the source of truth."
-        )
-    return base + " Read ONLY the provided document text."
+SOL_SYSTEM_PROMPT = (
+    "You are GPT-5.6 Sol, the Orderly Affairs document intelligence engine. "
+    "You receive prepared document TEXT (from OCR or a vision reader), never raw pixels. "
+    "Understand the document as a professional would: topic, section, labels, and values. "
+    "Match by meaning, not exact wording. Misspelled labels (Polcy Numbor) still map to the "
+    "correct schema field, but VALUES must stay evidence-based — never invent or guess. "
+    "If a value is not clearly supported, return null. "
+    "Do not return passwords, full SSN, or full card numbers. "
+    "Reply with valid JSON only using the exact Orderly field keys."
+)
+
+TERRA_SYSTEM_PROMPT = (
+    "You are GPT-5.6 Terra, a faithful visual document reader. "
+    "Your ONLY job is to reconstruct clean text from the attached page image(s). "
+    "Do not classify the document. Do not pick application sections. "
+    "Do not map database fields. Do not auto-fill. Do not invent missing information. "
+    "Preserve headings, labels, values, line breaks, tables, page markers, and checkbox states. "
+    "If a character is visually ambiguous (O/0, I/1, S/5), keep it and mark uncertainty "
+    "inline like [O/0]. Return JSON only: "
+    '{"text":"...","uncertain_spans":[],"notes":""}.'
+)
+
+
+def build_system_prompt(*, vision: bool = False, role: LLMRole = "sol") -> str:
+    if role == "terra" or vision:
+        return TERRA_SYSTEM_PROMPT
+    return SOL_SYSTEM_PROMPT + " Read ONLY the provided document text."
 
 
 def generate_llm_content(
@@ -273,6 +304,7 @@ def generate_llm_content(
     operation: str = "generate",
     llm_input: str = "text",
     file_name: str | None = None,
+    role: LLMRole = "sol",
     # Legacy kwarg names from Gemini era
     gemini_input: str | None = None,
 ):
@@ -281,14 +313,21 @@ def generate_llm_content(
     if gemini_input is not None:
         llm_input = gemini_input
 
-    provider, resolved_model = resolve_provider_and_model(explicit_model=model)
-
     user_content = contents_to_openai_user_content(contents)
     has_images = not isinstance(user_content, str)
     if llm_input == "file_bytes":
         llm_input = "vision"
     if has_images:
         llm_input = "vision"
+        role = "terra"
+
+    if not model:
+        if role == "terra":
+            model = vision_fallback_model()
+        else:
+            model = reasoning_model()
+
+    provider, resolved_model = resolve_provider_and_model(explicit_model=model)
 
     prompt_for_log = (
         user_content
@@ -315,18 +354,21 @@ def generate_llm_content(
             ]
             prompt_for_log = f"{prompt_for_log}{schema_note}"
 
-    system_prompt = build_system_prompt(vision=has_images)
+    system_prompt = build_system_prompt(vision=has_images, role=role)
     url = f"{_base_url(provider)}/chat/completions"
     body: dict[str, Any] = {
         "model": resolved_model,
-        "temperature": temperature,
-        "max_tokens": max_output_tokens,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
         "response_format": {"type": "json_object"},
     }
+    if uses_max_completion_tokens(resolved_model):
+        body["max_completion_tokens"] = max_output_tokens
+    else:
+        body["max_tokens"] = max_output_tokens
+        body["temperature"] = temperature
 
     try:
         resp = requests.post(
@@ -340,7 +382,7 @@ def generate_llm_content(
 
     if resp.status_code >= 400:
         detail = resp.text[:500]
-        if resp.status_code in {429, 500, 503, 504}:
+        if resp.status_code in {429, 503, 504}:
             raise LLMServiceUnavailableError(
                 "Our AI is finishing other documents right now. Please wait about a minute, then try again. Your upload is saved — nothing is wrong with your file.",
                 status_code=resp.status_code,
@@ -368,6 +410,7 @@ def generate_llm_content(
         llm_input=llm_input,
         file_name=file_name,
         provider=provider,
+        extra=f"role={role}",
     )
 
     response = SimpleNamespace(
@@ -387,6 +430,7 @@ def generate_llm_content(
         "provider": provider,
         "llm_input": llm_input,
         "operation": operation,
+        "role": role,
         "estimated_usd": usd,
         "system_prompt": system_prompt,
         "user_prompt": (prompt_for_log or "")[:50000],

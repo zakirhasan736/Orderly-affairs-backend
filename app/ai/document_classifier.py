@@ -209,6 +209,35 @@ _HOME_DOC_RE = re.compile(
     r")\b",
     re.I,
 )
+_BANK_STMT_RE = re.compile(
+    r"\b("
+    r"bank\s*statement|checking\s*(?:account|statement)|savings\s*(?:account|statement)|"
+    r"monthly\s*bank\s*statement|"
+    r"routing\s*(?:number|#|no)|aba\s*(?:routing|number)|"
+    r"beginning\s*balance|ending\s*balance|"
+    r"deposits?\s*(?:and|&)\s*withdrawals?|"
+    r"direct\s*deposit|voided\s*check|credit\s*union|national\s*bank"
+    r")\b",
+    re.I,
+)
+_PROPERTY_PRIMARY_DOC_RE = re.compile(
+    r"\b("
+    r"mortgage|deed|homeowner|homeowners|home\s*owner|home\s*insurance|"
+    r"property\s*tax|title\s*(?:report|policy)|hoa\s*(?:dues|statement|invoice)|"
+    r"closing\s*disclosure|warranty\s*deed|quitclaim|"
+    r"utility\s*bill|electric\s*bill|gas\s*bill|water\s*bill"
+    r")\b",
+    re.I,
+)
+_BANK_MISROUTE_SECTIONS = frozenset(
+    {
+        "main_residence",
+        "vital_information",
+        "vehicles",
+        "family_treasured_connections",
+        "assets_valuables",
+    }
+)
 _VITAL_ID_DOC_RE = re.compile(
     r"\b("
     r"passport|birth\s*certificate|social\s*security\s*card|ssn\s*card|"
@@ -465,10 +494,95 @@ def harden_vehicle_insurance_routing(
         if isinstance(item, dict) and item.get("section_key") not in (None, best)
     ]
 
-    return correct_identity_document_summary(
-        classification,
+    return harden_bank_statement_routing(
+        correct_identity_document_summary(
+            classification,
+            document_text=document_text,
+        ),
         document_text=document_text,
     )
+
+
+def harden_bank_statement_routing(
+    classification: dict,
+    document_text: str | None = None,
+) -> dict:
+    """
+    Bank / checking / savings statements belong in Bank Accounts.
+
+    A mailing or home address printed on the statement is customer contact
+    info — it is NOT a Main Residence document (deed, mortgage, tax bill).
+    """
+    if not isinstance(classification, dict):
+        return classification
+
+    blob = f"{document_text or ''} {_classification_text_blob(classification)}"
+    looks_bank = bool(_BANK_STMT_RE.search(blob))
+    looks_property = bool(_PROPERTY_PRIMARY_DOC_RE.search(blob))
+    if not looks_bank:
+        return classification
+
+    additional = [
+        item
+        for item in (classification.get("additional_sections") or [])
+        if isinstance(item, dict) and item.get("section_key") in SECTION_META_BY_KEY
+    ]
+    best = classification.get("best_section_key")
+
+    if looks_property:
+        if best == "main_residence":
+            _ensure_additional_section(
+                classification,
+                section_key="banking_financial_accounts",
+                data_summary="Bank/account details also appear on this property document.",
+            )
+        elif best == "banking_financial_accounts":
+            _ensure_additional_section(
+                classification,
+                section_key="main_residence",
+                data_summary="Property/mortgage details also appear on this statement.",
+                confidence="medium",
+            )
+        return classification
+
+    if best in _BANK_MISROUTE_SECTIONS or not best:
+        classification["best_section_key"] = "banking_financial_accounts"
+        classification["confidence"] = classification.get("confidence") or "high"
+        if best == "main_residence":
+            classification["matches_requested_section"] = False
+        additional = [
+            item
+            for item in additional
+            if item.get("section_key") != "main_residence"
+        ]
+        classification["additional_sections"] = additional
+
+    classification["additional_sections"] = [
+        item
+        for item in (classification.get("additional_sections") or [])
+        if not (
+            isinstance(item, dict) and item.get("section_key") == "main_residence"
+        )
+    ]
+
+    best = classification.get("best_section_key")
+    if best != "banking_financial_accounts":
+        _ensure_additional_section(
+            classification,
+            section_key="banking_financial_accounts",
+            data_summary="Bank statement / account details found in this document.",
+        )
+    else:
+        classification["additional_sections"] = [
+            item
+            for item in (classification.get("additional_sections") or [])
+            if not (
+                isinstance(item, dict)
+                and item.get("section_key") == "banking_financial_accounts"
+            )
+        ]
+
+    return classification
 
 
 def enforce_upload_section_first(
@@ -584,11 +698,17 @@ CRITICAL SECTION ROUTING (do not violate):
    - NEVER use vital_information just because a person's name appears on the policy
 3) main_residence is ONLY for property/home documents (deed, mortgage, homeowners/renters policy, property tax, utility bill for the home).
    - A vehicle / auto insurance document is NOT main_residence even if it shows a garaging address.
+   - A bank / checking / savings statement is NOT main_residence even if it prints the customer's home or mailing address.
 4) vital_information is ONLY for personal identity / vital records (passport, driver's license front OR back, birth certificate, SSN card metadata, personal contact sheet).
    - The BACK of a driver's license / state ID (magnetic stripe, 1D/2D barcodes, CLASS/REST/END, vertical DOB) is still a driver's license — NOT a "roadside assistance card".
    - Many U.S. licenses print a roadside-assistance phone number (e.g. "TEXAS ROADSIDE ASSISTANCE: 1-800-…") on the back. That line is printed help text on the ID, not the document type.
    - A name printed on an insurance card does NOT make the document vital_information.
 5) Homeowners/renters insurance: best_section_key="insurance_policies" with additional_sections including main_residence (and NOT vehicles unless a vehicle is also listed).
+6) Bank statements, checking/savings statements, voided checks, routing/account sheets:
+   - best_section_key MUST be "banking_financial_accounts"
+   - NEVER use main_residence just because a mailing/home address appears on the statement
+   - That address is customer contact info, not a property document
+   - Mortgage statements / deeds / property tax bills ARE main_residence (optionally also banking_financial_accounts)
 
 Rules:
 - The user chose to upload in section {requested_section_key}. Set matches_requested_section=true ONLY when this document clearly contains fillable data for that section.
@@ -605,6 +725,7 @@ Rules:
   - Homeowners policy: insurance_policies + main_residence (NOT vehicles)
   - Pay stub: employment_business + banking_financial_accounts
   - Mortgage statement: main_residence + banking_financial_accounts
+  - Bank / checking / savings statement: banking_financial_accounts (NOT main_residence, even if a home mailing address appears)
   - Health insurance card: health_information + insurance_policies
   - Brokerage statement: investment_accounts + banking_financial_accounts
   - ID / passport / birth certificate: vital_information
@@ -658,6 +779,7 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
         operation="classify",
         llm_input=llm_input,
         file_name=path.name,
+        role="sol",
     )
 
     raw_text = getattr(response, "text", None) or ""
@@ -682,8 +804,11 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
         # Prefer keyword hints from OCR text over pinning to the probe section.
         looks_insurance = bool(_INSURANCE_DOC_RE.search(document_text))
         looks_auto = bool(_AUTO_DOC_RE.search(document_text))
+        looks_bank = bool(_BANK_STMT_RE.search(document_text))
         if looks_auto or looks_insurance:
             fallback_best = "insurance_policies"
+        elif looks_bank and not _PROPERTY_PRIMARY_DOC_RE.search(document_text):
+            fallback_best = "banking_financial_accounts"
         elif requested_section_key == "vital_information":
             fallback_best = "vital_information"
         else:
@@ -725,11 +850,45 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
     ):
         parsed["matches_requested_section"] = True
 
-    return enforce_upload_section_first(
+    enforced = enforce_upload_section_first(
         parsed,
         requested_section_key,
         document_text=document_text,
     )
+    try:
+        from app.ai.llm_context import get_llm_settings, set_llm_settings
+
+        usage = getattr(response, "_orderly_usage", None)
+        usage_compact = {}
+        if isinstance(usage, dict):
+            usage_compact = {
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "candidates_tokens": usage.get("candidates_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+                "estimated_usd": usage.get("estimated_usd"),
+                "model": usage.get("model"),
+                "provider": usage.get("provider"),
+            }
+        ctx = get_llm_settings()
+        ctx["last_classify_meta"] = {
+            "method": _extract_meta.get("method"),
+            "quality": _extract_meta.get("quality"),
+            "quality_score": _extract_meta.get("quality_score"),
+            "needs_vision": bool(_extract_meta.get("needs_vision")),
+            "terra_invoked": bool(_extract_meta.get("terra_invoked")),
+            "terra_pages": _extract_meta.get("terra_pages") or [],
+            "pipeline_path": _extract_meta.get("pipeline_path") or "ocr_sol",
+            "source_method": _extract_meta.get("source_method") or "ocr",
+            "read_source": _extract_meta.get("read_source") or "system",
+            "document_text": document_text[:50000],
+            "teacher_model": usage_compact.get("model"),
+            "teacher_provider": usage_compact.get("provider"),
+            "usage": usage_compact,
+        }
+        set_llm_settings(ctx)
+    except Exception:
+        pass
+    return enforced
 
 
 def build_additional_sections_payload(

@@ -8,6 +8,8 @@ from app.config import settings
 from app.security.section_file_cleanup import delete_owned_file, owner_upload_prefix
 from app.security.cloudinary_service import signed_delivery_url
 from app.security.file_validation import validate_upload
+from app.security.document_guard import DocumentGuardError, guard_upload
+from app.security.malware_scan import MalwareScanError
 from app.database import users_collection
 from app.auth.portal_roles import can_upload_documents
 from app.auth.access_types import is_family_collaborator, resolve_access_type
@@ -124,6 +126,19 @@ async def upload_asset(
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
+    try:
+        guarded = guard_upload(
+            contents,
+            mime_type=file.content_type,
+            filename=file.filename,
+        )
+    except (MalwareScanError, DocumentGuardError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    contents = guarded.payload
+    mime_type = guarded.mime_type or file.content_type or "application/octet-stream"
+    scan = guarded.scan
+
     if not settings.section_s3_active:
         raise HTTPException(
             status_code=503,
@@ -145,7 +160,7 @@ async def upload_asset(
         uploaded = upload_section_bytes_to_s3(
             contents=contents,
             owner_email=owner_email,
-            mime_type=file.content_type or "application/octet-stream",
+            mime_type=mime_type,
             original_filename=file.filename,
         )
     except Exception as exc:
@@ -168,7 +183,9 @@ async def upload_asset(
         "mime_type": uploaded.get("mime_type"),
         "access_mode": "private",
         "url_expires_in": SIGNED_URL_TTL_SECONDS,
-        "scan_status": "clean",
+        "scan_status": scan.status,
+        "scan_engine": scan.engine,
+        "scan_sanitized": guarded.sanitized,
         **stamp,
     }
 

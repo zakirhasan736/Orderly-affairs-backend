@@ -60,10 +60,10 @@ async def get_settings(current_user=Depends(get_current_owner)):
         "skill": stats,
         "skill_schema_version": SKILL_SCHEMA_VERSION,
         "how_learning_works": (
-            "Every successful fill stores OCR text, field mapping decisions, "
-            "ideology/rules, teacher model, and chat train messages. "
-            "After enough examples (~1 year of usage), export this corpus to "
-            "train Orderly's own model to do the same job as gpt-4o-mini."
+            "Every successful document run stores three skills: OCR routing, "
+            "section classification, and field fill (catalog keys, subsections, "
+            "confidence, and chat train messages). Export this corpus later to "
+            "train Orderly's own model to do the same job as GPT-5.6 Sol."
         ),
         "future_own_model": {
             "switch": "Set AI_PROVIDER=own, OWN_MODEL_BASE_URL, OWN_MODEL_NAME",
@@ -108,12 +108,14 @@ async def skill_export(
     current_user=Depends(get_current_owner),
     limit: int = Query(default=500, ge=1, le=5000),
     section_key: str | None = Query(default=None),
+    task: str | None = Query(default=None),
 ):
     """Export skill examples for future Orderly model fine-tuning / eval."""
     user_id = get_user_id(current_user)
     rows = await export_skill_examples_for_training(
         user_id=user_id,
         section_key=section_key,
+        task=task,
         limit=limit,
     )
     return {
@@ -122,6 +124,7 @@ async def skill_export(
         "examples": rows,
         "training_hint": (
             "Fine-tune an OpenAI-compatible chat model on train.messages "
-            "(system/user/assistant). Then set AI_PROVIDER=own to serve it."
+            "grouped by task: document_ocr_prepare, section_classify, "
+            "section_field_fill. Then set AI_PROVIDER=own to serve it."
         ),
     }

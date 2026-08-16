@@ -195,6 +195,15 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
     require_nok_principal(nextkin)
 
     owner_id = nextkin["owner_id"]
+    from app.auth.vault_privacy import cache_owner_privacy, get_owner_vault_privacy
+
+    owner_doc = None
+    try:
+        owner_doc = await users_collection.find_one({"_id": ObjectId(str(owner_id))})
+    except Exception:
+        owner_doc = None
+    privacy = get_owner_vault_privacy(owner_doc)
+    cache_owner_privacy(str(owner_id), privacy)
 
     # -------------------------
     # 2️⃣ Load Kit Sections (ABAC — Full Kit still hides management 2/3/4)
@@ -210,7 +219,14 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
         if not nok_has_section_access(nextkin, section_id):
             continue
 
-        sections.append(present_kit_section(owner_id, section))
+        sections.append(
+            present_kit_section(
+                owner_id,
+                section,
+                viewer_role="nextkin",
+                privacy=privacy,
+            )
+        )
 
     # -------------------------
     # 3️⃣ Load NOK Letter

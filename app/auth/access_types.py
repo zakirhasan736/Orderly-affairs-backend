@@ -50,6 +50,32 @@ def is_nextkin_collaborator(user: dict | None) -> bool:
     return resolve_access_type(user) == ACCESS_TYPE_NEXTKIN
 
 
+LOGIN_PORTAL_NEXTKIN = "nextkin"
+LOGIN_PORTAL_FAMILY = "family"
+
+WRONG_PORTAL_USE_FAMILY = (
+    "This account signs in at the family collaborator page, not Next of Kin."
+)
+WRONG_PORTAL_USE_NEXTKIN = (
+    "This account signs in at the Next of Kin page, not family collaborator."
+)
+
+
+def require_collaborator_login_portal(user: dict | None, expected: str | None) -> None:
+    """Reject NOK credentials on the family gate and family credentials on NOK."""
+    portal = str(expected or "").strip().lower()
+    if not portal:
+        return
+    if portal not in (LOGIN_PORTAL_NEXTKIN, LOGIN_PORTAL_FAMILY):
+        raise HTTPException(status_code=400, detail="Invalid login portal")
+
+    actual = resolve_access_type(user)
+    if portal == LOGIN_PORTAL_FAMILY and actual != ACCESS_TYPE_FAMILY:
+        raise HTTPException(status_code=403, detail=WRONG_PORTAL_USE_NEXTKIN)
+    if portal == LOGIN_PORTAL_NEXTKIN and actual == ACCESS_TYPE_FAMILY:
+        raise HTTPException(status_code=403, detail=WRONG_PORTAL_USE_FAMILY)
+
+
 def validate_nok_authorized_sections(
     access_level: str | None,
     authorized_sections: list[str] | None,

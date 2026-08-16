@@ -55,12 +55,13 @@ Exact field placement (required):
 - policy_type = type/category of insurance policy (use the normalized list above). For auto/vehicle cards use "Vehicle". For medical/health insurance ID cards use "Health" (or "Medical/Dental" when the card is clearly dental-only).
 - policy_type_other = custom policy type when policy_type is Other.
 - policy_documents_life = notes/location/details for life insurance documents, beneficiary forms, statements, or policy packet (Life policies only).
-- policy_company = insurance company/carrier name exactly as shown (e.g. "State Farm", "MetLife", "UnitedHealthcare").
-- policy_number = policy number, insurance number, certificate number, or plan number when clearly shown. Copy digits/letters exactly; do not invent. Always fill this when a policy/insurance number appears — never leave it only in notes. Treat labels like "Policy #", "Insurance Number" as policy_number. For health cards, ALSO copy Member ID into member_id (and still set policy_number = Member ID when no separate policy number exists).
-- policy_expiry = policy end / expiration / "valid through" / end date of a policy period.
+- policy_company = insurance company/carrier name exactly as shown (e.g. "State Farm", "MetLife", "UnitedHealthcare"). Map labels such as Insurance Carrier, Insurer, Insurance Provider, Insurance Name.
+- policy_number = policy number, insurance number, certificate number, or plan number when clearly shown. Copy digits/letters exactly; do not invent. Always fill this when a policy/insurance number appears — never leave it only in notes. Treat labels like "Policy #", "Policy No", "Polcy Numbor", "Insurance Number" as policy_number. For health cards, ALSO copy Member ID into member_id (and still set policy_number = Member ID when no separate policy number exists).
+- policy_expiry = policy end / expiration / "valid through" / "coverage ends" / end date of a policy period.
   Examples: "Period: 01/01/2025 to 12/31/2025" → policy_expiry = "2025-12-31"
   "Valid from January 1, 2025 through December 31, 2025" → policy_expiry = "2025-12-31"
   Always take the END / TO date of a range, never the start. Prefer YYYY-MM-DD.
+  If the document also shows a separate Renewal Date, do not overwrite policy_expiry with it.
 - coverage_amount = death benefit, coverage limit, insured amount, benefit value, or liability limit (include currency if shown). Do NOT put deductibles here — use benefit_summary for health-card deductibles/OOP/coinsurance.
 - beneficiaries = beneficiary names, percentages, contingent beneficiaries, or beneficiary notes.
 - policy_contact = agent, broker, customer service, claims phone, email, address, or business card details.
@@ -72,7 +73,7 @@ Exact field placement (required):
   One line per distinct vehicle. Always include VIN when the declarations page or card shows it (look in vehicle schedule tables for VIN / Veh ID / Identification No.). Copy shared policy_company / policy_number only in their dedicated fields (not duplicated per vehicle line).
 
 Health / medical / dental insurance CARD fields (fill whenever shown — never dump these only into notes):
-- member_name = member / subscriber / insured name printed on the card (e.g. "Sebastian Shahvandi").
+- member_name = member / subscriber / named insured / policy holder name printed on the card (e.g. "Sebastian Shahvandi"). Do not put the agent or beneficiary here.
 - member_id = Member ID / Member # exactly as printed.
 - group_number = Group Number / Group # / GRP.
 - plan_name = plan product name (e.g. "UnitedHealthcare Choice Plus", "LEVEL FUNDED").

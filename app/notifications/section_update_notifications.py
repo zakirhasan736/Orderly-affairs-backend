@@ -3,6 +3,12 @@ from datetime import datetime, timedelta
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
+from app.auth.access_types import is_family_collaborator
+from app.auth.family_access import family_has_dashboard_area
+from app.auth.notification_prefs import (
+    get_owner_notification_prefs,
+    resolve_section_update_recipient_ids,
+)
 from app.config import nextkin_login_url, settings
 from app.database import db, users_collection
 from app.notifications.display_names import (
@@ -15,8 +21,8 @@ from app.notifications.email_layout import (
     render_simple_email,
 )
 
-# Sections that should NOT email immediate-access people when updated.
-SECTIONS_EXCLUDED_FROM_UPDATE_NOTIFICATIONS = frozenset({"4", "8", "9", "11", "17"})
+# Personal messages stay private. Every other section can notify people the owner picks.
+SECTIONS_EXCLUDED_FROM_UPDATE_NOTIFICATIONS = frozenset({"4"})
 
 SECTION_TITLES: dict[str, str] = {
     "1": "Vital Information & Key Contacts",
@@ -48,7 +54,39 @@ cooldown_collection = db["section_update_notification_cooldowns"]
 
 def _has_full_kit_access(nextkin: dict) -> bool:
     level = (nextkin.get("access_level") or "").strip().lower()
-    return level in {"full kit access", "full access", "full"}
+    return level in {
+        "full kit access",
+        "full access",
+        "full",
+        "full dashboard access",
+        "full dashboard",
+    }
+
+
+def _person_id(person: dict) -> str:
+    return str(person.get("_id") or person.get("id") or "")
+
+
+def is_eligible_update_recipient(person: dict) -> bool:
+    if person.get("access_revoked"):
+        return False
+    if not str(person.get("email") or "").strip():
+        return False
+    if is_family_collaborator(person):
+        return True
+    return bool(person.get("immediate_access"))
+
+
+def should_notify_person_for_section(person: dict, section_id: str) -> bool:
+    if section_id in SECTIONS_EXCLUDED_FROM_UPDATE_NOTIFICATIONS:
+        return False
+
+    if is_family_collaborator(person):
+        if person.get("access_revoked"):
+            return False
+        return family_has_dashboard_area(person, section_id)
+
+    return should_notify_nextkin_for_section(person, section_id)
 
 
 def _section_matches_grant(section_id: str, granted: str) -> bool:
@@ -110,9 +148,9 @@ async def _send_section_update_email(
         title=f"{section_title} updated",
         greeting_name=nk_name,
         paragraphs=[
-            f"<strong>{escape(owner_name)}</strong> has updated "
-            f"<strong>{escape(section_title)}</strong> in their Orderly Affairs Kit.",
-            "Because you have immediate access, you can sign in to review the latest "
+            f"<strong>{escape(owner_name)}</strong> updated "
+            f"<strong>{escape(section_title)}</strong> in their Orderly Affairs vault.",
+            "The owner asked us to let you know so you can review the latest "
             "information when you are ready.",
         ],
         details=[("Section", section_title)],
@@ -160,22 +198,28 @@ async def notify_immediate_access_on_section_update(
         return
 
     owner_key = str(owner["_id"])
+    prefs = get_owner_notification_prefs(owner)
+    selected_ids = resolve_section_update_recipient_ids(prefs, section_id)
+    selected_set = (
+        {str(item) for item in selected_ids} if isinstance(selected_ids, list) else None
+    )
 
     cursor = users_collection.find(
         {
             "owner_id": owner_key,
             "role": "nextkin",
-            "immediate_access": True,
         }
     )
 
-    async for nextkin in cursor:
-        if not should_notify_nextkin_for_section(nextkin, section_id):
+    async for person in cursor:
+        if not is_eligible_update_recipient(person):
+            continue
+        if selected_set is not None and _person_id(person) not in selected_set:
             continue
 
         try:
             await _send_section_update_email(
-                nextkin=nextkin,
+                nextkin=person,
                 owner=owner,
                 section_id=section_id,
             )
@@ -184,7 +228,7 @@ async def notify_immediate_access_on_section_update(
                 from app.notifications.email_layout import portal_url
 
                 await notify_web_push(
-                    nextkin,
+                    person,
                     title="Vault section updated",
                     body=f"A section in the shared kit was updated. Open to review.",
                     tag=f"section-update-{section_id}",
@@ -197,6 +241,6 @@ async def notify_immediate_access_on_section_update(
             print(
                 "⚠️ Section update notification failed:",
                 section_id,
-                nextkin.get("email"),
+                person.get("email"),
                 exc,
             )

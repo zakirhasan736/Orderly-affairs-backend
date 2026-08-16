@@ -39,6 +39,9 @@ def present_section_for_api(
     section_id: str,
     section_key: str,
     section: dict | None,
+    *,
+    viewer_role: str | None = None,
+    privacy: dict | None = None,
 ) -> dict[str, Any]:
     """API response: plaintext `data` (v2) or opaque `ciphertext` (v3)."""
     if not section or not section.get("encrypted_data"):
@@ -50,14 +53,32 @@ def present_section_for_api(
             "encryption_version": E2EE_VERSION,
             "ciphertext": section["encrypted_data"],
         }
+    data = decrypt_section_data(owner_id, section_id, section["encrypted_data"])
+    if str(viewer_role or "") in {"nextkin", "family"} and isinstance(data, dict):
+        try:
+            from app.auth.vault_privacy import (
+                cached_owner_privacy,
+                strip_hidden_fields_for_nok,
+            )
+
+            rules = privacy if privacy is not None else cached_owner_privacy(owner_id)
+            data = strip_hidden_fields_for_nok(data, rules, section_id)
+        except Exception:
+            pass
     return {
         "section_key": section_key or section.get("section_key"),
         "encryption_version": int(section.get("encryption_version") or LEGACY_VERSION),
-        "data": decrypt_section_data(owner_id, section_id, section["encrypted_data"]),
+        "data": data,
     }
 
 
-def present_kit_section(owner_id: str, section: dict) -> dict[str, Any]:
+def present_kit_section(
+    owner_id: str,
+    section: dict,
+    *,
+    viewer_role: str | None = None,
+    privacy: dict | None = None,
+) -> dict[str, Any]:
     section_id = str(section.get("section_id") or "")
     base = {
         "id": section_id,
@@ -79,6 +100,13 @@ def present_kit_section(owner_id: str, section: dict) -> dict[str, Any]:
         )
     except Exception:
         data = {}
+    if str(viewer_role or "") in {"nextkin", "family"} and isinstance(data, dict):
+        try:
+            from app.auth.vault_privacy import strip_hidden_fields_for_nok
+
+            data = strip_hidden_fields_for_nok(data, privacy or {"rules": []}, section_id)
+        except Exception:
+            pass
     return {
         **base,
         "encryption_version": int(section.get("encryption_version") or LEGACY_VERSION),

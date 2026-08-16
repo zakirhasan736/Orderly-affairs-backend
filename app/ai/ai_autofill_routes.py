@@ -47,7 +47,8 @@ from app.ai.skill_memory import (
     fetch_few_shot_examples,
     format_few_shot_prompt,
     learning_enabled,
-    record_successful_fill,
+    schedule_classification_skill,
+    schedule_successful_fill,
 )
 from app.database import ai_documents_collection
 from app.ai.ai_document_storage import (
@@ -83,6 +84,25 @@ AI_DOCUMENT_REUSABLE_STATUSES = (
     "classifying",
     "queued",
 )
+
+
+def _schedule_classify_skill(
+    *,
+    user_id: str,
+    requested_section: str,
+    file_id: str,
+    mime_type: str | None,
+    classification: dict,
+    document_text: str,
+) -> None:
+    schedule_classification_skill(
+        user_id=user_id,
+        requested_section_key=requested_section,
+        document_text=document_text,
+        classification=classification if isinstance(classification, dict) else None,
+        file_id=file_id,
+        mime_type=mime_type,
+    )
 
 
 def _document_text_hint(file_path: str | None, mime_type: str | None, doc: dict | None = None) -> str:
@@ -415,6 +435,25 @@ async def _cache_additional_sections(
                         )
                         full = mark_full_extraction(full) or full
                 cached_extractions[section_key] = full
+                meta = full.get("__extract_meta") if isinstance(full.get("__extract_meta"), dict) else {}
+                schedule_successful_fill(
+                    user_id=user_id,
+                    section_key=section_key,
+                    document_text=str(meta.get("document_text") or ""),
+                    patch=full.get("patch") if isinstance(full.get("patch"), dict) else None,
+                    confidence=full.get("confidence"),
+                    provider=meta.get("teacher_provider"),
+                    model=meta.get("teacher_model"),
+                    file_id=file_id,
+                    mime_type=mime_type,
+                    extract_meta=meta,
+                    field_catalog=meta.get("field_catalog"),
+                    system_prompt=meta.get("system_prompt"),
+                    usage=meta.get("usage"),
+                    result=full,
+                    record_ocr=False,
+                    record_classify=False,
+                )
         except Exception as error:
             logger.warning(
                 "Failed to pre-cache section %s: %s",
@@ -690,32 +729,33 @@ async def _finalize_autofill_success(
             should_learn = True
             few_shot_count = 0
         if should_learn:
-            asyncio.create_task(
-                record_successful_fill(
-                    user_id=user_id,
-                    section_key=payload.section,
-                    document_text=doc_text,
-                    patch=patch if isinstance(patch, dict) else None,
-                    confidence=(result or {}).get("confidence")
-                    if isinstance(result, dict)
-                    else None,
-                    provider=extract_meta.get("teacher_provider")
-                    or brain.get("provider"),
-                    model=extract_meta.get("teacher_model") or brain.get("model"),
-                    file_id=file_id,
-                    mime_type=source_doc.get("mime_type"),
-                    extract_meta=extract_meta,
-                    classification=classification
-                    if isinstance(classification, dict)
-                    else None,
-                    field_catalog=extract_meta.get("field_catalog")
-                    or payload.field_catalog,
-                    system_prompt=extract_meta.get("system_prompt"),
-                    user_prompt=extract_meta.get("user_prompt"),
-                    few_shot_count=few_shot_count,
-                    usage=extract_meta.get("usage"),
-                    result=result if isinstance(result, dict) else None,
-                )
+            schedule_successful_fill(
+                user_id=user_id,
+                section_key=payload.section,
+                document_text=doc_text,
+                patch=patch if isinstance(patch, dict) else None,
+                confidence=(result or {}).get("confidence")
+                if isinstance(result, dict)
+                else None,
+                provider=extract_meta.get("teacher_provider")
+                or brain.get("provider"),
+                model=extract_meta.get("teacher_model") or brain.get("model"),
+                file_id=file_id,
+                mime_type=source_doc.get("mime_type"),
+                extract_meta=extract_meta,
+                classification=classification
+                if isinstance(classification, dict)
+                else None,
+                field_catalog=extract_meta.get("field_catalog")
+                or payload.field_catalog,
+                system_prompt=extract_meta.get("system_prompt"),
+                user_prompt=extract_meta.get("user_prompt"),
+                few_shot_count=few_shot_count,
+                usage=extract_meta.get("usage"),
+                result=result if isinstance(result, dict) else None,
+                subsection=payload.subsection,
+                record_ocr=True,
+                record_classify=False,
             )
 
     section_previews = build_section_previews_payload(
@@ -1108,6 +1148,14 @@ async def autofill_section(
             )
 
             keep_document = True
+            _schedule_classify_skill(
+                user_id=user_id,
+                requested_section=payload.section,
+                file_id=payload.file_id,
+                mime_type=mime_type,
+                classification=classification,
+                document_text=doc_text_hint,
+            )
             return {
                 "success": True,
                 "classified_only": True,
@@ -1180,6 +1228,14 @@ async def autofill_section(
 
             keep_document = True
 
+            _schedule_classify_skill(
+                user_id=user_id,
+                requested_section=payload.section,
+                file_id=payload.file_id,
+                mime_type=mime_type,
+                classification=classification,
+                document_text=doc_text_hint,
+            )
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -1200,6 +1256,14 @@ async def autofill_section(
                 },
             )
 
+        _schedule_classify_skill(
+            user_id=user_id,
+            requested_section=payload.section,
+            file_id=payload.file_id,
+            mime_type=mime_type,
+            classification=classification,
+            document_text=doc_text_hint,
+        )
         result = await extractor(
             document_url=f"local_file:{file_path}",
             subsection=payload.subsection,

@@ -103,7 +103,7 @@ async def get_section7(request: Request,
     if not section:
         return {"data": {}}
 
-    return present_section_for_api(owner_id, SECTION_ID, SECTION_KEY, section)
+    return present_section_for_api(owner_id, SECTION_ID, SECTION_KEY, section, viewer_role=decoded.get("role"))
 
 
 # ---------------- DELETE ----------------

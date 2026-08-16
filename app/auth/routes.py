@@ -1255,6 +1255,13 @@ async def nextkin_login(request: Request, response: Response):
     if not user or not verify_password(master_password, stored_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    from app.auth.access_types import (
+        require_collaborator_login_portal,
+        resolve_access_type,
+    )
+
+    require_collaborator_login_portal(user, data.get("portal"))
+
     await reset_auth_rate_limit(request, key=f"nok-login:{email}")
 
     if user.get("access_revoked") or not user.get("immediate_access", False):
@@ -1324,7 +1331,8 @@ async def nextkin_login(request: Request, response: Response):
 
         mfa_response["mfa_challenge_token"] = create_mfa_challenge_token(email)
         mfa_response["step_up_token"] = create_step_up_token(email)
-        mfa_response["portal"] = "nextkin"
+        mfa_response["portal"] = resolve_access_type(user)
+        mfa_response["access_type"] = resolve_access_type(user)
         if force_full_kit_mfa:
             mfa_response["full_kit_mfa_required"] = True
         elif force_email_mfa:
@@ -2961,11 +2969,24 @@ async def get_session(request: Request):
     return candidates[0]
 
 
+class SpecialDayItem(BaseModel):
+    kind: str = "custom"
+    month: int
+    day: int
+    label: str | None = None
+    enabled: bool = True
+    source: str | None = None
+
+
 class NotificationPreferencesPatch(BaseModel):
     in_app_enabled: bool | None = None
     email_reminders_enabled: bool | None = None
     push_state: str | None = None
     push_for_collaborators: bool | None = None
+    section_update_recipient_ids: list[str] | None = None
+    section_update_recipients_by_section: dict[str, list[str] | None] | None = None
+    special_days_enabled: bool | None = None
+    special_days: list[SpecialDayItem] | None = None
 
 
 @router.get("/notification-preferences")
@@ -3028,6 +3049,122 @@ async def patch_notification_preferences(
             {**owner, "notification_prefs": next_prefs}
         ),
     }
+
+
+class VaultPrivacyBody(BaseModel):
+    rules: list[dict] | None = None
+
+
+@router.get("/vault-privacy")
+async def get_vault_privacy(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Owner only")
+    owner = await users_collection.find_one(
+        {"email": decoded["sub"], "role": "owner"}
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+    from app.auth.vault_privacy import cache_owner_privacy, get_owner_vault_privacy
+
+    privacy = get_owner_vault_privacy(owner)
+    cache_owner_privacy(str(owner["_id"]), privacy)
+    return privacy
+
+
+@router.put("/vault-privacy")
+async def put_vault_privacy(
+    body: VaultPrivacyBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Owner only")
+    owner = await users_collection.find_one(
+        {"email": decoded["sub"], "role": "owner"}
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+    from app.auth.vault_privacy import (
+        cache_owner_privacy,
+        normalize_vault_privacy,
+    )
+
+    privacy = normalize_vault_privacy({"rules": body.rules or []})
+    await users_collection.update_one(
+        {"_id": owner["_id"]},
+        {"$set": {"vault_privacy": privacy, "updated_at": datetime.utcnow()}},
+    )
+    cache_owner_privacy(str(owner["_id"]), privacy)
+    return privacy
+
+
+class VaultZkBody(BaseModel):
+    ciphertext: str | None = None
+
+
+@router.get("/vault-privacy/zk/{section_id}")
+async def get_vault_zk_fields(
+    section_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Owner only")
+    owner = await users_collection.find_one(
+        {"email": decoded["sub"], "role": "owner"}
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+    from app.database import vault_zk_fields_collection
+
+    row = await vault_zk_fields_collection.find_one(
+        {"owner_id": str(owner["_id"]), "section_id": str(section_id)}
+    )
+    return {"ciphertext": (row or {}).get("ciphertext") or None}
+
+
+@router.put("/vault-privacy/zk/{section_id}")
+async def put_vault_zk_fields(
+    section_id: str,
+    body: VaultZkBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Owner only")
+    owner = await users_collection.find_one(
+        {"email": decoded["sub"], "role": "owner"}
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+    from app.database import vault_zk_fields_collection
+
+    cipher = str(body.ciphertext or "").strip()
+    if not cipher:
+        await vault_zk_fields_collection.delete_one(
+            {"owner_id": str(owner["_id"]), "section_id": str(section_id)}
+        )
+        return {"ok": True, "cleared": True}
+    await vault_zk_fields_collection.update_one(
+        {"owner_id": str(owner["_id"]), "section_id": str(section_id)},
+        {
+            "$set": {
+                "owner_id": str(owner["_id"]),
+                "section_id": str(section_id),
+                "ciphertext": cipher,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+        upsert=True,
+    )
+    return {"ok": True}
 
 
 class PushSubscriptionBody(BaseModel):

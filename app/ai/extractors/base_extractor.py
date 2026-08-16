@@ -45,7 +45,12 @@ Global privacy and safety rules:
 - If the document text matches a field label (or a close synonym), that field MUST be filled with the corresponding value.
 - Do not invent alternate key names. Use only the exact catalog/schema keys.
 - Understand wording mismatches against field labels: decide what the value MEANS first, then choose the one exact catalog key. Do not confuse similar labels.
-- Read tables row-by-row and multi-column layouts fully.
+- Misspelled OCR labels still map (Polcy Numbor → policy_number). Never change a VALUE because the label was misspelled.
+- Distinct people stay distinct: Policy Holder vs Agent vs Beneficiary.
+- Distinct dates stay distinct: Effective Date vs Expiration Date vs Renewal Date. Do not merge them unless the catalog has only one matching date field.
+- If the document contains BOTH expiration and renewal dates, map each using field descriptions. If unsure, omit rather than guess.
+- Read tables row-by-row and multi-column layouts fully. Labels may sit above values, not only as "Label: Value".
+- MULTI-ITEM RULE: If the document describes multiple policies, accounts, vehicles, memberships, or people, return one object per entity in the subsection array — never merge them into one object. Exception: one insurance policy / one military discharge / one continuous enlistment is ONE object (coverage lines, duty stations, and awards stay on that object). Same document re-extract should describe the same entity the same way so clients can update instead of duplicating.
 - MULTI-ITEM RULE: If the document describes multiple policies, accounts, vehicles, memberships, or people, return one object per entity in the subsection array — never merge them into one object. Exception: one insurance policy / one military discharge / one continuous enlistment is ONE object (coverage lines, duty stations, and awards stay on that object). Same document re-extract should describe the same entity the same way so clients can update instead of duplicating.
 - SECTION MATCH RULE: Only fill fields that belong to the requested section/subsection schema. Do not invent parallel subsection cards for the same entity.
 - LONG TEXT RULE: Put short facts (IDs, dates, names, amounts, dropdown values) into dedicated fields. Use notes/description TextAreas only for leftover prose that does not fit another field.
@@ -109,6 +114,61 @@ def normalize_extraction_result(parsed: dict | None) -> dict:
     return result
 
 
+HIGH_AUTOFILL_CONFIDENCE = 0.95
+REVIEW_MIN_CONFIDENCE = 0.80
+
+
+def _confidence_band(value: float) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = 0.0
+    if score > 1.0:
+        score = score / 100.0
+    if score >= HIGH_AUTOFILL_CONFIDENCE:
+        return "high"
+    if score >= REVIEW_MIN_CONFIDENCE:
+        return "medium"
+    return "low"
+
+
+def _count_extracted_fields(result: dict | None) -> int:
+    count = 0
+    for item in _iter_patch_items(result):
+        for key, value in item.items():
+            if str(key).startswith("__"):
+                continue
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            count += 1
+    return count
+
+
+def merge_without_overwriting_existing(existing: dict | None, incoming: dict | None) -> dict:
+    """Keep user-entered values; fill only empty keys from AI (never silent overwrite)."""
+    if not isinstance(existing, dict):
+        return dict(incoming or {})
+    merged = dict(existing)
+    if not isinstance(incoming, dict):
+        return merged
+    for key, value in incoming.items():
+        if str(key).startswith("__"):
+            continue
+        current = merged.get(key)
+        empty = (
+            current is None
+            or current == ""
+            or current == []
+            or current == {}
+            or (isinstance(current, str) and not current.strip())
+        )
+        if empty and value not in (None, "", [], {}):
+            merged[key] = value
+    return merged
+
+
 def _run_llm_extract(
     *,
     path: Path,
@@ -131,10 +191,12 @@ def _run_llm_extract(
         or "text"
     )
     logger.info(
-        "LLM extract path=%s method=%s quality=%.2f file=%s",
+        "LLM extract path=%s method=%s quality=%s score=%.2f terra=%s file=%s",
         llm_input,
         extract_meta.get("method"),
+        extract_meta.get("quality") or ("bad" if extract_meta.get("needs_vision") else "good"),
         float(extract_meta.get("quality_score") or 0),
+        int(bool(extract_meta.get("terra_invoked"))),
         path.name,
     )
 
@@ -147,6 +209,7 @@ def _run_llm_extract(
         operation=operation,
         llm_input=llm_input,
         file_name=path.name,
+        role="sol",
     )
 
     raw_text = getattr(response, "text", None) or ""
@@ -245,6 +308,10 @@ def _extract_sync(
 
     total_usd = sum(float(u.get("estimated_usd") or 0) for u in usages)
     total_tokens = sum(int(u.get("total_tokens") or 0) for u in usages)
+    for terra_usage in extract_meta.get("terra_usage") or []:
+        if isinstance(terra_usage, dict):
+            total_usd += float(terra_usage.get("estimated_usd") or 0)
+            total_tokens += int(terra_usage.get("total_tokens") or 0)
     inputs = ",".join(
         str(u.get("llm_input") or u.get("gemini_input") or "?") for u in usages
     ) or str(
@@ -253,19 +320,31 @@ def _extract_sync(
         or "text"
     )
     logger.info(
-        "LLM DOC_TOTAL op=%s file=%s calls=%s llm_input=%s total_tokens=%s ~usd=%.6f",
+        "LLM DOC_TOTAL op=%s file=%s calls=%s llm_input=%s pipeline=%s terra=%s "
+        "section=%s fields=%s total_tokens=%s ~usd=%.6f",
         operation,
         path.name,
         len(usages),
         inputs,
+        extract_meta.get("pipeline_path") or "ocr_sol",
+        int(bool(extract_meta.get("terra_invoked"))),
+        (remapped or {}).get("section") if isinstance(remapped, dict) else None,
+        _count_extracted_fields(remapped),
         total_tokens,
         total_usd,
+    )
+
+    fill_band = _confidence_band(
+        float((remapped or {}).get("confidence") or 0)
+        if isinstance(remapped, dict)
+        else 0.0
     )
 
     if isinstance(remapped, dict):
         remapped["__extract_meta"] = {
             "method": extract_meta.get("method"),
             "quality_score": extract_meta.get("quality_score"),
+            "quality": extract_meta.get("quality"),
             "llm_input": extract_meta.get("llm_input")
             or extract_meta.get("gemini_input")
             or "text",
@@ -274,7 +353,12 @@ def _extract_sync(
             or "text",
             "read_source": extract_meta.get("read_source") or "system",
             "needs_vision": bool(extract_meta.get("needs_vision")),
+            "terra_invoked": bool(extract_meta.get("terra_invoked")),
+            "terra_pages": extract_meta.get("terra_pages") or [],
+            "pipeline_path": extract_meta.get("pipeline_path") or "ocr_sol",
+            "source_method": extract_meta.get("source_method") or "ocr",
             "result_confidence": remapped.get("confidence"),
+            "confidence_band": fill_band,
             "llm_calls": len(usages),
             "estimated_usd": round(total_usd, 6),
             "total_tokens": total_tokens,

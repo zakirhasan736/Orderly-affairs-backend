@@ -1,6 +1,7 @@
 # app/ai/ai_upload_routes.py
 
 import hashlib
+import logging
 import os
 import re
 import uuid
@@ -34,13 +35,25 @@ from app.ai.local_document_extract import extract_document_text
 from app.storage.vault import (
     get_or_create_folder_uuid,
     recover_ai_document_path,
-    user_quota_bytes,
     vault_quota_check,
-    vault_usage_bytes,
 )
+from app.security.document_guard import DocumentGuardError, guard_upload
+from app.security.malware_scan import MalwareScanError
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/ai", tags=["ai-upload"])
+
+
+async def ensure_ai_documents_list_index() -> None:
+    """Keep GET /ai/documents fast: user_id + created_at, no full-document scan."""
+    await ai_documents_collection.create_index(
+        [("user_id", 1), ("created_at", -1)],
+        name="ai_docs_user_created",
+        background=True,
+    )
 
 # 0 = permanent storage (S3 / Cloudinary + Mongo).
 AI_UPLOAD_TTL_MINUTES = int(
@@ -134,7 +147,7 @@ def serialize_ai_document(doc: dict) -> dict:
     cached = doc.get("cached_extractions") or {}
     has_fill = (isinstance(consumed, list) and len(consumed) > 0) or (
         isinstance(cached, dict) and bool(cached)
-    )
+    ) or raw_status in {"ready", "done", "complete", "filled"}
     # Autofill success historically reset status to "uploaded" / left "processing".
     # Surface those as ready once the document has already filled vault fields.
     if has_fill and raw_status in {"uploaded", "processing", "extracting", "classifying", "queued"}:
@@ -174,10 +187,18 @@ def serialize_ai_document(doc: dict) -> dict:
 
 def sniff_media_type(filename: str, media_type: str, sample: bytes | None = None) -> str:
     media_type = (media_type or "").strip() or "application/octet-stream"
+    lower = str(filename).lower()
+
+    if sample:
+        if sample.startswith(b"%PDF"):
+            return "application/pdf"
+        if sample.startswith(b"\x89PNG"):
+            return "image/png"
+        if sample[:3] == b"\xff\xd8\xff":
+            return "image/jpeg"
+
     if media_type not in {"", "application/octet-stream", "binary/octet-stream"}:
         return media_type
-
-    lower = str(filename).lower()
     if lower.endswith(".pdf"):
         return "application/pdf"
     if lower.endswith(".png"):
@@ -331,18 +352,42 @@ async def upload_ai_document(
             detail=f"File too large. Max {int(settings.AI_UPLOAD_MAX_MB)}MB.",
         )
 
+    try:
+        guarded = guard_upload(
+            contents,
+            mime_type=file.content_type,
+            filename=file.filename,
+        )
+    except (MalwareScanError, DocumentGuardError) as exc:
+        logger.warning(
+            "AI upload blocked file=%s mime=%s reason=%s",
+            file.filename,
+            file.content_type,
+            exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    original_hash = content_hash_for_bytes(contents)
+    contents = guarded.payload
+    stored_mime = (
+        guarded.mime_type
+        if guarded.mime_type in ALLOWED_MIME_TYPES
+        else file.content_type
+    )
+    scan = guarded.scan
+
     await vault_quota_check(
         user=current_user,
         user_id=user_id,
         incoming_bytes=len(contents),
     )
 
-    ext = ALLOWED_MIME_TYPES[file.content_type]
+    ext = ALLOWED_MIME_TYPES[stored_mime]
     file_id = uuid.uuid4().hex
     stored_filename = f"{file_id}{ext}"
     original_filename = (file.filename or f"document{ext}").strip() or f"document{ext}"
     section_key = str(section).strip() if section is not None else ""
-    content_hash = content_hash_for_bytes(contents)
+    content_hash = original_hash
     email = str(current_user.get("email") or "").strip().lower()
     folder_uuid = await get_or_create_folder_uuid(current_user)
     temp_path: Path | None = None
@@ -367,13 +412,13 @@ async def upload_ai_document(
 
         # Local extract from a temp copy (TXT / searchable PDF / OCR).
         temp_path = write_temp_ai_file(contents, ext)
-        local_extract = extract_document_text(temp_path, file.content_type)
+        local_extract = extract_document_text(temp_path, stored_mime)
 
         storage_meta = upload_ai_bytes_to_storage(
             contents=contents,
             folder_uuid=folder_uuid,
             stored_filename=stored_filename,
-            mime_type=file.content_type,
+            mime_type=stored_mime,
             original_filename=original_filename,
             email=email,
             user_id=user_id,
@@ -407,7 +452,7 @@ async def upload_ai_document(
             "folder_uuid": folder_uuid,
             "stored_filename": stored_filename,
             "original_filename": original_filename,
-            "mime_type": file.content_type,
+            "mime_type": stored_mime,
             "size_bytes": len(contents),
             "content_hash": content_hash,
             "created_at": now,
@@ -415,6 +460,9 @@ async def upload_ai_document(
             "expires_at": expires_at,
             "status": "uploaded",
             "source": "upload",
+            "scan_status": scan.status,
+            "scan_engine": scan.engine,
+            "scan_sanitized": guarded.sanitized,
             "extracted_text": encrypt_extracted_text(
                 user_id=user_id,
                 file_id=file_id,
@@ -468,7 +516,7 @@ async def upload_ai_document(
             "replaced_file_ids": replaced_file_ids,
             "replaced": bool(replaced_file_ids),
             "original_filename": original_filename,
-            "mime_type": file.content_type,
+            "mime_type": stored_mime,
             "size_bytes": len(contents),
             "expires_at": expires_at.isoformat() if expires_at else None,
             "preview_url": f"/ai/document/{file_id}/preview",
@@ -482,6 +530,9 @@ async def upload_ai_document(
             "storage": storage_kind,
             "s3_key": storage_meta.get("s3_key"),
             "public_id": storage_meta.get("public_id"),
+            "scan_status": scan.status,
+            "scan_engine": scan.engine,
+            "scan_sanitized": guarded.sanitized,
         }
 
     except HTTPException:
@@ -523,54 +574,28 @@ async def list_owner_ai_documents(
                 {"expires_at": None},
                 {"expires_at": {"$exists": False}},
             ],
-        }
-    ).sort("created_at", -1)
+        },
+        {
+            "extracted_text": 0,
+            "cached_extractions": 0,
+        },
+    ).sort("created_at", -1).limit(200)
 
     documents = []
     async for doc in cursor:
         storage = str(doc.get("storage") or "").lower()
-        if storage == "s3" and doc.get("s3_key"):
+        if doc.get("s3_key") or storage == "s3":
             documents.append(serialize_ai_document(doc))
             continue
-        if storage == "cloudinary" and (doc.get("secure_url") or doc.get("public_id")):
+        if doc.get("secure_url") or doc.get("public_id") or storage == "cloudinary":
             documents.append(serialize_ai_document(doc))
             continue
-        # Legacy vault rows — only list when bytes are recoverable locally.
-        path = await recover_ai_document_path(doc)
-        if path or doc.get("secure_url") or doc.get("s3_key"):
+        if doc.get("path") or doc.get("stored_filename"):
             documents.append(serialize_ai_document(doc))
 
-    used = await vault_usage_bytes(user_id=user_id)
-    from app.storage.vault import message_media_usage_bytes, owner_storage_usage_bytes
-
-    email = str(current_user.get("email") or "").strip().lower()
-    media_used = await message_media_usage_bytes(owner_email=email) if email else 0
-    total_used = await owner_storage_usage_bytes(
-        user_id=user_id,
-        owner_email=email or None,
-    )
     return {
         "success": True,
         "documents": documents,
-        "storage": {
-            "used_bytes": total_used,
-            "documents_bytes": used,
-            "message_media_bytes": media_used,
-            "user_quota_bytes": user_quota_bytes(current_user),
-            "global_quota_bytes": settings.VAULT_GLOBAL_QUOTA_BYTES,
-            "backend": "s3" if settings.vault_s3_active else "cloudinary",
-            "s3_bucket": settings.vault_s3_bucket_name if settings.vault_s3_active else None,
-            "s3_prefix": (
-                (settings.VAULT_S3_PREFIX or "orderly-affairs/vault").strip("/")
-                if settings.vault_s3_active
-                else None
-            ),
-            "message_s3_prefix": (
-                (settings.MESSAGE_S3_PREFIX or "orderly-affairs/messages").strip("/")
-                if settings.message_s3_active
-                else None
-            ),
-        },
     }
 
 

@@ -11,8 +11,9 @@ from app.ai.local_document_extract import (
 
 
 def test_score_rejects_short_text():
-    score, needs_vision = _score_text_quality("hi", min_chars=80)
+    score, needs_vision, quality = _score_text_quality("hi", min_chars=80)
     assert needs_vision is True
+    assert quality == "bad"
     assert score < 0.5
 
 
@@ -21,8 +22,9 @@ def test_score_accepts_readable_text():
         "Auto insurance card for Jane Doe. Policy number ABC-12345. "
         "Vehicle: 2020 Honda Civic. Effective dates January to December."
     )
-    score, needs_vision = _score_text_quality(text, min_chars=40)
+    score, needs_vision, quality = _score_text_quality(text, min_chars=40)
     assert needs_vision is False
+    assert quality == "good"
     assert score >= 0.5
 
 

@@ -2,6 +2,45 @@
 
 This document explains the security-related environment variables and what to change when moving Orderly Affairs from local development to production.
 
+## Uploaded documents: malware vs Cloudflare
+
+Cloudflare (Turnstile + WAF) **does not** virus-scan vault PDFs/photos. It stops bots, some exploit payloads at the HTTP edge, and login abuse.
+
+File **contents** are handled in the API:
+
+1. Magic-byte vs claimed MIME (blocks EXE/OLE renamed as PDF).
+2. Content Disarm (`DOCUMENT_GUARD_SANITIZE=true`): images re-encoded, PDFs rasterized to image-only PDFs. Original bytes are not stored.
+3. Optional **ClamAV** on the server (`CLAMD_HOST`). Do **not** send vault documents to VirusTotal.
+
+Local / current `.env`: keep sanitize on; leave `CLAMD_HOST` empty until ClamAV is running.
+
+**Preferred (no Docker):** install ClamAV as a system service on the Hostinger Ubuntu VPS.
+
+```bash
+sudo apt update
+sudo apt install -y clamav clamav-daemon clamav-freshclam
+sudo systemctl enable --now clamav-freshclam
+sudo systemctl enable --now clamav-daemon
+# Wait until: sudo systemctl is-active clamav-daemon  →  active
+```
+
+Confirm it listens on `127.0.0.1:3310` (`ss -lntp | grep 3310`). Then set:
+
+```env
+DOCUMENT_GUARD_SANITIZE=true
+CLAMD_HOST=127.0.0.1
+CLAMD_PORT=3310
+CLAMD_REQUIRED=true
+```
+
+Restart the API. Do not set `CLAMD_REQUIRED=true` if port 3310 is closed — uploads will fail closed.
+
+Docker is optional only (`docker-compose.clamav.yml`). Native `clamav-daemon` is the same protocol the API already uses.
+
+Turnstile still belongs on OTP/login (`TURNSTILE_SECRET_KEY` + `NEXT_PUBLIC_TURNSTILE_SITE_KEY`). That is captcha, not AV.
+
+---
+
 ## Cloudflare Turnstile (OTP CAPTCHA)
 
 Turnstile protects OTP send/verify flows from bots. You need **two** keys — one for the backend, one for the frontend.
@@ -209,6 +248,25 @@ Use this before calling the platform production-ready.
 | HTTPS | `APP_ENV=production`, HSTS, secure cookies | `PRODUCTION_SETUP` TLS section |
 | Edge sessions | `ENABLE_EDGE_SESSION_CHECK=true` | Frontend middleware |
 | Dead auth code | No client-side password checks | Repo grep / deleted legacy components |
+| Document malware | CDR rebuild + magic-byte checks on `/ai/upload-document` and `/uploads` | `DOCUMENT_GUARD_SANITIZE=true` |
+| Signature AV | Local ClamAV (`CLAMD_HOST=127.0.0.1`, `CLAMD_REQUIRED=true`) | Native `clamav-daemon` (no Docker) |
+
+## Document auto-fill models
+
+OCR remains the default reader. GPT-5.6 Terra is used only when OCR quality is bad. GPT-5.6 Sol maps prepared text onto vault fields.
+
+These are **not secrets**. Keep `OPENAI_API_KEY` in Secrets Manager. Put model IDs in the VPS `.env`:
+
+```env
+OPENAI_API_KEY=...
+DOCUMENT_REASONING_MODEL=gpt-5.6-sol
+DOCUMENT_VISION_FALLBACK_MODEL=gpt-5.6-terra
+AI_PREFER_LOCAL_TEXT_EXTRACT=true
+AI_ALLOW_VISION_FALLBACK=true
+AI_OCR_GOOD_MIN_CONFIDENCE=0.58
+```
+
+Aliases: `OPENAI_MODEL_SOL`, `OPENAI_MODEL_TERRA`, or legacy `OPENAI_MODEL` (Sol). Do not put API keys in the frontend.
 
 ### Upon-death confirmation (bank-grade)
 

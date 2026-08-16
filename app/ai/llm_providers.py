@@ -21,7 +21,7 @@ def list_provider_catalog():
     return [
         {
             "id": info["provider"],
-            "label": "OpenAI gpt-4o-mini"
+            "label": "OpenAI GPT-5.6 Sol + Terra"
             if info["provider"] == "openai"
             else "Orderly own model",
             "models": [info["model"]],

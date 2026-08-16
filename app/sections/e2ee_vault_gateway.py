@@ -104,9 +104,16 @@ async def get_e2ee_section(
     if not meta:
         raise HTTPException(404, "Unknown section")
     section_id, section_key, _ = meta
-    owner_id, _user = await _resolve_reader(request, authorization, section_id)
+    owner_id, user = await _resolve_reader(request, authorization, section_id)
     section = await SectionRepository.get(owner_id, section_id)
-    return present_section_for_api(owner_id, section_id, section_key, section)
+    decoded = decode_owner_or_nok_token(request, authorization)
+    return present_section_for_api(
+        owner_id,
+        section_id,
+        section_key,
+        section,
+        viewer_role=decoded.get("role"),
+    )
 
 
 @e2ee_vault_router.post("/{slug}")

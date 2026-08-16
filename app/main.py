@@ -170,6 +170,24 @@ async def startup():
     from app.auth.phone import ensure_owner_phone_index
     from app.database import users_collection
 
+    from app.security.malware_scan import describe_clamd_status
+
+    print(describe_clamd_status())
+
+    from app.security.vault_audit import ensure_vault_audit_indexes
+
+    try:
+        await ensure_vault_audit_indexes()
+    except Exception as exc:
+        print("Vault audit index warning:", exc)
+
+    try:
+        from app.ai.ai_upload_routes import ensure_ai_documents_list_index
+
+        await ensure_ai_documents_list_index()
+    except Exception as exc:
+        print("AI documents index warning:", exc)
+
     await ensure_otp_send_lock_index()
     try:
         await ensure_owner_phone_index(users_collection)
@@ -193,6 +211,11 @@ async def startup():
 
     # 4️⃣ Expiry / renewal reminders for ALL sections (10 → 5 → 1 → 0 days)
     start_section_expiry_scheduler()
+
+    # 4b) Birthday / anniversary wishes for the owner + NOK/family reminders
+    from app.notifications.special_day_scheduler import start_special_day_scheduler
+
+    start_special_day_scheduler()
 
     # 5️⃣ Semi-annual kit review (“keep it current”)
     from app.notifications.kit_review_emails import start_kit_review_scheduler

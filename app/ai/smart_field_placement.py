@@ -30,6 +30,9 @@ MEANING_GROUPS: list[dict[str, Any]] = [
             "insured_name",
             "member_name",
             "patient_name",
+            "named_insured",
+            "policy_holder",
+            "policyholder",
         ],
     },
     {
@@ -66,6 +69,9 @@ MEANING_GROUPS: list[dict[str, Any]] = [
             "member_id",
             "certificate_number",
             "plan_number",
+            "contract_number",
+            "polcy_numbor",
+            "policy_numbr",
         ],
     },
     {
@@ -73,6 +79,8 @@ MEANING_GROUPS: list[dict[str, Any]] = [
         "terms": [
             "policy_company",
             "insurance_company",
+            "insurance_name",
+            "insurance_carrier",
             "carrier",
             "insurer",
             "provider",
@@ -90,6 +98,7 @@ MEANING_GROUPS: list[dict[str, Any]] = [
             "valid_through",
             "valid_until",
             "end_date",
+            "coverage_ends",
             "account_expiry_date",
             "account_expiry",
         ],
@@ -169,8 +178,16 @@ MEANING_GROUPS: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "policy_contact",
+        "terms": ["policy_contact", "agent", "agent_name", "broker", "producer"],
+    },
+    {
         "id": "beneficiaries",
         "terms": ["beneficiary", "beneficiaries"],
+    },
+    {
+        "id": "effective_date",
+        "terms": ["effective_date", "effective", "issue_date", "inception_date"],
     },
     {
         "id": "doctor",
@@ -290,6 +307,16 @@ def score_field_match(incoming_key: str, field: dict) -> float:
                 if _norm_key(term) == in_key:
                     score = max(score, 88.0)
                     break
+
+    try:
+        from app.ai.semantic_field_map import resolve_concept_from_key
+
+        in_concept = resolve_concept_from_key(incoming_key)
+        field_concept = resolve_concept_from_key(str(field.get("key") or ""))
+        if in_concept and field_concept and in_concept == field_concept:
+            score = max(score, 90.0)
+    except Exception:
+        pass
 
     if len(in_key) >= 4 and len(field_key) >= 4:
         if in_key in field_key or field_key in in_key:

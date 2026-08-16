@@ -11,6 +11,7 @@ Example:
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Any
 
@@ -52,6 +53,12 @@ SEMANTIC_CONCEPTS: dict[str, dict[str, Any]] = {
             "pol number",
             "pol_num",
             "pol_number",
+            "contract_number",
+            "contract_no",
+            "policy_identifier",
+            "policy_numbr",
+            "polcy_number",
+            "polcy_numbor",
         ],
         "targets": {
             "vehicles": "insurance_policy",
@@ -117,6 +124,11 @@ SEMANTIC_CONCEPTS: dict[str, dict[str, Any]] = {
             "insured_name",
             "subscriber_name",
             "cardholder_name",
+            "named_insured",
+            "named_insurd",
+            "policy_holder",
+            "policyholder",
+            "insured_person",
         ],
         "targets": {"insurance_policies": "member_name"},
     },
@@ -127,6 +139,7 @@ SEMANTIC_CONCEPTS: dict[str, dict[str, Any]] = {
             "insurance_company",
             "insurance_carrier",
             "insurance_provider",
+            "insurance_name",
             "carrier",
             "carrier_name",
             "provider",
@@ -134,6 +147,8 @@ SEMANTIC_CONCEPTS: dict[str, dict[str, Any]] = {
             "insurer",
             "company",
             "underwriter",
+            "insurace_carrier",
+            "insurace_compny",
         ],
         "targets": {
             "vehicles": "insurance_company",
@@ -344,6 +359,24 @@ def resolve_concept_from_key(key: str) -> str | None:
                 ):
                     continue
                 return concept
+
+    # OCR misspellings: Polcy Numbor ≈ policy_number
+    if len(n) >= 8:
+        best: tuple[str, float] | None = None
+        for concept, meta in SEMANTIC_CONCEPTS.items():
+            for alias in meta["aliases"]:
+                a = _norm(alias).replace(" ", "_")
+                if len(a) < 8:
+                    continue
+                ratio = difflib.SequenceMatcher(None, n, a).ratio()
+                if ratio >= 0.84 and (best is None or ratio > best[1]):
+                    if concept == "policy_number" and any(
+                        token in n for token in ("company", "carrier", "provider", "type")
+                    ):
+                        continue
+                    best = (concept, ratio)
+        if best:
+            return best[0]
     return None
 
 

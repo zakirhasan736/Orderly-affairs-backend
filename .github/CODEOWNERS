@@ -1,0 +1,6 @@
+# Enable with branch protection after replacing the handle.
+# * @YOUR_GITHUB_HANDLE
+# /docs/compliance/ @YOUR_GITHUB_HANDLE
+# /app/security/ @YOUR_GITHUB_HANDLE
+# /app/auth/ @YOUR_GITHUB_HANDLE
+# /app/backup/ @YOUR_GITHUB_HANDLE

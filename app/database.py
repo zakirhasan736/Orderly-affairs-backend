@@ -48,6 +48,7 @@ feedback_collection = db["feedback"]
 section_footprints_collection = db["section_footprints"]
 access_logs_collection = db["access_logs"]
 vault_audit_logs_collection = db["vault_audit_logs"]
+vault_zk_fields_collection = db["vault_zk_fields"]
 
 # System-owner admin panel
 admin_audit_logs_collection = db["admin_audit_logs"]

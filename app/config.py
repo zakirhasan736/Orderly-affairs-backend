@@ -153,6 +153,32 @@ class Settings(BaseSettings):
     VAULT_USER_QUOTA_MB: float = 5120.0  # 5 GB
     # Max size of a single AI upload.
     AI_UPLOAD_MAX_MB: float = 15.0
+    # Document AI: OCR first, GPT-5.6 Sol maps fields, GPT-5.6 Terra reads bad pages.
+    DOCUMENT_REASONING_MODEL: str = "gpt-5.6-sol"
+    DOCUMENT_VISION_FALLBACK_MODEL: str = "gpt-5.6-terra"
+    OPENAI_MODEL: str | None = None
+    OPENAI_MODEL_SOL: str | None = None
+    OPENAI_MODEL_TERRA: str | None = None
+    AI_PREFER_LOCAL_TEXT_EXTRACT: bool = True
+    AI_ALLOW_VISION_FALLBACK: bool = True
+    AI_OCR_GOOD_MIN_CONFIDENCE: float = 0.58
+    AI_TEXT_RESULT_MIN_CONFIDENCE: float = 0.45
+    AI_LOCAL_TEXT_MIN_CHARS: int = 80
+    AI_MAX_TERRA_PAGES: int = 4
+    # Optional ClamAV daemon (clamd). Heuristic PDF/image checks always run.
+    CLAMD_HOST: str = ""
+    CLAMD_PORT: int = 3310
+    CLAMD_TIMEOUT_SECONDS: float = 8.0
+    CLAMD_REQUIRED: bool = False
+    # Vault access log retention (SOC 2: keep ≥ 12 months). TTL deletes after this.
+    VAULT_AUDIT_RETENTION_DAYS: int = 400
+    VAULT_AUDIT_403_BURST_THRESHOLD: int = 25
+    VAULT_AUDIT_403_WINDOW_SECONDS: int = 300
+    # Rebuild images/PDFs before storage (strip scripts, attachments, metadata).
+    DOCUMENT_GUARD_SANITIZE: bool = True
+    DOCUMENT_GUARD_MAX_PDF_PAGES: int = 50
+    DOCUMENT_GUARD_PDF_SCALE: float = 1.5
+    DOCUMENT_GUARD_MAX_PIXELS: int = 40_000_000
     # 0 = keep forever (vault). >0 = expire uploads after N minutes.
     AI_UPLOAD_TTL_MINUTES: int = 0
     # Primary blob store for new owner uploads (same AWS bucket as backups by default).
@@ -333,6 +359,13 @@ class Settings(BaseSettings):
     @property
     def AI_UPLOAD_MAX_BYTES(self) -> int:
         return int(float(self.AI_UPLOAD_MAX_MB) * (1024**2))
+
+    @property
+    def clamd_is_required(self) -> bool:
+        """Production/staging always require ClamAV. Local uses CLAMD_REQUIRED."""
+        if self.is_hardened_runtime:
+            return True
+        return bool(self.CLAMD_REQUIRED)
 
     @property
     def allow_owner_cookie_admin_fallback(self) -> bool:
