@@ -33,7 +33,7 @@ CLAMD_PORT=3310
 CLAMD_REQUIRED=true
 ```
 
-Restart the API. Do not set `CLAMD_REQUIRED=true` if port 3310 is closed — uploads will fail closed.
+Restart the API. If ClamAV is not installed yet, leave `CLAMD_HOST` empty. An unreachable daemon now falls back to heuristic + document rebuild instead of blocking every upload.
 
 Docker is optional only (`docker-compose.clamav.yml`). Native `clamav-daemon` is the same protocol the API already uses.
 

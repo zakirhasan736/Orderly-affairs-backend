@@ -35,14 +35,14 @@ from app.ai.ai_document_storage import (
     upload_ai_bytes_to_storage,
 )
 from app.ai.ai_extract_crypto import encrypt_extracted_text
-from app.ai.local_document_extract import extract_document_text
+from app.ai.local_document_extract import prepare_document_for_sol
 from app.storage.vault import (
     get_or_create_folder_uuid,
     recover_ai_document_path,
     vault_quota_check,
 )
 from app.security.document_guard import DocumentGuardError, guard_upload
-from app.security.malware_scan import MalwareScanError
+from app.security.malware_scan import MalwareScanError, sniff_payload_kind
 
 
 logger = logging.getLogger(__name__)
@@ -70,8 +70,43 @@ ALLOWED_MIME_TYPES = {
     "text/plain": ".txt",
     "image/png": ".png",
     "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/pjpeg": ".jpg",
     "image/webp": ".webp",
 }
+
+_MIME_ALIASES = {
+    "image/jpg": "image/jpeg",
+    "image/pjpeg": "image/jpeg",
+    "application/x-pdf": "application/pdf",
+}
+
+_KIND_TO_MIME = {
+    "pdf": "application/pdf",
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "text": "text/plain",
+}
+
+
+def _normalize_upload_mime(content_type: str | None, filename: str | None) -> str:
+    claimed = (content_type or "").split(";")[0].strip().lower()
+    claimed = _MIME_ALIASES.get(claimed, claimed)
+    if claimed in ALLOWED_MIME_TYPES:
+        return claimed
+    name = (filename or "").strip().lower()
+    if name.endswith(".pdf"):
+        return "application/pdf"
+    if name.endswith(".png"):
+        return "image/png"
+    if name.endswith(".jpg") or name.endswith(".jpeg"):
+        return "image/jpeg"
+    if name.endswith(".webp"):
+        return "image/webp"
+    if name.endswith(".txt"):
+        return "text/plain"
+    return claimed
 
 
 def utc_now_naive():
@@ -310,12 +345,6 @@ async def upload_ai_document(
     )
     user_id = get_user_id(current_user)
 
-    if file.content_type not in ALLOWED_MIME_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported file type. Upload PDF, TXT, PNG, JPG, JPEG, or WEBP.",
-        )
-
     contents = await file.read()
 
     if not contents:
@@ -327,10 +356,29 @@ async def upload_ai_document(
             detail=f"File too large. Max {int(settings.AI_UPLOAD_MAX_MB)}MB.",
         )
 
+    kind = sniff_payload_kind(contents)
+    if kind == "heic":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "iPhone HEIC photos are not supported. "
+                "Save or export as JPG or PDF, then upload again."
+            ),
+        )
+
+    upload_mime = _normalize_upload_mime(file.content_type, file.filename)
+    if upload_mime not in ALLOWED_MIME_TYPES:
+        upload_mime = _KIND_TO_MIME.get(kind, upload_mime)
+    if upload_mime not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Upload PDF, TXT, PNG, JPG, JPEG, or WEBP.",
+        )
+
     try:
         guarded = guard_upload(
             contents,
-            mime_type=file.content_type,
+            mime_type=upload_mime,
             filename=file.filename,
         )
     except (MalwareScanError, DocumentGuardError) as exc:
@@ -385,9 +433,23 @@ async def upload_ai_document(
             content_hash=content_hash,
         )
 
-        # Local extract from a temp copy (TXT / searchable PDF / OCR).
+        # Scan already ran above. Read path: OCR first, Terra only on bad pages,
+        # then store prepared text for Sol mapping (never send original bytes to Sol).
         temp_path = write_temp_ai_file(contents, ext)
-        local_extract = extract_document_text(temp_path, stored_mime)
+        if extract_reuse and prior:
+            local_extract = {
+                "text": "",
+                "method": prior.get("extract_method") or "ocr",
+                "quality_score": prior.get("extract_quality"),
+                "needs_vision": bool(prior.get("needs_vision")),
+                "quality": prior.get("extract_quality_label") or "good",
+                "terra_invoked": bool(prior.get("terra_invoked")),
+                "terra_pages": prior.get("terra_pages") or [],
+                "pipeline_path": prior.get("pipeline_path")
+                or ("ocr_terra_sol" if prior.get("terra_invoked") else "ocr_sol"),
+            }
+        else:
+            local_extract = prepare_document_for_sol(temp_path, stored_mime)
 
         storage_meta = upload_ai_bytes_to_storage(
             contents=contents,
@@ -419,6 +481,24 @@ async def upload_ai_document(
             else None
         )
 
+        prepared_text = str(
+            local_extract.get("document_text") or local_extract.get("text") or ""
+        )[:50000]
+        terra_invoked = bool(local_extract.get("terra_invoked"))
+        terra_pages = local_extract.get("terra_pages") or []
+        pipeline_path = str(
+            local_extract.get("pipeline_path")
+            or ("ocr_terra_sol" if terra_invoked else "ocr_sol")
+        )
+        if extract_reuse and prior and prior.get("extracted_text"):
+            extracted_blob = prior.get("extracted_text")
+        else:
+            extracted_blob = encrypt_extracted_text(
+                user_id=user_id,
+                file_id=file_id,
+                text=prepared_text,
+            )
+
         doc = {
             "_id": file_id,
             "user_id": user_id,
@@ -438,14 +518,15 @@ async def upload_ai_document(
             "scan_status": scan.status,
             "scan_engine": scan.engine,
             "scan_sanitized": guarded.sanitized,
-            "extracted_text": encrypt_extracted_text(
-                user_id=user_id,
-                file_id=file_id,
-                text=(local_extract.get("text") or "")[:50000],
-            ),
-            "extract_method": local_extract.get("method"),
+            "extracted_text": extracted_blob,
+            "extract_method": local_extract.get("method")
+            or local_extract.get("source_method")
+            or "ocr",
             "extract_quality": local_extract.get("quality_score"),
-            "needs_vision": bool(local_extract.get("needs_vision")),
+            "needs_vision": bool(local_extract.get("needs_vision")) and not terra_invoked,
+            "terra_invoked": terra_invoked,
+            "terra_pages": terra_pages,
+            "pipeline_path": pipeline_path,
             "extract_reuse": extract_reuse,
             "unchanged": extract_reuse,
             **{
@@ -503,8 +584,11 @@ async def upload_ai_document(
             "unchanged": extract_reuse,
             "extract_reuse": extract_reuse,
             "reused_from_file_id": reused_from_file_id,
-            "needs_vision": bool(local_extract.get("needs_vision")),
-            "extract_method": local_extract.get("method"),
+            "needs_vision": bool(doc.get("needs_vision")),
+            "terra_invoked": terra_invoked,
+            "terra_pages": terra_pages,
+            "pipeline_path": pipeline_path,
+            "extract_method": doc.get("extract_method"),
             "extract_quality": local_extract.get("quality_score"),
             "storage": storage_kind,
             "s3_key": storage_meta.get("s3_key"),

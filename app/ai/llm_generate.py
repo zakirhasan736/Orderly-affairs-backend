@@ -55,7 +55,7 @@ _RATE_HINTS: dict[str, tuple[float, float]] = {
 USER_SAFE_FAIL_MESSAGE = (
     "We couldn't finish reading that document. Please try again in a moment."
 )
-USER_SAFE_WAIT_MESSAGE = "Still processing your document. Please wait..."
+USER_SAFE_WAIT_MESSAGE = "Working on this document…"
 
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 _FALLBACK_STATUS = {400, 404, 429, 500, 502, 503, 504}

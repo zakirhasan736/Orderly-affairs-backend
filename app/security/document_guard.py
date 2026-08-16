@@ -175,6 +175,10 @@ def _sanitize_text(payload: bytes) -> bytes:
 
 
 def _rebuild(payload: bytes, kind: str) -> tuple[bytes, str]:
+    if kind == "heic":
+        _reject(
+            "iPhone HEIC photos are not supported. Save or export as JPG or PDF, then upload again."
+        )
     if kind in {"png", "jpeg", "webp"}:
         return _sanitize_image(payload, kind)
     if kind == "pdf":

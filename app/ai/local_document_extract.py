@@ -2,12 +2,11 @@
 """
 Local-first document text extraction.
 
-Pipeline:
-  TXT → decode (UTF-8 / UTF-16 / latin-1)
-  PDF → embedded text (pypdf); if weak → OCR pages (PyMuPDF + Tesseract)
-  Image → OCR (Tesseract with preprocessing)
-  Quality gate → good OCR goes to Sol as text; bad pages go to Terra vision
-  (faithful text only), then Sol maps fields. Sol never receives the original file.
+Upload-time order (see ai_upload_routes):
+  1. Scan (malware + document guard)
+  2. OCR (embedded PDF text, then Tesseract)
+  3. Terra vision only on bad OCR pages (faithful text)
+  4. Sol maps prepared text onto vault fields (never receives original file)
 """
 
 from __future__ import annotations
