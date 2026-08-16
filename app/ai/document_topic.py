@@ -56,7 +56,42 @@ VEHICLE_MAKES = (
     "range rover",
 )
 
+# More specific kinds first. "insurance" is a family, not a destination.
+_AUTO_KIND_RE = re.compile(
+    r"\b("
+    r"auto(?:mobile)?\s*(?:insurance|policy|card)?|"
+    r"vehicle\s*(?:insurance|policy|card)?|"
+    r"(?:car|truck|suv|jeep|honda|motorcycle)\s*(?:insurance|policy)|"
+    r"vin\b|license\s*plate|garaging|year\s*make\s*model|"
+    r"collision\s*(?:coverage|deductible)|comprehensive\s*(?:coverage|deductible)|"
+    r"bodily\s*injury|motor\s*vehicle"
+    r")\b",
+    re.I,
+)
+_HEALTH_KIND_RE = re.compile(
+    r"\b("
+    r"health\s*insurance|medical\s*insurance|dental\s*insurance|"
+    r"medicare|medicaid|rx\s*bin|rxbin|rx\s*pcn|rxpcn|"
+    r"member\s*id|group\s*(?:number|#|no)|payer\s*id|"
+    r"united\s*healthcare|blue\s*cross|blue\s*shield|aetna|cigna|"
+    r"anthem|humana|kaiser|optum"
+    r")\b",
+    re.I,
+)
+_LIFE_KIND_RE = re.compile(
+    r"\b(life\s*insurance|term\s*life|whole\s*life|universal\s*life)\b",
+    re.I,
+)
+_HOME_KIND_RE = re.compile(
+    r"\b(homeowner|homeowners|home\s*insurance|renters?\s*insurance|dwelling)\b",
+    re.I,
+)
+
 KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("auto_insurance", _AUTO_KIND_RE),
+    ("health_insurance", _HEALTH_KIND_RE),
+    ("life_insurance", _LIFE_KIND_RE),
+    ("home_insurance", _HOME_KIND_RE),
     (
         "insurance",
         re.compile(
@@ -84,6 +119,41 @@ KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
     ("health", re.compile(r"\b(health\s*insurance|medicare|medicaid|rxbin)\b", re.I)),
 ]
+
+# Sections this document kind may fill. Anything else that merely shares a
+# word (e.g. "insurance") is skipped.
+KIND_FILL_SECTIONS: dict[str, tuple[str, ...]] = {
+    "auto_insurance": ("insurance_policies", "vehicles"),
+    "health_insurance": ("insurance_policies", "health_information"),
+    "health": ("insurance_policies", "health_information"),
+    "life_insurance": ("insurance_policies",),
+    "home_insurance": ("insurance_policies", "main_residence"),
+    "registration": ("vehicles",),
+    "bank": ("banking_financial_accounts",),
+}
+
+KIND_SKIP_SECTIONS: dict[str, tuple[str, ...]] = {
+    "auto_insurance": (
+        "health_information",
+        "vital_information",
+        "main_residence",
+    ),
+    "health_insurance": ("vehicles", "vital_information", "main_residence"),
+    "health": ("vehicles", "vital_information", "main_residence"),
+    "life_insurance": ("vehicles", "health_information", "vital_information"),
+    "home_insurance": ("vehicles", "health_information"),
+    "registration": ("health_information", "insurance_policies"),
+}
+
+KIND_COMPATIBLE: dict[str, frozenset[str]] = {
+    "auto_insurance": frozenset({"auto_insurance", "insurance", "registration"}),
+    "insurance": frozenset({"auto_insurance", "insurance", "life_insurance", "home_insurance"}),
+    "health_insurance": frozenset({"health_insurance", "health"}),
+    "health": frozenset({"health_insurance", "health"}),
+    "life_insurance": frozenset({"life_insurance", "insurance"}),
+    "home_insurance": frozenset({"home_insurance", "insurance"}),
+    "registration": frozenset({"registration", "auto_insurance"}),
+}
 
 SECTION_KIND = {
     "insurance_policies": "insurance",
@@ -129,11 +199,72 @@ def normalize_filename_stem(name: str | None) -> str:
 def detect_kind(*texts: str | None, section_key: str | None = None) -> str:
     blob = " ".join(str(part or "") for part in texts)
     blob = blob.replace("_", " ").replace("-", " ")
+    # Auto beats generic insurance AND health. A Honda insurance card is not Healthcare.
+    auto = bool(_AUTO_KIND_RE.search(blob))
+    health = bool(_HEALTH_KIND_RE.search(blob))
+    if auto and not health:
+        return "auto_insurance"
+    if health and not auto:
+        return "health_insurance"
+    if auto and health:
+        return "auto_insurance"
     for kind, pattern in KIND_PATTERNS:
         if pattern.search(blob):
             return kind
     mapped = SECTION_KIND.get(str(section_key or "").strip())
     return mapped or ""
+
+
+def infer_document_kind(*texts: str | None, section_key: str | None = None) -> str:
+    return detect_kind(*texts, section_key=section_key)
+
+
+def fill_sections_for_kind(kind: str) -> tuple[str, ...]:
+    return KIND_FILL_SECTIONS.get(str(kind or "").strip(), ())
+
+
+def skip_sections_for_kind(kind: str) -> tuple[str, ...]:
+    return KIND_SKIP_SECTIONS.get(str(kind or "").strip(), ())
+
+
+def kinds_compatible(left: str | None, right: str | None) -> bool:
+    a = str(left or "").strip()
+    b = str(right or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    allowed = KIND_COMPATIBLE.get(a)
+    return bool(allowed and b in allowed)
+
+
+def format_document_plan_prompt(
+    *,
+    kind: str,
+    topic: str,
+    fill_sections: list[str] | tuple[str, ...],
+    skip_sections: list[str] | tuple[str, ...],
+    target_section: str | None = None,
+) -> str:
+    fill = ", ".join(fill_sections) or "(none)"
+    skip = ", ".join(skip_sections) or "(none)"
+    target = str(target_section or "").strip()
+    return (
+        "SOL DOCUMENT PLAN (follow exactly):\n"
+        f"- Document kind: {kind or 'unknown'}\n"
+        f"- Topic: {topic or 'unknown'}\n"
+        f"- Fill only these vault sections: {fill}\n"
+        f"- Do NOT fill these sections: {skip}\n"
+        + (
+            f"- You are extracting section `{target}` only.\n"
+            if target
+            else ""
+        )
+        + "- Matching the word 'insurance' is not enough. Auto/vehicle insurance "
+        "never fills Healthcare fields. Health/medical cards never fill Vehicles.\n"
+        "- Put each value in the field that matches this document's kind, not a "
+        "similarly named field from another kind of insurance.\n"
+    )
 
 
 def _find_make(text: str) -> str:
@@ -238,14 +369,16 @@ def fingerprints_match(left: dict[str, str] | None, right: dict[str, str] | None
 
     kind_a = left.get("kind") or ""
     kind_b = right.get("kind") or ""
-    if kind_a and kind_b and kind_a != kind_b:
+    if kind_a and kind_b and not kinds_compatible(kind_a, kind_b):
         return False
     if not kind_a and not kind_b:
         return False
 
     vin_a, vin_b = left.get("vin") or "", right.get("vin") or ""
     if vin_a and vin_b:
-        return vin_a == vin_b and (not kind_a or not kind_b or kind_a == kind_b)
+        return vin_a == vin_b and (
+            not kind_a or not kind_b or kinds_compatible(kind_a, kind_b)
+        )
 
     policy_a, policy_b = left.get("policy") or "", right.get("policy") or ""
     if policy_a and policy_b and len(policy_a) >= 4 and len(policy_b) >= 4:

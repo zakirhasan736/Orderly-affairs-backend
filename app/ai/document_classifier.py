@@ -9,6 +9,12 @@ from app.ai.extractors.base_extractor import LOCAL_FILE_PREFIX, SUPPORTED_MIME_T
 from app.ai.llm_generate import generate_llm_content
 from app.ai.json_utils import parse_llm_json
 from app.ai.local_document_extract import build_llm_document_contents
+from app.ai.document_topic import (
+    fill_sections_for_kind,
+    format_document_plan_prompt,
+    infer_document_kind,
+    skip_sections_for_kind,
+)
 
 
 AI_SECTION_OPTIONS = [
@@ -148,6 +154,35 @@ CLASSIFICATION_SCHEMA = {
             "type": "boolean",
             "description": "True if the document contains enough data to autofill the requested section.",
         },
+        "document_kind": {
+            "type": "string",
+            "description": (
+                "Specific document type, not a family word. Examples: "
+                "auto_insurance_card, health_insurance_card, life_insurance, "
+                "homeowners_insurance, vehicle_registration, bank_statement, "
+                "drivers_license, other."
+            ),
+        },
+        "document_topic": {
+            "type": "string",
+            "description": (
+                "Subject of this file (e.g. Honda CR-V auto policy, UnitedHealthcare "
+                "member card). Never a generic word like 'insurance'."
+            ),
+        },
+        "fill_section_keys": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Only vault sections this document can actually fill.",
+        },
+        "skip_section_keys": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Sections that share a conceptual word but must not be filled "
+                "(auto insurance → skip health_information)."
+            ),
+        },
         "additional_sections": {
             "type": "array",
             "description": "Other sections that also contain distinct fillable data in this same document.",
@@ -192,6 +227,16 @@ _AUTO_DOC_RE = re.compile(
     r"bodily\s*injury|property\s*damage\s*liability|"
     r"(?:car|truck|suv|motorcycle)\s*(?:insurance|policy)|"
     r"motor\s*vehicle|registration\s*(?:card|document)"
+    r")\b",
+    re.I,
+)
+_HEALTH_DOC_RE = re.compile(
+    r"\b("
+    r"health\s*insurance|medical\s*insurance|dental\s*insurance|"
+    r"medicare|medicaid|rx\s*bin|rxbin|rx\s*pcn|"
+    r"member\s*id|group\s*(?:number|#)|payer\s*id|"
+    r"united\s*healthcare|blue\s*cross|blue\s*shield|aetna|cigna|"
+    r"anthem|humana|kaiser"
     r")\b",
     re.I,
 )
@@ -273,6 +318,8 @@ def _classification_text_blob(classification: dict) -> str:
             parts.append(str(item.get("data_summary") or ""))
             parts.append(str(item.get("section_key") or ""))
     parts.append(str(classification.get("best_section_key") or ""))
+    parts.append(str(classification.get("document_kind") or ""))
+    parts.append(str(classification.get("document_topic") or ""))
     return " ".join(parts)
 
 
@@ -357,6 +404,95 @@ def _ensure_additional_section(
     classification["additional_sections"] = additional
 
 
+def apply_document_kind_plan(
+    classification: dict,
+    document_text: str | None = None,
+) -> dict:
+    """Sol work plan: kind → topic → allowed sections → skip the rest."""
+    if not isinstance(classification, dict):
+        return classification
+
+    blob = f"{document_text or ''} {_classification_text_blob(classification)}"
+    kind = str(classification.get("document_kind") or "").strip()
+    inferred = infer_document_kind(
+        blob,
+        section_key=str(classification.get("best_section_key") or ""),
+    )
+    if not kind or kind in {"insurance", "other", "unknown"}:
+        kind = inferred or kind
+    if inferred == "auto_insurance":
+        kind = "auto_insurance"
+    elif inferred == "health_insurance" and kind not in {"auto_insurance"}:
+        kind = "health_insurance"
+
+    topic = str(classification.get("document_topic") or "").strip()
+    if not topic or topic.lower() in {"insurance", "document", "card"}:
+        summary = str(classification.get("document_summary") or "").strip()
+        topic = summary[:160] if summary else (kind or "unknown")
+
+    fill = list(classification.get("fill_section_keys") or [])
+    planned_fill = fill_sections_for_kind(kind)
+    if planned_fill:
+        fill = [key for key in fill if key in planned_fill] or list(planned_fill)
+        best = classification.get("best_section_key")
+        if best and best in planned_fill and best not in fill:
+            fill.insert(0, best)
+
+    skip = list(dict.fromkeys(
+        list(classification.get("skip_section_keys") or [])
+        + list(skip_sections_for_kind(kind))
+    ))
+    fill = [key for key in fill if key not in skip]
+    skip = [key for key in skip if key not in fill]
+
+    classification["document_kind"] = kind
+    classification["document_topic"] = topic
+    classification["fill_section_keys"] = fill
+    classification["skip_section_keys"] = skip
+    classification["work_plan"] = [
+        {
+            "role": "sol",
+            "task": "understand_topic_and_match_sections",
+        },
+        {
+            "role": "terra",
+            "task": "ocr_if_needed",
+        },
+        *[
+            {"role": "luna", "task": "extract_section", "section_key": key}
+            for key in fill
+        ],
+        {"role": "gpt4o", "task": "fallback_extract"},
+    ]
+    classification["document_plan_prompt"] = format_document_plan_prompt(
+        kind=kind,
+        topic=topic,
+        fill_sections=fill,
+        skip_sections=skip,
+        target_section=str(classification.get("best_section_key") or "") or None,
+    )
+
+    additional = [
+        item
+        for item in (classification.get("additional_sections") or [])
+        if isinstance(item, dict)
+        and item.get("section_key") not in skip
+        and (
+            not fill
+            or item.get("section_key") in fill
+            or item.get("section_key") == classification.get("best_section_key")
+        )
+    ]
+    classification["additional_sections"] = additional
+
+    best = classification.get("best_section_key")
+    if best in skip and fill:
+        classification["best_section_key"] = fill[0]
+        classification["matches_requested_section"] = False
+
+    return classification
+
+
 def harden_vehicle_insurance_routing(
     classification: dict,
     document_text: str | None = None,
@@ -375,6 +511,7 @@ def harden_vehicle_insurance_routing(
     looks_auto = bool(_AUTO_DOC_RE.search(blob))
     looks_home = bool(_HOME_DOC_RE.search(blob))
     looks_insurance = bool(_INSURANCE_DOC_RE.search(blob))
+    looks_health = bool(_HEALTH_DOC_RE.search(blob)) and not looks_auto
     looks_vital_id = bool(_VITAL_ID_DOC_RE.search(blob)) and not looks_insurance
 
     additional = [
@@ -486,6 +623,40 @@ def harden_vehicle_insurance_routing(
                 )
             ]
 
+    # Auto / vehicle insurance is NOT Healthcare. Strip health even if Sol
+    # conceptually matched "insurance".
+    if looks_auto:
+        classification["additional_sections"] = [
+            item
+            for item in (classification.get("additional_sections") or [])
+            if not (
+                isinstance(item, dict)
+                and item.get("section_key") == "health_information"
+            )
+        ]
+        if classification.get("best_section_key") == "health_information":
+            classification["best_section_key"] = "insurance_policies"
+            classification["matches_requested_section"] = False
+
+    # Health/medical cards may also fill Healthcare — never Vehicles.
+    if looks_health and not looks_auto:
+        classification["additional_sections"] = [
+            item
+            for item in (classification.get("additional_sections") or [])
+            if not (
+                isinstance(item, dict) and item.get("section_key") == "vehicles"
+            )
+        ]
+        if classification.get("best_section_key") == "vehicles":
+            classification["best_section_key"] = "insurance_policies"
+            classification["matches_requested_section"] = False
+        _ensure_additional_section(
+            classification,
+            section_key="health_information",
+            data_summary="Health insurance card details for Healthcare.",
+            confidence="high",
+        )
+
     # Drop the best section from additional_sections if it leaked in.
     best = classification.get("best_section_key")
     classification["additional_sections"] = [
@@ -494,9 +665,12 @@ def harden_vehicle_insurance_routing(
         if isinstance(item, dict) and item.get("section_key") not in (None, best)
     ]
 
-    return harden_bank_statement_routing(
-        correct_identity_document_summary(
-            classification,
+    return apply_document_kind_plan(
+        harden_bank_statement_routing(
+            correct_identity_document_summary(
+                classification,
+                document_text=document_text,
+            ),
             document_text=document_text,
         ),
         document_text=document_text,
@@ -687,24 +861,42 @@ Allowed section keys:
 
 The user is trying to autofill section key: {requested_section_key}
 
+WORK ORDER (Sol is the architect — do this in order):
+1) Identify what the DOCUMENT is (auto insurance ID card vs health insurance card vs life policy vs bank statement, etc.).
+2) Identify the TOPIC (which vehicle, which person, which account) — not a family word like "insurance".
+3) Match ONLY the vault sections whose fields that document can fill.
+4) Put other conceptually related sections in skip_section_keys.
+5) Workers (Terra OCR, Luna extract, GPT-4o fallback) will then fill only fill_section_keys.
+
+The word "insurance" is a family, not a match. Auto/vehicle insurance must NEVER fill Healthcare / primary_health_insurance. Health/medical/dental cards must NEVER fill Vehicles.
+
 CRITICAL SECTION ROUTING (do not violate):
 1) Auto insurance card / auto declarations / vehicle registration / VIN / license plate documents:
+   - document_kind = auto_insurance_card (or auto_insurance)
    - best_section_key MUST be "insurance_policies" OR "vehicles"
-   - ALWAYS put the other one in additional_sections
-   - NEVER use main_residence, vital_information, or banking for these docs
-2) Generic insurance (life, health, homeowners, umbrella, disability, etc. WITHOUT vehicle/VIN/plate):
+   - ALWAYS put the other one in additional_sections / fill_section_keys
+   - skip_section_keys MUST include health_information and vital_information
+   - NEVER use main_residence, vital_information, health_information, or banking for these docs
+2) Health / medical / dental / Medicare insurance cards (no VIN / vehicle):
+   - document_kind = health_insurance_card
+   - best_section_key MUST be "insurance_policies"
+   - additional_sections / fill_section_keys MAY include health_information
+   - skip_section_keys MUST include vehicles
+   - NEVER use vital_information just because a person's name appears
+3) Generic insurance (life, homeowners, umbrella, disability, etc. WITHOUT vehicle/VIN/plate AND WITHOUT health-card fields):
    - best_section_key MUST be "insurance_policies"
    - Do NOT add vehicles unless the document clearly lists a vehicle/VIN/plate
+   - Do NOT add health_information unless it is a medical/health/dental/Medicare card
    - NEVER use vital_information just because a person's name appears on the policy
-3) main_residence is ONLY for property/home documents (deed, mortgage, homeowners/renters policy, property tax, utility bill for the home).
+4) main_residence is ONLY for property/home documents (deed, mortgage, homeowners/renters policy, property tax, utility bill for the home).
    - A vehicle / auto insurance document is NOT main_residence even if it shows a garaging address.
    - A bank / checking / savings statement is NOT main_residence even if it prints the customer's home or mailing address.
-4) vital_information is ONLY for personal identity / vital records (passport, driver's license front OR back, birth certificate, SSN card metadata, personal contact sheet).
+5) vital_information is ONLY for personal identity / vital records (passport, driver's license front OR back, birth certificate, SSN card metadata, personal contact sheet).
    - The BACK of a driver's license / state ID (magnetic stripe, 1D/2D barcodes, CLASS/REST/END, vertical DOB) is still a driver's license — NOT a "roadside assistance card".
    - Many U.S. licenses print a roadside-assistance phone number (e.g. "TEXAS ROADSIDE ASSISTANCE: 1-800-…") on the back. That line is printed help text on the ID, not the document type.
    - A name printed on an insurance card does NOT make the document vital_information.
-5) Homeowners/renters insurance: best_section_key="insurance_policies" with additional_sections including main_residence (and NOT vehicles unless a vehicle is also listed).
-6) Bank statements, checking/savings statements, voided checks, routing/account sheets:
+6) Homeowners/renters insurance: best_section_key="insurance_policies" with additional_sections including main_residence (and NOT vehicles unless a vehicle is also listed).
+7) Bank statements, checking/savings statements, voided checks, routing/account sheets:
    - best_section_key MUST be "banking_financial_accounts"
    - NEVER use main_residence just because a mailing/home address appears on the statement
    - That address is customer contact info, not a property document
@@ -719,8 +911,9 @@ Rules:
 - Prefer over-including a partner section when the document clearly contains that section's facts (e.g. auto card → vehicles AND insurance_policies).
 - Do not stop at one section if the same document can responsibly fill more.
 - Examples of multi-section documents:
-  - Auto insurance card: vehicles + insurance_policies (NOT vital_information, NOT main_residence)
-  - Life / health insurance statement: insurance_policies ONLY (NOT vehicles, NOT vital_information)
+  - Auto insurance card: vehicles + insurance_policies (NOT health_information, NOT vital_information, NOT main_residence)
+  - Life insurance statement: insurance_policies ONLY (NOT vehicles, NOT health_information, NOT vital_information)
+  - Health insurance card: insurance_policies + health_information (NOT vehicles)
   - Vehicle registration: vehicles (add insurance_policies only if policy details are present)
   - Homeowners policy: insurance_policies + main_residence (NOT vehicles)
   - Pay stub: employment_business + banking_financial_accounts

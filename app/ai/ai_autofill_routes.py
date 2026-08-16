@@ -75,8 +75,8 @@ router = APIRouter(prefix="/ai", tags=["ai-autofill"])
 # only classification / auto signals add vehicles.
 FAST_PARTNER_PREFETCH: dict[str, list[str]] = {
     "vehicles": ["insurance_policies"],
-    # Health cards classify as insurance and/or healthcare — keep both warm.
-    "insurance_policies": ["health_information"],
+    # Health cards → Insurance (structured policy fields). Auto insurance
+    # must NOT prefetch Healthcare — "insurance" is not a health match.
     "health_information": ["insurance_policies"],
 }
 
