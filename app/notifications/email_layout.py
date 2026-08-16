@@ -77,7 +77,7 @@ def email_brand_mark(
 
 
 def portal_url() -> str:
-    return (settings.FRONTEND_URL or "https://portal.orderly-affairs.com").rstrip("/")
+    return (settings.FRONTEND_URL or "https://vault.orderly-affairs.com").rstrip("/")
 
 
 def billing_url() -> str:

@@ -38,7 +38,7 @@ def cookie_domain() -> str | None:
     except Exception:
         host = ""
 
-    # portal.orderly-affairs.com → .orderly-affairs.com
+    # vault.orderly-affairs.com → .orderly-affairs.com
     parts = host.split(".")
     if len(parts) >= 2:
         return "." + ".".join(parts[-2:])

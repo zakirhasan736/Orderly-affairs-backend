@@ -144,9 +144,18 @@ app.add_middleware(VaultBillingMiddleware)
 app.add_middleware(VaultApiRateLimitMiddleware)
 app.add_middleware(CsrfMiddleware)
 
-# Trailing slash mismatch breaks exact-origin CORS checks
+# Trailing slash mismatch breaks exact-origin CORS checks.
+# vault is the live owner site; portal stays allowed for old bookmarks.
 _frontend = (settings.FRONTEND_URL or "").rstrip("/")
-origins = [o for o in {_frontend, "https://portal.orderly-affairs.com"} if o]
+origins = [
+    o
+    for o in {
+        _frontend,
+        "https://vault.orderly-affairs.com",
+        "https://portal.orderly-affairs.com",
+    }
+    if o
+]
 if settings.is_development:
     for local in ("http://localhost:3000", "http://127.0.0.1:3000"):
         if local not in origins:
