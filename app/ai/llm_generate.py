@@ -301,9 +301,12 @@ def contents_to_text_prompt(contents: list[Any]) -> str:
 
 
 SOL_SYSTEM_PROMPT = (
-    "You are the Orderly Affairs document intelligence engine. "
+    "You are the Orderly Affairs document intelligence engine and architect. "
+    "First understand what the document IS (kind), then the TOPIC (which vehicle, "
+    "person, or account), then match only the vault sections and fields that kind "
+    "can fill. The word 'insurance' is a family, not a match: auto/vehicle insurance "
+    "never fills Healthcare fields; health/medical cards never fill Vehicles. "
     "You receive prepared document TEXT (from OCR or a vision reader), never raw pixels. "
-    "Understand the document as a professional would: topic, section, labels, and values. "
     "Match by meaning, not exact wording. Misspelled labels (Polcy Numbor) still map to the "
     "correct schema field, but VALUES must stay evidence-based — never invent or guess. "
     "If a value is not clearly supported, return null. "
@@ -331,11 +334,13 @@ LUNA_SYSTEM_PROMPT = (
 
 
 def build_system_prompt(*, vision: bool = False, role: LLMRole = "sol") -> str:
+    plan = str(get_llm_settings().get("document_plan_prompt") or "").strip()
+    extra = f"\n{plan}" if plan else ""
     if role == "terra" or vision:
         return TERRA_SYSTEM_PROMPT
     if role == "luna":
-        return LUNA_SYSTEM_PROMPT
-    return SOL_SYSTEM_PROMPT + " Read ONLY the provided document text."
+        return LUNA_SYSTEM_PROMPT + extra
+    return SOL_SYSTEM_PROMPT + " Read ONLY the provided document text." + extra
 
 
 def reset_pipeline_metrics() -> None:

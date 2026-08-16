@@ -13,6 +13,7 @@ from app.ai.document_topic import (
     fill_sections_for_kind,
     format_document_plan_prompt,
     infer_document_kind,
+    prefer_inferred_kind,
     skip_sections_for_kind,
 )
 
@@ -418,8 +419,7 @@ def apply_document_kind_plan(
         blob,
         section_key=str(classification.get("best_section_key") or ""),
     )
-    if not kind or kind in {"insurance", "other", "unknown"}:
-        kind = inferred or kind
+    kind = prefer_inferred_kind(kind, inferred)
     if inferred == "auto_insurance":
         kind = "auto_insurance"
     elif inferred == "health_insurance" and kind not in {"auto_insurance"}:
@@ -450,14 +450,9 @@ def apply_document_kind_plan(
     classification["fill_section_keys"] = fill
     classification["skip_section_keys"] = skip
     classification["work_plan"] = [
-        {
-            "role": "sol",
-            "task": "understand_topic_and_match_sections",
-        },
-        {
-            "role": "terra",
-            "task": "ocr_if_needed",
-        },
+        {"role": "ocr", "task": "read_text", "status": "done"},
+        {"role": "terra", "task": "repair_bad_pages", "status": "done_if_invoked"},
+        {"role": "sol", "task": "understand_topic_then_match_section"},
         *[
             {"role": "luna", "task": "extract_section", "section_key": key}
             for key in fill
@@ -861,14 +856,38 @@ Allowed section keys:
 
 The user is trying to autofill section key: {requested_section_key}
 
-WORK ORDER (Sol is the architect — do this in order):
-1) Identify what the DOCUMENT is (auto insurance ID card vs health insurance card vs life policy vs bank statement, etc.).
-2) Identify the TOPIC (which vehicle, which person, which account) — not a family word like "insurance".
-3) Match ONLY the vault sections whose fields that document can fill.
-4) Put other conceptually related sections in skip_section_keys.
-5) Workers (Terra OCR, Luna extract, GPT-4o fallback) will then fill only fill_section_keys.
+WORK ORDER (document text is already prepared — OCR first, Terra only on bad pages):
+1) Understand KIND and TOPIC from the prepared text. A shared word is not a match
+   (insurance, account, statement, card, address, name).
+2) MATCH THE SECTION FIRST. Set best_section_key to the one section whose fields
+   this document can fill most completely.
+3) fill_section_keys = that section plus only other sections with DISTINCT facts
+   actually on this document.
+4) skip_section_keys = conceptually related sections that must NOT be filled.
+5) Extraction workers (Luna / GPT-4o) run ONLY after this plan.
 
-The word "insurance" is a family, not a match. Auto/vehicle insurance must NEVER fill Healthcare / primary_health_insurance. Health/medical/dental cards must NEVER fill Vehicles.
+TOPIC → SECTION (do not mix families):
+- Auto / vehicle insurance or VIN / plate card → insurance_policies + vehicles
+  (NOT health_information, vital_information, main_residence, banking)
+- Health / medical / dental / Medicare card → insurance_policies + health_information
+  (NOT vehicles)
+- Life / disability / umbrella (no vehicle, no medical card) → insurance_policies only
+- Homeowners / renters policy → insurance_policies + main_residence (NOT vehicles)
+- Vehicle registration / title → vehicles
+- Bank / checking / savings statement → banking_financial_accounts
+  (NOT main_residence just because a mailing address is printed)
+- Mortgage / deed / property tax → main_residence (optionally banking)
+- Pay stub / W-2 → employment_business (direct-deposit routing may also fill banking)
+  (NOT insurance, NOT investments)
+- Brokerage / IRA / 401k statement → investment_accounts (NOT bank, NOT credit cards)
+- Credit-card statement → credit_cards_debt (NOT bank)
+- Diploma / transcript → education_accomplishments (NOT employment)
+- DD-214 / military discharge → military_service (NOT employment)
+- Last will / living trust → estate_planning_final_wishes
+- Driver's license / passport / birth certificate → vital_information
+  (a name on another document is NOT vital_information)
+- Gym / club / HOA membership card → community_memberships
+- Donation receipt → charitable_giving
 
 CRITICAL SECTION ROUTING (do not violate):
 1) Auto insurance card / auto declarations / vehicle registration / VIN / license plate documents:
@@ -934,7 +953,13 @@ Rules:
 """
 
 
-def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: str):
+def _classify_sync(
+    *,
+    document_url: str,
+    mime_type: str,
+    requested_section_key: str,
+    prepared_text: str | None = None,
+):
     if mime_type not in SUPPORTED_MIME_TYPES:
         raise ValueError("Unsupported file type")
 
@@ -947,10 +972,21 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
     if not path.exists() or not path.is_file():
         raise FileNotFoundError("Document file not found")
 
+    local_extract = None
+    ready_text = str(prepared_text or "").strip()
+    if ready_text:
+        local_extract = {
+            "text": ready_text,
+            "document_text": ready_text,
+            "quality": "good",
+            "needs_vision": False,
+        }
+
     contents, _extract_meta = build_llm_document_contents(
         path=path,
         mime_type=mime_type,
         prompt=_build_classification_prompt(requested_section_key),
+        local_extract=local_extract,
     )
     document_text = str(
         _extract_meta.get("document_text")
@@ -998,7 +1034,13 @@ def _classify_sync(*, document_url: str, mime_type: str, requested_section_key: 
         looks_insurance = bool(_INSURANCE_DOC_RE.search(document_text))
         looks_auto = bool(_AUTO_DOC_RE.search(document_text))
         looks_bank = bool(_BANK_STMT_RE.search(document_text))
-        if looks_auto or looks_insurance:
+        inferred = infer_document_kind(
+            document_text, section_key=requested_section_key
+        )
+        planned = fill_sections_for_kind(inferred)
+        if planned:
+            fallback_best = planned[0]
+        elif looks_auto or looks_insurance:
             fallback_best = "insurance_policies"
         elif looks_bank and not _PROPERTY_PRIMARY_DOC_RE.search(document_text):
             fallback_best = "banking_financial_accounts"
@@ -1121,12 +1163,14 @@ async def classify_document_for_section(
     document_url: str,
     mime_type: str,
     requested_section_key: str,
+    prepared_text: str | None = None,
 ):
     return await asyncio.to_thread(
         _classify_sync,
         document_url=document_url,
         mime_type=mime_type,
         requested_section_key=requested_section_key,
+        prepared_text=prepared_text,
     )
 
 

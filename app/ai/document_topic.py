@@ -59,8 +59,8 @@ VEHICLE_MAKES = (
 # More specific kinds first. "insurance" is a family, not a destination.
 _AUTO_KIND_RE = re.compile(
     r"\b("
-    r"auto(?:mobile)?\s*(?:insurance|policy|card)?|"
-    r"vehicle\s*(?:insurance|policy|card)?|"
+    r"auto(?:mobile)?\s*(?:insurance|policy|card)|"
+    r"vehicle\s*(?:insurance|policy|card)|"
     r"(?:car|truck|suv|jeep|honda|motorcycle)\s*(?:insurance|policy)|"
     r"vin\b|license\s*plate|garaging|year\s*make\s*model|"
     r"collision\s*(?:coverage|deductible)|comprehensive\s*(?:coverage|deductible)|"
@@ -93,6 +93,62 @@ KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("life_insurance", _LIFE_KIND_RE),
     ("home_insurance", _HOME_KIND_RE),
     (
+        "paystub",
+        re.compile(
+            r"\b(pay\s*stub|payslip|earnings\s*statement|"
+            r"gross\s*pay|net\s*pay|w-?2|form\s*w-?2)\b",
+            re.I,
+        ),
+    ),
+    (
+        "diploma",
+        re.compile(
+            r"\b(diploma|transcript|degree\s*conferred|commencement|"
+            r"bachelor|master of|university\s+of|high\s*school\s*diploma)\b",
+            re.I,
+        ),
+    ),
+    (
+        "military",
+        re.compile(
+            r"\b(dd-?214|honorable\s*discharge|"
+            r"certificate\s*of\s*release\s*or\s*discharge)\b",
+            re.I,
+        ),
+    ),
+    (
+        "will",
+        re.compile(
+            r"\b(last\s*will|living\s*trust|revocable\s*trust|"
+            r"advance\s*directive|healthcare\s*directive)\b",
+            re.I,
+        ),
+    ),
+    (
+        "credit_card",
+        re.compile(
+            r"\b(credit\s*card\s*statement|visa\s*ending|mastercard|"
+            r"american\s*express|minimum\s*payment\s*due|credit\s*limit)\b",
+            re.I,
+        ),
+    ),
+    (
+        "brokerage",
+        re.compile(
+            r"\b(brokerage|ira\b|401\s*\(?k\)?|roth|portfolio\s*summary|"
+            r"fidelity|vanguard|schwab|equities|mutual\s*fund)\b",
+            re.I,
+        ),
+    ),
+    (
+        "mortgage",
+        re.compile(
+            r"\b(mortgage\s*statement|deed|property\s*tax|closing\s*disclosure|"
+            r"escrow\s*balance|principal\s*and\s*interest)\b",
+            re.I,
+        ),
+    ),
+    (
         "insurance",
         re.compile(
             r"\b(insurance|insurer|policy|premium|geico|allstate|progressive|"
@@ -114,6 +170,20 @@ KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
     ("passport", re.compile(r"\b(passport)\b", re.I)),
     (
+        "membership",
+        re.compile(
+            r"\b(membership\s*(?:card|id)|member\s*since|gym\s*membership|hoa\s*dues)\b",
+            re.I,
+        ),
+    ),
+    (
+        "charity",
+        re.compile(
+            r"\b(donation\s*receipt|tax\s*deductible\s*contribution|charitable)\b",
+            re.I,
+        ),
+    ),
+    (
         "bank",
         re.compile(r"\b(bank\s*statement|checking|savings|routing\s*number)\b", re.I),
     ),
@@ -130,6 +200,17 @@ KIND_FILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "home_insurance": ("insurance_policies", "main_residence"),
     "registration": ("vehicles",),
     "bank": ("banking_financial_accounts",),
+    "paystub": ("employment_business", "banking_financial_accounts"),
+    "diploma": ("education_accomplishments",),
+    "military": ("military_service",),
+    "will": ("estate_planning_final_wishes",),
+    "credit_card": ("credit_cards_debt",),
+    "brokerage": ("investment_accounts",),
+    "mortgage": ("main_residence", "banking_financial_accounts"),
+    "license": ("vital_information",),
+    "passport": ("vital_information",),
+    "membership": ("community_memberships",),
+    "charity": ("charitable_giving",),
 }
 
 KIND_SKIP_SECTIONS: dict[str, tuple[str, ...]] = {
@@ -142,18 +223,56 @@ KIND_SKIP_SECTIONS: dict[str, tuple[str, ...]] = {
     "health": ("vehicles", "vital_information", "main_residence"),
     "life_insurance": ("vehicles", "health_information", "vital_information"),
     "home_insurance": ("vehicles", "health_information"),
-    "registration": ("health_information", "insurance_policies"),
+    "registration": ("health_information", "insurance_policies", "vital_information"),
+    "bank": (
+        "main_residence",
+        "vital_information",
+        "vehicles",
+        "health_information",
+        "investment_accounts",
+        "insurance_policies",
+    ),
+    "paystub": (
+        "insurance_policies",
+        "investment_accounts",
+        "health_information",
+        "vital_information",
+    ),
+    "diploma": ("employment_business", "military_service", "vital_information"),
+    "military": ("employment_business", "education_accomplishments", "vital_information"),
+    "will": ("legal_documents_records", "insurance_policies", "vital_information"),
+    "credit_card": ("banking_financial_accounts", "investment_accounts", "main_residence"),
+    "brokerage": ("banking_financial_accounts", "credit_cards_debt", "main_residence"),
+    "mortgage": ("vehicles", "health_information"),
+    "license": ("insurance_policies", "vehicles", "health_information"),
+    "passport": ("insurance_policies", "vehicles", "health_information"),
+    "membership": ("insurance_policies", "health_information", "banking_financial_accounts"),
+    "charity": ("banking_financial_accounts", "insurance_policies"),
 }
 
 KIND_COMPATIBLE: dict[str, frozenset[str]] = {
-    "auto_insurance": frozenset({"auto_insurance", "insurance", "registration"}),
+    "auto_insurance": frozenset({"auto_insurance", "insurance"}),
     "insurance": frozenset({"auto_insurance", "insurance", "life_insurance", "home_insurance"}),
     "health_insurance": frozenset({"health_insurance", "health"}),
     "health": frozenset({"health_insurance", "health"}),
     "life_insurance": frozenset({"life_insurance", "insurance"}),
     "home_insurance": frozenset({"home_insurance", "insurance"}),
-    "registration": frozenset({"registration", "auto_insurance"}),
+    "registration": frozenset({"registration"}),
+    "bank": frozenset({"bank"}),
+    "paystub": frozenset({"paystub"}),
+    "diploma": frozenset({"diploma"}),
+    "military": frozenset({"military"}),
+    "will": frozenset({"will"}),
+    "credit_card": frozenset({"credit_card"}),
+    "brokerage": frozenset({"brokerage"}),
+    "mortgage": frozenset({"mortgage"}),
+    "license": frozenset({"license", "passport"}),
+    "passport": frozenset({"passport", "license"}),
+    "membership": frozenset({"membership"}),
+    "charity": frozenset({"charity"}),
 }
+
+_GENERIC_KINDS = frozenset({"insurance", "health", "other", "unknown", "document", ""})
 
 SECTION_KIND = {
     "insurance_policies": "insurance",
@@ -161,6 +280,15 @@ SECTION_KIND = {
     "vehicles": "registration",
     "vital_information": "license",
     "banking_financial_accounts": "bank",
+    "employment_business": "paystub",
+    "education_accomplishments": "diploma",
+    "military_service": "military",
+    "estate_planning_final_wishes": "will",
+    "credit_cards_debt": "credit_card",
+    "investment_accounts": "brokerage",
+    "main_residence": "mortgage",
+    "community_memberships": "membership",
+    "charitable_giving": "charity",
 }
 
 VIN_RE = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b", re.I)
@@ -219,6 +347,19 @@ def infer_document_kind(*texts: str | None, section_key: str | None = None) -> s
     return detect_kind(*texts, section_key=section_key)
 
 
+def prefer_inferred_kind(sol_kind: str | None, inferred: str | None) -> str:
+    """Prefer a specific OCR-inferred kind over a generic family word from Sol."""
+    inferred_k = str(inferred or "").strip()
+    sol_k = str(sol_kind or "").strip()
+    if inferred_k in KIND_FILL_SECTIONS and (
+        sol_k in _GENERIC_KINDS or sol_k not in KIND_FILL_SECTIONS
+    ):
+        return inferred_k
+    if inferred_k in KIND_FILL_SECTIONS and sol_k == "insurance" and inferred_k != "insurance":
+        return inferred_k
+    return inferred_k or sol_k
+
+
 def fill_sections_for_kind(kind: str) -> tuple[str, ...]:
     return KIND_FILL_SECTIONS.get(str(kind or "").strip(), ())
 
@@ -260,10 +401,12 @@ def format_document_plan_prompt(
             if target
             else ""
         )
-        + "- Matching the word 'insurance' is not enough. Auto/vehicle insurance "
-        "never fills Healthcare fields. Health/medical cards never fill Vehicles.\n"
-        "- Put each value in the field that matches this document's kind, not a "
-        "similarly named field from another kind of insurance.\n"
+        + "- A shared word is not a match (insurance, account, statement, card, "
+        "address, name). Match this document's kind and topic to the section "
+        "whose fields it can actually fill.\n"
+        "- Auto/vehicle insurance never fills Healthcare. Health/medical cards "
+        "never fill Vehicles. Bank statements never fill Main Residence just "
+        "because a mailing address is printed. Paystubs are Employment, not Insurance.\n"
     )
 
 
@@ -399,7 +542,7 @@ def fingerprints_match(left: dict[str, str] | None, right: dict[str, str] | None
     if year_a and year_b and year_a != year_b:
         return False
 
-    return bool(kind_a and kind_b and kind_a == kind_b)
+    return bool(kind_a and kind_b and kinds_compatible(kind_a, kind_b))
 
 
 def fingerprint_from_mongo_doc(

@@ -52,7 +52,7 @@ If the policy type is not one of these, set:
 - policy_type_other = the actual policy type from the document
 
 Exact field placement (required):
-- policy_type = type/category of insurance policy (use the normalized list above). For auto/vehicle cards use "Vehicle". For medical/health insurance ID cards use "Health" (or "Medical/Dental" when the card is clearly dental-only).
+- policy_type = type/category of insurance policy (use the normalized list above). For auto/vehicle cards use "Vehicle". For medical/health insurance ID cards use "Health" (or "Medical/Dental" when the card is clearly dental-only). Never set Health for an auto/vehicle card just because it says "insurance".
 - policy_type_other = custom policy type when policy_type is Other.
 - policy_documents_life = notes/location/details for life insurance documents, beneficiary forms, statements, or policy packet (Life policies only).
 - policy_company = insurance company/carrier name exactly as shown (e.g. "State Farm", "MetLife", "UnitedHealthcare"). Map labels such as Insurance Carrier, Insurer, Insurance Provider, Insurance Name.

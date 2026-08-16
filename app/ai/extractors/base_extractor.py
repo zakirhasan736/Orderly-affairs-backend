@@ -53,6 +53,7 @@ Global privacy and safety rules:
 - MULTI-ITEM RULE: If the document describes multiple policies, accounts, vehicles, memberships, or people, return one object per entity in the subsection array — never merge them into one object. Exception: one insurance policy / one military discharge / one continuous enlistment is ONE object (coverage lines, duty stations, and awards stay on that object). Same document re-extract should describe the same entity the same way so clients can update instead of duplicating.
 - MULTI-ITEM RULE: If the document describes multiple policies, accounts, vehicles, memberships, or people, return one object per entity in the subsection array — never merge them into one object. Exception: one insurance policy / one military discharge / one continuous enlistment is ONE object (coverage lines, duty stations, and awards stay on that object). Same document re-extract should describe the same entity the same way so clients can update instead of duplicating.
 - SECTION MATCH RULE: Only fill fields that belong to the requested section/subsection schema. Do not invent parallel subsection cards for the same entity.
+- KIND MATCH RULE: Understand the document kind first (auto insurance vs health insurance vs life vs home). Never copy a vehicle policy company/number into Healthcare fields, and never copy a health member ID into Vehicles. Sharing the word "insurance" is not a match.
 - LONG TEXT RULE: Put short facts (IDs, dates, names, amounts, dropdown values) into dedicated fields. Use notes/description TextAreas only for leftover prose that does not fit another field.
 - DATE RULE: Fill expiry / renewal / maturity / statement date fields whenever those dates appear. Prefer ISO YYYY-MM-DD. For periods, use the END date.
 - Do not extract or return raw passwords. If a password schema field exists and the document shows a password, set that field to "Stored in uploaded document" (never the raw password).
@@ -200,6 +201,16 @@ def _run_llm_extract(
         path.name,
     )
 
+    extract_role = str(get_llm_settings().get("extract_role") or "sol").strip().lower()
+    if extract_role == "luna":
+        llm_role = "luna"
+    elif extract_role == "gpt4o":
+        llm_role = "gpt4o"
+    elif extract_role == "terra":
+        llm_role = "terra"
+    else:
+        llm_role = "sol"
+
     response = generate_llm_content(
         contents=contents,
         response_mime_type="application/json",
@@ -209,7 +220,7 @@ def _run_llm_extract(
         operation=operation,
         llm_input=llm_input,
         file_name=path.name,
-        role="sol",
+        role=llm_role,
     )
 
     raw_text = getattr(response, "text", None) or ""
@@ -275,6 +286,8 @@ def _extract_sync(
 
     final_prompt = f"""
 {prompt}
+
+{get_llm_settings().get("document_plan_prompt") or ""}
 
 {get_llm_settings().get("few_shot_prompt") or ""}
 

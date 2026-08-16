@@ -41,7 +41,7 @@ from app.ai.llm_generate import (
 )
 from app.ai.ai_auth import get_current_owner, get_user_id
 from app.ai.background_section_persist import persist_cached_extractions_for_owner
-from app.ai.llm_context import clear_llm_settings, set_llm_settings
+from app.ai.llm_context import clear_llm_settings, get_llm_settings, set_llm_settings
 from app.ai.llm_generate import active_brain_info
 from app.ai.local_document_extract import describe_read_source
 from app.ai.skill_memory import (
@@ -89,6 +89,21 @@ AI_DOCUMENT_REUSABLE_STATUSES = (
     "classifying",
     "queued",
 )
+
+
+def _attach_document_plan(classification: dict | None) -> None:
+    if not isinstance(classification, dict):
+        return
+    ctx = get_llm_settings()
+    set_llm_settings(
+        {
+            **ctx,
+            "document_plan": classification,
+            "document_plan_prompt": str(
+                classification.get("document_plan_prompt") or ""
+            ),
+        }
+    )
 
 
 def _schedule_classify_skill(
@@ -291,6 +306,14 @@ async def _extract_section_without_classification(
     extractor,
 ):
     classification = doc.get("last_classification") or {}
+    if not isinstance(classification, dict):
+        classification = {}
+    else:
+        classification = harden_vehicle_insurance_routing(
+            dict(classification),
+            document_text=_document_text_hint(file_path, mime_type, doc),
+        )
+    _attach_document_plan(classification)
 
     await ai_documents_collection.update_one(
         {"_id": file_id, "user_id": user_id},
@@ -302,12 +325,20 @@ async def _extract_section_without_classification(
         },
     )
 
-    result = await extractor(
-        document_url=f"local_file:{file_path}",
-        subsection=payload.subsection,
-        mime_type=mime_type,
-        field_catalog=payload.field_catalog,
-    )
+    skip_sections = {
+        str(item)
+        for item in (classification.get("skip_section_keys") or [])
+        if item
+    }
+    if payload.section in skip_sections:
+        result = _empty_skipped_extract(payload.section)
+    else:
+        result = await extractor(
+            document_url=f"local_file:{file_path}",
+            subsection=payload.subsection,
+            mime_type=mime_type,
+            field_catalog=payload.field_catalog,
+        )
 
     fresh_doc = await ai_documents_collection.find_one(
         {"_id": file_id, "user_id": user_id},
@@ -373,13 +404,54 @@ async def _safe_prefetch_sections(
         logger.warning("Background section prefetch failed: %s", repr(error))
 
 
-def _limit_prefetch_keys(best_key: str, extra_keys: list[str]) -> list[str]:
+def _filter_keys_by_plan(
+    keys: list[str],
+    classification: dict | None,
+) -> list[str]:
+    plan = classification if isinstance(classification, dict) else {}
+    skip = {
+        str(item)
+        for item in (plan.get("skip_section_keys") or [])
+        if item
+    }
+    fill = [
+        str(item)
+        for item in (plan.get("fill_section_keys") or [])
+        if item
+    ]
+    out: list[str] = []
+    for key in keys:
+        if not key or key in skip:
+            continue
+        if fill and key not in fill:
+            continue
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def _limit_prefetch_keys(
+    best_key: str,
+    extra_keys: list[str],
+    classification: dict | None = None,
+) -> list[str]:
     partners = FAST_PARTNER_PREFETCH.get(best_key, [])
     ordered: list[str] = []
     for key in [best_key, *partners, *extra_keys]:
         if key and key in SECTION_EXTRACTORS and key not in ordered:
             ordered.append(key)
-    return ordered[:MAX_BACKGROUND_PREFETCH_SECTIONS]
+    return _filter_keys_by_plan(ordered, classification)[:MAX_BACKGROUND_PREFETCH_SECTIONS]
+
+
+def _empty_skipped_extract(section_key: str) -> dict:
+    return {
+        "section": section_key,
+        "scope": "section",
+        "confidence": 0,
+        "patch": {},
+        "skipped": True,
+        "skip_reason": "document_kind_mismatch",
+    }
 
 
 async def _run_extractor(
@@ -390,6 +462,15 @@ async def _run_extractor(
     subsection: str | None,
     field_catalog: list[dict] | None,
 ):
+    plan = get_llm_settings().get("document_plan") or {}
+    skip = {
+        str(item)
+        for item in (plan.get("skip_section_keys") or [])
+        if item
+    }
+    if section_key in skip:
+        return _empty_skipped_extract(section_key)
+
     extractor = SECTION_EXTRACTORS.get(section_key)
     if not extractor:
         return None
@@ -429,6 +510,24 @@ async def _cache_additional_sections(
     if not additional_sections:
         return
 
+    classification = doc.get("last_classification") if isinstance(doc, dict) else {}
+    _attach_document_plan(classification if isinstance(classification, dict) else None)
+    skip = {
+        str(item)
+        for item in ((classification or {}).get("skip_section_keys") or [])
+        if item
+    }
+    additional_sections = [
+        item
+        for item in additional_sections
+        if isinstance(item, dict) and item.get("section_key") not in skip
+    ]
+    if not additional_sections:
+        return
+
+    worker_ctx = get_llm_settings()
+    set_llm_settings({**worker_ctx, "extract_role": "luna"})
+
     fresh = await ai_documents_collection.find_one(
         {"_id": file_id, "user_id": user_id},
         {"cached_extractions": 1},
@@ -454,6 +553,8 @@ async def _cache_additional_sections(
                 subsection=None,
                 field_catalog=None,
             )
+            if isinstance(result, dict) and result.get("skipped"):
+                return
             if isinstance(result, dict):
                 full = mark_full_extraction(result) or result
                 # Keep useful shared fields from a prior seed.
@@ -640,13 +741,25 @@ async def _finalize_autofill_success(
                 ) or vehicle_seed
                 result = cached_extractions["vehicles"]
     elif payload.section == "insurance_policies":
+        skip_partners = {
+            str(item)
+            for item in ((classification or {}).get("skip_section_keys") or [])
+            if item
+        }
         # If overview already paired Vehicles, force a thin bridge even when
         # policy_type is blank / ambiguous so the client can badge New data.
-        force_vehicle_bridge = any(
-            item.get("section_key") == "vehicles" for item in additional_sections
+        force_vehicle_bridge = (
+            "vehicles" not in skip_partners
+            and any(
+                item.get("section_key") == "vehicles" for item in additional_sections
+            )
         )
-        vehicle_seed = seed_vehicles_from_insurance(
-            result, force_bridge=force_vehicle_bridge
+        vehicle_seed = (
+            None
+            if "vehicles" in skip_partners
+            else seed_vehicles_from_insurance(
+                result, force_bridge=force_vehicle_bridge
+            )
         )
         if vehicle_seed:
             cached_extractions["vehicles"] = merge_seed_into_cached(
@@ -663,7 +776,9 @@ async def _finalize_autofill_success(
                     {
                         "section_key": "vehicles",
                         "section_id": (get_section_meta("vehicles") or {}).get("id"),
-                        "section_label": (get_section_meta("vehicles") or {}).get("label"),
+                        "section_label": (get_section_meta("vehicles") or {}).get(
+                            "label"
+                        ),
                         "confidence": "medium",
                         "data_summary": "Vehicle details found on this insurance document.",
                     }
@@ -1048,6 +1163,7 @@ async def autofill_section(
                 dict(reused_classification),
                 document_text=_document_text_hint(file_path, mime_type, doc),
             )
+            _attach_document_plan(classification)
             matches_requested = bool(classification.get("matches_requested_section"))
             best_section_key = classification.get("best_section_key") or payload.section
             suggested = get_section_meta(best_section_key) or {}
@@ -1066,6 +1182,7 @@ async def autofill_section(
                     for item in additional_sections
                     if item.get("section_key")
                 ],
+                classification,
             )
             await ai_documents_collection.update_one(
                 {"_id": payload.file_id, "user_id": user_id},
@@ -1114,6 +1231,10 @@ async def autofill_section(
                 "best_subsection": suggested.get("default_subsection"),
                 "matches_requested_section": matches_requested,
                 "document_summary": classification.get("document_summary"),
+                "document_kind": classification.get("document_kind"),
+                "document_topic": classification.get("document_topic"),
+                "fill_section_keys": classification.get("fill_section_keys") or [],
+                "skip_section_keys": classification.get("skip_section_keys") or [],
                 "additional_sections": additional_sections,
                 "section_previews": section_previews,
                 "file_id": payload.file_id,
@@ -1123,13 +1244,14 @@ async def autofill_section(
                 "replaced": bool(replaced_file_ids),
             }
 
+        doc_text_hint = _document_text_hint(file_path, mime_type, doc)
         classification = await classify_document_for_section(
             document_url=f"local_file:{file_path}",
             mime_type=mime_type,
             requested_section_key=payload.section,
+            prepared_text=doc_text_hint,
         )
         # Overview classify_only must not force the probe section.
-        doc_text_hint = _document_text_hint(file_path, mime_type, doc)
         if not payload.classify_only:
             classification = enforce_upload_section_first(
                 classification,
@@ -1154,6 +1276,7 @@ async def autofill_section(
                 classification,
                 document_text=doc_text_hint,
             )
+            _attach_document_plan(classification)
             # Re-read after harden — best_section may have changed.
             matches_requested = bool(classification.get("matches_requested_section"))
             best_section_key = classification.get("best_section_key") or payload.section
@@ -1174,6 +1297,7 @@ async def autofill_section(
                     for item in additional_sections
                     if item.get("section_key")
                 ],
+                classification,
             )
 
             await ai_documents_collection.update_one(
@@ -1229,6 +1353,10 @@ async def autofill_section(
                 "best_subsection": suggested.get("default_subsection"),
                 "matches_requested_section": matches_requested,
                 "document_summary": classification.get("document_summary"),
+                "document_kind": classification.get("document_kind"),
+                "document_topic": classification.get("document_topic"),
+                "fill_section_keys": classification.get("fill_section_keys") or [],
+                "skip_section_keys": classification.get("skip_section_keys") or [],
                 "additional_sections": additional_sections,
                 "section_previews": section_previews,
                 "file_id": payload.file_id,
@@ -1263,11 +1391,15 @@ async def autofill_section(
                 suggested_section_key=best_section_key,
             )
 
-            prefetch_keys = [best_section_key] + [
-                item["section_key"]
-                for item in additional_sections
-                if item.get("section_key")
-            ]
+            prefetch_keys = _limit_prefetch_keys(
+                best_section_key,
+                [
+                    item["section_key"]
+                    for item in additional_sections
+                    if item.get("section_key")
+                ],
+                classification,
+            )
 
             await ai_documents_collection.update_one(
                 {"_id": payload.file_id, "user_id": user_id},
@@ -1313,6 +1445,10 @@ async def autofill_section(
                     "suggested_section_label": suggested.get("label"),
                     "suggested_subsection": suggested.get("default_subsection"),
                     "document_summary": classification.get("document_summary"),
+                    "document_kind": classification.get("document_kind"),
+                    "document_topic": classification.get("document_topic"),
+                    "fill_section_keys": classification.get("fill_section_keys") or [],
+                    "skip_section_keys": classification.get("skip_section_keys") or [],
                     "extracted_fields": [],
                     "additional_sections": additional_sections,
                     "section_previews": section_previews,
@@ -1329,12 +1465,21 @@ async def autofill_section(
             classification=classification,
             document_text=doc_text_hint,
         )
-        result = await extractor(
-            document_url=f"local_file:{file_path}",
-            subsection=payload.subsection,
-            mime_type=mime_type,
-            field_catalog=payload.field_catalog,
-        )
+        _attach_document_plan(classification)
+        skip_sections = {
+            str(item)
+            for item in (classification.get("skip_section_keys") or [])
+            if item
+        }
+        if payload.section in skip_sections:
+            result = _empty_skipped_extract(payload.section)
+        else:
+            result = await extractor(
+                document_url=f"local_file:{file_path}",
+                subsection=payload.subsection,
+                mime_type=mime_type,
+                field_catalog=payload.field_catalog,
+            )
 
         additional_sections = build_additional_sections_payload(
             classification,

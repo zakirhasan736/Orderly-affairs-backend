@@ -2,9 +2,9 @@
 """Central model IDs and pipeline flags for document intelligence.
 
 Roles (do not interchange randomly):
-  Sol   = primary semantic intelligence (classify, section, field mapping)
+  Sol   = architect: understand document kind + topic, match sections/fields, write work plan
   Terra = bad-OCR vision reader (faithful text only)
-  Luna  = cheap constrained extraction worker AFTER Sol mapping
+  Luna  = constrained extraction worker AFTER Sol plan (parallel section fills)
   GPT-4o = secondary / legacy fallback
 
 Override with env. Do not scatter model strings in extractors.

@@ -31,8 +31,8 @@ Important global rules:
 - Do not explain.
 
 15A field meanings:
-- primary_health_insurance = short readable summary of the PRIMARY health card: company, plan name, member name, member ID, group number, RxBIN/RxPCN/RxGRP, payer ID, and key deductible/OOP/coinsurance lines. Prefer a compact multi-line note. Do NOT invent values. Detailed structured card fields are also extracted into Insurance Policies (section insurance_policies) — still fill this summary so Health Information shows the card at a glance.
-- secondary_health_insurance = secondary insurance, supplemental plan, policy/member/group number, insurance card details, contact info, or document location.
+- primary_health_insurance = short readable summary of the PRIMARY health/medical/dental card only. If this document is auto/vehicle/homeowners/life insurance, leave this null — do not copy a car policy into Healthcare.
+- secondary_health_insurance = secondary MEDICAL insurance only. Not auto or home policies.
 - medicare_medicaid = Medicare, Medicaid, Medicare Advantage, supplement plan, card number, member ID, plan details, or document location.
 - current_conditions = current diagnoses, chronic illnesses, medical history, ongoing health problems, or condition notes.
 - allergies = drug allergies, food allergies, environmental allergies, latex allergy, reactions, or allergy notes.
@@ -71,6 +71,8 @@ Use one of these values only if clearly supported:
 - insurance_accepted = insurance accepted, plan used, copay notes, billing notes, or network information.
 - portal_access = patient portal URL, username/password only if clearly shown, access notes, or credential storage location.
 - important_notes = appointment notes, care instructions, special instructions, treatment notes, referrals, or anything important for next of kin.
+
+- If the uploaded document is auto/vehicle insurance, homeowners, life, or umbrella (not a medical/health/dental/Medicare card), return empty 15A. Do not copy the carrier name into primary_health_insurance.
 
 Common source documents:
 - health insurance card
