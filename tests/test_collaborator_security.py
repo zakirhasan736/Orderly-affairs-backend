@@ -31,9 +31,45 @@ def test_enrolled_mfa_clears_mfa_gate():
         "password_changed_at": "2026-01-01",
         "must_enroll_mfa": True,
         "mfa_methods": {"email": True, "authenticator": False, "sms": False},
+        "didit_status": "Approved",
     }
     assert collaborator_needs_mfa_enroll(user) is False
+    assert collaborator_setup_payload(user)["must_verify_identity"] is False
     assert collaborator_setup_payload(user)["security_setup_required"] is False
+
+
+def test_family_never_needs_identity_gate(monkeypatch):
+    from app.auth.collaborator_security import collaborator_needs_identity_verification
+
+    monkeypatch.setattr("app.auth.didit.claims_require_didit", lambda: True)
+    family = {
+        "role": "nextkin",
+        "access_type": "family",
+        "must_change_password": False,
+        "password_changed_at": "2026-01-01",
+        "mfa_methods": {"email": True},
+    }
+    assert collaborator_needs_identity_verification(family) is False
+
+
+def test_nok_needs_identity_until_approved(monkeypatch):
+    from app.auth.collaborator_security import (
+        collaborator_needs_identity_verification,
+        collaborator_setup_payload,
+    )
+
+    monkeypatch.setattr("app.auth.didit.claims_require_didit", lambda: True)
+    user = {
+        "role": "nextkin",
+        "access_type": "nextkin",
+        "must_change_password": False,
+        "password_changed_at": "2026-01-01",
+        "mfa_methods": {"email": True},
+    }
+    assert collaborator_needs_identity_verification(user) is True
+    assert collaborator_setup_payload(user)["must_verify_identity"] is True
+    user["didit_status"] = "Approved"
+    assert collaborator_needs_identity_verification(user) is False
 
 
 def test_returning_legacy_user_is_not_forced():

@@ -9,10 +9,11 @@ Authorization model:
     and not ownerDisputed
     and (ownerDeathCheckStatus == MATCH or validAuthorizedAdminOverride)
 
-Attorney / executor / trustee: Didit ID+selfie must be Approved before they
-report a passing or upload a certificate. Declined / in-review / error goes
-to manual review. Named next of kin may report and upload first; they must
-be Didit Approved before a claim is issued.
+Every next of kin (including attorney / executor / trustee) completes Didit
+ID+selfie at first login, before the dashboard. Declined / in-review / error
+stays off the dashboard for human review. After identity is Approved they may
+report a passing, then upload a death certificate. SSDMF and the owner
+168-hour notice start when the certificate is stored.
 
 SSDMF (Didit usa_states_death_check) runs on the vault owner only, after the
 certificate is stored. MATCH corroborates mortality; NO_MATCH / ERROR /

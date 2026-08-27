@@ -2410,7 +2410,7 @@ async def get_nextkin_access(
         "didit": {
             **session_public_payload(nextkin),
             **claimant,
-            "required": bool(pending or deceased or claimant.get("didit_before_report")),
+            "required": True,
         },
         "death_verification": public_death_verification(owner) if owner else None,
         "vault_push": vault_push_session_payload(owner),
@@ -4036,14 +4036,9 @@ async def nextkin_report_owner_deceased(
     if not nextkin.get("immediate_access", False) or nextkin.get("access_revoked"):
         raise HTTPException(status_code=403, detail=NOK_LOGIN_GENERIC)
 
-    from app.auth.claimant_roles import is_attorney_or_executor
     from app.auth.didit import DIDIT_APPROVED, claims_require_didit
 
-    if (
-        is_attorney_or_executor(nextkin)
-        and claims_require_didit()
-        and nextkin.get("didit_status") != DIDIT_APPROVED
-    ):
+    if claims_require_didit() and nextkin.get("didit_status") != DIDIT_APPROVED:
         from app.auth.after_death_policy import didit_needs_manual_review
 
         if didit_needs_manual_review(nextkin.get("didit_status")):
@@ -4053,7 +4048,7 @@ async def nextkin_report_owner_deceased(
                     "$set": {
                         "didit_manual_review_required": True,
                         "didit_manual_review_reason": (
-                            "Attorney/executor identity was not Approved."
+                            "Identity was not Approved."
                         ),
                     }
                 },
@@ -4121,9 +4116,10 @@ async def nextkin_report_owner_deceased(
             "it. Vault access stays sealed until our team releases it."
             if already
             else (
-                "Passing report received. The owner was notified. Next of kin "
-                "must verify identity (government ID and a live selfie). Vault "
-                "access stays sealed until identity clears and our team releases it."
+                "Passing report received. Upload the death certificate next. "
+                "The owner is notified when that file is stored, independent "
+                "death records are checked, and a 7-day hold starts. Vault "
+                "access stays sealed until our team releases it."
             )
         ),
         "upon_death_granted": 0,

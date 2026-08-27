@@ -39,13 +39,35 @@ def collaborator_needs_mfa_enroll(user: dict | None) -> bool:
     return not user.get("last_login_at")
 
 
+def collaborator_needs_identity_verification(user: dict | None) -> bool:
+    """True until this next of kin has a Didit Approved ID + selfie.
+
+    Family collaborators never take this step. When Didit is not configured
+    (typical local dev), the gate is skipped so they are not trapped.
+    """
+    if not user or user.get("role") != "nextkin":
+        return False
+    from app.auth.access_types import is_family_collaborator
+    from app.auth.after_death_policy import didit_is_approved
+    from app.auth.didit import claims_require_didit
+
+    if is_family_collaborator(user):
+        return False
+    if not claims_require_didit():
+        return False
+    return not didit_is_approved(user.get("didit_status"))
+
+
 def collaborator_setup_payload(user: dict | None) -> dict:
     must_pw = collaborator_needs_password_change(user)
     must_mfa = collaborator_needs_mfa_enroll(user)
+    must_kyc = collaborator_needs_identity_verification(user)
     return {
         "must_change_password": must_pw,
         "must_enroll_mfa": must_mfa,
-        "security_setup_required": must_pw or must_mfa,
+        "must_verify_identity": must_kyc,
+        "didit_status": (user or {}).get("didit_status") or None,
+        "security_setup_required": must_pw or must_mfa or must_kyc,
     }
 
 

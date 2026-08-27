@@ -303,7 +303,7 @@ class TestKycTiming:
         flags = public_claimant_flags({"relationship": "Estate attorney"})
         assert flags["didit_before_report"] is True
         nok = public_claimant_flags({"relationship": "Daughter"})
-        assert nok["didit_before_report"] is False
+        assert nok["didit_before_report"] is True
 
     def test_estate_administrator_is_legal_claimant(self):
         assert is_attorney_or_executor({"relationship": "Estate administrator"})

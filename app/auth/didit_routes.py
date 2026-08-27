@@ -84,7 +84,12 @@ async def didit_webhook(request: Request):
     return {"ok": True}
 
 
-async def _require_nok(request: Request, authorization: str | None) -> tuple[dict, dict]:
+async def _require_nok(
+    request: Request,
+    authorization: str | None,
+    *,
+    living_access: bool = True,
+) -> tuple[dict, dict]:
     decoded = decode_access_token(
         request,
         authorization,
@@ -103,7 +108,9 @@ async def _require_nok(request: Request, authorization: str | None) -> tuple[dic
     require_nok_principal(nextkin)
     if is_family_collaborator(nextkin):
         raise HTTPException(status_code=403, detail="Family collaborators cannot start this process")
-    if not nextkin.get("immediate_access") or nextkin.get("access_revoked"):
+    if nextkin.get("access_revoked"):
+        raise HTTPException(status_code=403, detail="Access not approved")
+    if living_access and not nextkin.get("immediate_access"):
         raise HTTPException(status_code=403, detail="Access not approved")
     owner = None
     try:
@@ -122,7 +129,7 @@ async def nextkin_didit_status(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    nextkin, owner = await _require_nok(request, authorization)
+    nextkin, owner = await _require_nok(request, authorization, living_access=False)
     pending = bool(owner.get("death_report_pending"))
     deceased = owner.get("owner_status") == "deceased"
     attorney = is_attorney_or_executor(nextkin)
@@ -155,18 +162,7 @@ async def nextkin_didit_session(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    nextkin, owner = await _require_nok(request, authorization)
-    pending = bool(owner.get("death_report_pending"))
-    deceased = owner.get("owner_status") == "deceased"
-    attorney = is_attorney_or_executor(nextkin)
-    from app.auth.after_death_case import open_case_for_owner
-
-    case = await open_case_for_owner(str(owner["_id"]))
-    if not pending and not deceased and not attorney and not case:
-        raise HTTPException(
-            status_code=400,
-            detail="Identity verification starts after a passing is reported.",
-        )
+    nextkin, owner = await _require_nok(request, authorization, living_access=False)
     if not didit_configured():
         raise HTTPException(
             status_code=503,
@@ -213,11 +209,10 @@ async def nextkin_upload_death_certificate(
 ):
     """Store a death certificate, then run SSDMF on the owner — not the claimant."""
     nextkin, owner = await _require_nok(request, authorization)
-    attorney = is_attorney_or_executor(nextkin)
     pending = bool(owner.get("death_report_pending"))
     deceased = owner.get("owner_status") == "deceased"
 
-    if attorney and not _didit_ok(nextkin):
+    if not _didit_ok(nextkin):
         from app.auth.after_death_policy import didit_needs_manual_review
 
         if didit_needs_manual_review(nextkin.get("didit_status")):
@@ -227,7 +222,7 @@ async def nextkin_upload_death_certificate(
                     "$set": {
                         "didit_manual_review_required": True,
                         "didit_manual_review_reason": (
-                            "Attorney/executor identity was not Approved."
+                            "Identity was not Approved."
                         ),
                     }
                 },
@@ -243,7 +238,7 @@ async def nextkin_upload_death_certificate(
             status_code=400,
             detail="Verify your identity before uploading a death certificate.",
         )
-    if not attorney and not pending and not deceased:
+    if not pending and not deceased:
         raise HTTPException(
             status_code=400,
             detail="Report a passing before uploading a death certificate.",

@@ -1,9 +1,8 @@
 """Who may start after-death verification (next of kin vs attorney/executor).
 
-Family collaborators are never claimants. Attorneys and executors named as
-next of kin must finish Didit ID+selfie before they can report a passing or
-upload a death certificate (Path A). Other next of kin report first, then
-verify identity.
+Family collaborators are never claimants. Every next of kin completes Didit
+ID+selfie at first login, before the dashboard. After that they report a
+passing, then upload a death certificate.
 """
 
 from __future__ import annotations
@@ -64,8 +63,9 @@ def didit_purpose(user: dict | None) -> str:
 
 def public_claimant_flags(user: dict | None) -> dict[str, Any]:
     legal = is_attorney_or_executor(user)
+    family = is_family_claimant(user)
     return {
         "is_attorney_or_executor": legal,
-        "didit_before_report": legal,
+        "didit_before_report": not family,
         "claimant_kind": claimant_kind_label(user),
     }
