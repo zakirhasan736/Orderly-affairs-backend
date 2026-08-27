@@ -168,3 +168,39 @@ def test_collaborator_change_password_reads_nok_session_cookie():
     assert "decode_owner_or_nok_token" in inspect.getsource(
         get_authorized_user_for_email
     )
+
+
+def test_collaborator_login_accepts_invite_plaintext():
+    from app.auth.collaborator_security import (
+        collaborator_has_login_secret,
+        collaborator_login_password_ok,
+    )
+    from app.security.password_handler import hash_password
+
+    hashed = {
+        "role": "nextkin",
+        "password_hash": hash_password("InvitePass1"),
+    }
+    assert collaborator_login_password_ok(hashed, "InvitePass1") is True
+    assert collaborator_login_password_ok(hashed, "wrong") is False
+
+    invite_only = {
+        "role": "nextkin",
+        "owner_id": "owner1",
+        "email": "nok@example.com",
+        "master_password": "CardPassword9",
+    }
+    assert collaborator_has_login_secret(invite_only) is True
+    assert collaborator_login_password_ok(invite_only, "CardPassword9") is True
+    assert collaborator_login_password_ok(invite_only, "CardPassword8") is False
+
+
+def test_nextkin_login_looks_up_by_identifier():
+    import inspect
+
+    from app.auth.routes import nextkin_login
+
+    src = inspect.getsource(nextkin_login)
+    assert "find_nextkin_by_login_identifier" in src
+    assert "collaborator_login_password_ok" in src
+    assert "NOK_LOGIN_OWNER_ACCOUNT" in src

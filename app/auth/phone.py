@@ -151,6 +151,56 @@ async def find_owner_by_login_identifier(
     )
 
 
+async def find_nextkin_by_login_identifier(
+    identifier: str,
+    *,
+    users_collection: Any,
+) -> dict | None:
+    """Resolve a nextkin/family account by email or phone."""
+    raw = (identifier or "").strip()
+    if not raw:
+        return None
+
+    if looks_like_email(raw):
+        email = raw.lower()
+        user = await users_collection.find_one(
+            {"email": email, "role": "nextkin"}
+        )
+        if user:
+            return user
+        return await users_collection.find_one(
+            {
+                "role": "nextkin",
+                "email": {"$regex": f"^{re.escape(email)}$", "$options": "i"},
+            }
+        )
+
+    if looks_like_phone_identifier(raw):
+        candidates: set[str] = {raw}
+        try:
+            candidates.add(format_phone(raw))
+        except ValueError:
+            pass
+        digits = re.sub(r"\D", "", raw)
+        if digits:
+            candidates.add(digits)
+            candidates.add(f"+{digits}")
+        listed = list(candidates)
+        return await users_collection.find_one(
+            {
+                "role": "nextkin",
+                "$or": [
+                    {"phone": {"$in": listed}},
+                    {"phone_number": {"$in": listed}},
+                ],
+            }
+        )
+
+    return await users_collection.find_one(
+        {"email": raw.lower(), "role": "nextkin"}
+    )
+
+
 async def ensure_owner_phone_index(users_collection: Any) -> None:
     """Unique phone per owner (sparse — accounts without phone are allowed)."""
     await users_collection.create_index(

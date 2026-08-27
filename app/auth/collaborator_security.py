@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 from datetime import datetime
 
 
@@ -76,6 +77,54 @@ def first_login_invite_fields() -> dict:
         "must_change_password": True,
         "must_enroll_mfa": True,
     }
+
+
+def _plain_secret_matches(stored: str, offered: str) -> bool:
+    left = stored.encode("utf-8")
+    right = offered.encode("utf-8")
+    if len(left) != len(right):
+        return False
+    return hmac.compare_digest(left, right)
+
+
+def collaborator_login_password_ok(user: dict | None, plain: str) -> bool:
+    """Accept stored hashes or the invite plaintext `master_password`.
+
+    Living NOK credentials live in encrypted_profile as plaintext plus
+    password_hash. Login used to check only the hash on the raw Mongo
+    document, so a missing/stale hash with a valid invite password 401'd.
+    """
+    if not user or not str(plain or "").strip():
+        return False
+
+    from app.security.nextkin_profile_crypto import load_nextkin_profile
+    from app.security.password_handler import verify_password
+
+    profile = load_nextkin_profile(dict(user)) or dict(user)
+    offered = str(plain).strip()
+
+    for key in ("password_hash", "password"):
+        stored = profile.get(key) or ""
+        if isinstance(stored, str) and stored and verify_password(offered, stored):
+            return True
+
+    master = str(profile.get("master_password") or "").strip()
+    if master and _plain_secret_matches(master, offered):
+        return True
+    return False
+
+
+def collaborator_has_login_secret(user: dict | None) -> bool:
+    if not user:
+        return False
+    from app.security.nextkin_profile_crypto import load_nextkin_profile
+
+    profile = load_nextkin_profile(dict(user)) or dict(user)
+    return bool(
+        str(profile.get("password_hash") or "").strip()
+        or str(profile.get("password") or "").strip()
+        or str(profile.get("master_password") or "").strip()
+    )
 
 
 def password_reset_identity(user: dict | None) -> dict:

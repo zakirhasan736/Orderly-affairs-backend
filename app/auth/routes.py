@@ -26,6 +26,7 @@ from passlib.context import CryptContext
 from app.security.usage_guard import enforce_usage
 from app.auth.phone import (
     ensure_phone_available,
+    find_nextkin_by_login_identifier,
     find_owner_by_login_identifier,
     format_phone,
     looks_like_email,
@@ -112,6 +113,10 @@ PENDING_SIGNUP_GENERIC = (
 )
 NOK_LOGIN_GENERIC = (
     "Unable to sign in. Contact the kit owner for assistance."
+)
+NOK_LOGIN_OWNER_ACCOUNT = (
+    "This email is a vault owner account. Sign in from the main login page, "
+    "not Next of Kin."
 )
 PASSWORD_RESET_GENERIC_ERROR = "Unable to reset password. Please try again."
 # pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -1270,11 +1275,12 @@ async def owner_login(data: LoginRequest, request: Request, response: Response):
 @router.post("/nextkin-login")
 async def nextkin_login(request: Request, response: Response):
     data = await request.json()
-    email = data.get("email", "").lower().strip()
-    master_password = data.get("master_password")
+    identifier = (data.get("email") or "").strip()
+    email = identifier.lower()
+    master_password = data.get("master_password") or data.get("password")
     captcha_token = data.get("captcha_token")
 
-    if not email or not master_password:
+    if not identifier or not master_password:
         raise HTTPException(status_code=400, detail="Email and master_password required")
 
     from app.auth.captcha import verify_captcha_token
@@ -1284,13 +1290,36 @@ async def nextkin_login(request: Request, response: Response):
 
     await enforce_auth_rate_limit(request, key=f"nok-login:{email}")
 
-    user = await users_collection.find_one({"email": email, "role": "nextkin"})
-    stored_password = ""
-    if user:
-        stored_password = user.get("password_hash") or user.get("password") or ""
+    from app.auth.collaborator_security import (
+        collaborator_has_login_secret,
+        collaborator_login_password_ok,
+    )
 
-    if not user or not verify_password(master_password, stored_password):
+    user = await find_nextkin_by_login_identifier(
+        identifier,
+        users_collection=users_collection,
+    )
+
+    if not user:
+        owner = await find_owner_by_login_identifier(
+            identifier,
+            users_collection=users_collection,
+        )
+        if owner:
+            raise HTTPException(status_code=403, detail=NOK_LOGIN_OWNER_ACCOUNT)
+        print(f"nextkin-login 401: no nextkin account for {identifier!r}")
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    if not collaborator_login_password_ok(user, str(master_password)):
+        if not collaborator_has_login_secret(user):
+            raise HTTPException(status_code=403, detail=NOK_LOGIN_GENERIC)
+        print(
+            f"nextkin-login 401: bad password for {user.get('email')!r} "
+            f"(has_hash={bool(user.get('password_hash') or user.get('password'))})"
+        )
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    email = str(user.get("email") or identifier).lower().strip()
 
     from app.auth.access_types import (
         require_collaborator_login_portal,
