@@ -170,8 +170,17 @@ async def nextkin_didit_session(
         )
     try:
         session = await create_or_reuse_session(nextkin=nextkin, owner=owner)
+    except HTTPException:
+        raise
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        print(f"Didit session failed for {nextkin.get('_id')}: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not start identity verification. Try again.",
+        ) from exc
+    pending = bool(owner.get("death_report_pending"))
     return {
         **session,
         **public_claimant_flags(nextkin),

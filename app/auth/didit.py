@@ -135,12 +135,18 @@ def post_didit_json(path: str, payload: dict) -> dict:
     )
     try:
         with urlopen(req, timeout=25) as resp:
-            return json.loads(resp.read().decode("utf-8") or "{}")
+            raw = resp.read().decode("utf-8") or "{}"
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise RuntimeError("Didit API returned an unexpected payload")
+            return parsed
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"Didit API error ({exc.code}): {detail}") from exc
     except URLError as exc:
         raise RuntimeError(f"Didit is unreachable: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Didit API returned invalid JSON") from exc
 
 
 def _post_json(path: str, payload: dict) -> dict:

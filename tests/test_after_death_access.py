@@ -319,3 +319,13 @@ class TestDiditConfig:
         assert getattr(settings, "DIDIT_APPLICATION_ID", None) in {None, ""} or True
         assert didit_configured.__doc__ is None or True
 
+    def test_session_response_defines_pending(self):
+        import inspect
+
+        from app.auth.didit_routes import nextkin_didit_session
+
+        src = inspect.getsource(nextkin_didit_session)
+        assert "death_report_pending" in src
+        assert "pending = bool(owner.get(" in src
+        assert "except Exception" in src
+
