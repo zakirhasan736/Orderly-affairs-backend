@@ -23,6 +23,7 @@ from app.auth.portal_roles import (
     resolve_dashboard_permissions,
     role_label,
 )
+from app.auth.collaborator_security import first_login_invite_fields
 from app.database import users_collection
 from app.notifications.nextkin_emails import send_family_invite_email
 from app.security.nextkin_profile_crypto import (
@@ -140,6 +141,7 @@ async def create_family_member(
         "owner_id": str(owner["_id"]),
         "verified": True,
         "mfa_enabled": False,
+        **first_login_invite_fields(),
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
     }
@@ -289,6 +291,7 @@ async def update_family_member(
         password_changed = True
         update_data["password_hash"] = hash_password(new_password)
         update_data["master_password"] = new_password
+        update_data["must_change_password"] = True
     elif "master_password" in update_data and not new_password:
         update_data.pop("master_password", None)
 

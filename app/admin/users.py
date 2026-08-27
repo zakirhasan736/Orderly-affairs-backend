@@ -18,6 +18,8 @@ from app.admin.permissions import (
     user_can_force_logout,
     user_can_manage_subscriptions,
     user_can_suspend_accounts,
+    user_has_area,
+    user_is_read_only,
 )
 from app.billing.access import compute_comp_end, default_billing_fields, get_comp
 from app.config import settings
@@ -58,6 +60,15 @@ class GrantCompBody(BaseModel):
     cancel_stripe_subscription: bool = True
 
 
+class ReleaseNokAccessBody(BaseModel):
+    confirm: bool = False
+    note: Optional[str] = Field(default=None, max_length=1000)
+    ssdmf_override: bool = False
+    certificate_override: bool = False
+    wait_override: bool = False
+    death_check_override_reason: Optional[str] = Field(default=None, max_length=1000)
+
+
 def _oid(user_id: str) -> ObjectId:
     try:
         return ObjectId(user_id)
@@ -95,6 +106,10 @@ def _serialize_user(user: dict, *, section_count: int | None = None) -> dict:
         "admin_role": user.get("admin_role"),
         "admin_mfa_enabled": bool(user.get("admin_mfa_enabled")),
         "section_count": section_count,
+        "owner_status": user.get("owner_status") or "alive",
+        "death_report_pending": bool(user.get("death_report_pending")),
+        "authorized_people": user.get("authorized_people") or [],
+        "death_verification": _serialize_death_verification(user),
     }
 
 
@@ -114,7 +129,82 @@ METADATA_PROJECTION = {
     "role_admin": 1,
     "admin_role": 1,
     "admin_mfa_enabled": 1,
+    "owner_status": 1,
+    "death_report_pending": 1,
+    "death_verification": 1,
+    "ssdmf_status": 1,
+    "death_certificate_uploaded_at": 1,
+    "owner_wait_started_at": 1,
+    "owner_wait_ends_at": 1,
+    "owner_wait_elapsed": 1,
+    "owner_wait_reporter_name": 1,
+    "death_claim_alert": 1,
 }
+
+
+def _serialize_death_verification(user: dict) -> dict:
+    from app.auth.ssdmf import public_death_verification
+
+    return public_death_verification(user)
+
+
+def _authorized_person_kind(nk: dict) -> str:
+    from app.auth.claimant_roles import claimant_kind_label
+
+    return claimant_kind_label(nk)
+
+
+def _serialize_authorized_person(nk: dict) -> dict:
+    from app.auth.claimant_roles import is_attorney_or_executor
+
+    return {
+        "id": str(nk["_id"]),
+        "full_name": nk.get("full_name") or nk.get("name"),
+        "email": nk.get("email"),
+        "phone_number": nk.get("phone_number"),
+        "relationship": nk.get("relationship"),
+        "kind": _authorized_person_kind(nk),
+        "access_type": nk.get("access_type") or "nextkin",
+        "access_timing": nk.get("access_timing"),
+        "immediate_access": bool(nk.get("immediate_access")),
+        "portal_role": nk.get("portal_role"),
+        "didit_status": nk.get("didit_status"),
+        "didit_verified_at": nk.get("didit_verified_at"),
+        "is_attorney_or_executor": is_attorney_or_executor(nk),
+    }
+
+
+async def _authorized_people_for_owners(owner_ids: list[str]) -> dict[str, list[dict]]:
+    if not owner_ids:
+        return {}
+    out: dict[str, list[dict]] = {oid: [] for oid in owner_ids}
+    cursor = users_collection.find(
+        {
+            "role": "nextkin",
+            "owner_id": {"$in": owner_ids},
+            "access_revoked": {"$ne": True},
+            "deleted_at": {"$exists": False},
+        },
+        {
+            "email": 1,
+            "full_name": 1,
+            "name": 1,
+            "phone_number": 1,
+            "relationship": 1,
+            "access_type": 1,
+            "access_timing": 1,
+            "immediate_access": 1,
+            "portal_role": 1,
+            "owner_id": 1,
+            "didit_status": 1,
+            "didit_verified_at": 1,
+        },
+    )
+    async for nk in cursor:
+        oid = str(nk.get("owner_id") or "")
+        if oid in out:
+            out[oid].append(_serialize_authorized_person(nk))
+    return out
 
 
 @admin_users_router.get("/")
@@ -160,8 +250,14 @@ async def list_users(
     )
 
     users = []
-    async for u in cursor:
-        users.append(_serialize_user(u))
+    rows = [u async for u in cursor]
+    people_map = await _authorized_people_for_owners(
+        [str(u["_id"]) for u in rows]
+    )
+    for u in rows:
+        packed = _serialize_user(u)
+        packed["authorized_people"] = people_map.get(str(u["_id"]), [])
+        users.append(packed)
 
     await log_admin_action(
         admin.get("email") or "",
@@ -199,7 +295,143 @@ async def get_user(
             {"owner_id": user["_id"]}
         )
 
-    return _serialize_user(user, section_count=section_count)
+    people_map = await _authorized_people_for_owners([str(user["_id"])])
+    packed = _serialize_user(user, section_count=section_count)
+    packed["authorized_people"] = people_map.get(str(user["_id"]), [])
+    try:
+        from app.auth.after_death_case import (
+            admin_case_payload,
+            current_certificate,
+            enrolled_claimants,
+            open_case_for_owner,
+        )
+
+        full = await users_collection.find_one({"_id": user["_id"]}) or user
+        case = await open_case_for_owner(str(user["_id"]))
+        if case:
+            packed["after_death_case"] = admin_case_payload(
+                case,
+                owner=full,
+                claimants=await enrolled_claimants(str(user["_id"])),
+                cert=await current_certificate(case),
+            )
+            packed["death_verification"] = _serialize_death_verification(full)
+    except Exception as exc:
+        print("⚠️ after-death admin payload failed:", exc)
+    return packed
+
+
+@admin_users_router.post("/{user_id}/release-nok-access")
+async def release_nok_access(
+    user_id: str,
+    payload: ReleaseNokAccessBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Human-reviewed vault unlock for named next of kin (claim-link email)."""
+    admin = await require_admin(request, authorization)
+    if user_is_read_only(admin):
+        raise HTTPException(403, "Read-only admin cannot release vault access")
+    if not user_has_area(admin, "legacy"):
+        raise HTTPException(403, "Legacy access permission required to release next-of-kin vault access")
+    if not payload.confirm:
+        raise HTTPException(400, "Confirm this release to continue")
+
+    user = await users_collection.find_one({"_id": _oid(user_id), "role": "owner"})
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    from app.auth.ssdmf import public_death_verification, run_owner_ssdmf
+    from app.auth.service import admin_release_nok_vault_access
+
+    info = public_death_verification(user)
+    if info.get("certificate_uploaded") and info.get("ssdmf_status") in {
+        "NOT_RUN",
+        None,
+        "",
+    }:
+        try:
+            await run_owner_ssdmf(user, force=True)
+            user = await users_collection.find_one({"_id": user["_id"]}) or user
+        except Exception as exc:
+            print("⚠️ SSDMF before release failed:", exc)
+
+    result = await admin_release_nok_vault_access(
+        owner_ref=str(user["_id"]),
+        admin_email=str(admin.get("email") or ""),
+        admin_id=str(admin.get("_id") or ""),
+        note=payload.note,
+        ssdmf_override=payload.ssdmf_override,
+        certificate_override=payload.certificate_override,
+        wait_override=payload.wait_override,
+        death_check_override_reason=payload.death_check_override_reason,
+    )
+    if result.get("reason") == "owner_not_found":
+        raise HTTPException(404, "Owner not found")
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result)
+
+    await log_admin_action(
+        admin.get("email") or "",
+        "nok.release_access",
+        str(user.get("email") or user_id),
+        {
+            "upon_death_granted": result.get("upon_death_granted"),
+            "already_deceased": result.get("already_deceased"),
+            "note": payload.note,
+            "ssdmf_override": payload.ssdmf_override,
+            "certificate_override": payload.certificate_override,
+            "wait_override": payload.wait_override,
+        },
+    )
+    return {
+        "success": True,
+        "message": (
+            f"Released vault access. Claim emails sent to "
+            f"{result.get('upon_death_granted') or 0} next of kin "
+            "whose identity verification is complete. Others receive a claim "
+            "link after they finish ID verification."
+        ),
+        **result,
+    }
+
+
+@admin_users_router.get("/{user_id}/death-certificate")
+async def admin_death_certificate(
+    user_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    admin = await require_admin(request, authorization)
+    if not user_has_area(admin, "legacy"):
+        raise HTTPException(403, "Legacy access permission required")
+    user = await users_collection.find_one({"_id": _oid(user_id), "role": "owner"})
+    if not user:
+        raise HTTPException(404, "User not found")
+    rec = user.get("death_verification") if isinstance(user.get("death_verification"), dict) else {}
+    cert = rec.get("certificate") if isinstance(rec.get("certificate"), dict) else {}
+    key = str(cert.get("s3_key") or "").strip()
+    if not key:
+        raise HTTPException(404, "No death certificate on file")
+    from app.storage.section_s3 import presign_section_get_url
+
+    url = presign_section_get_url(
+        s3_key=key,
+        bucket=str(cert.get("s3_bucket") or "").strip() or None,
+        expires_in=15 * 60,
+    )
+    await log_admin_action(
+        admin.get("email") or "",
+        "nok.view_death_certificate",
+        str(user.get("email") or user_id),
+    )
+    return {
+        "filename": cert.get("filename"),
+        "uploaded_at": cert.get("uploaded_at"),
+        "uploaded_by": cert.get("uploaded_by_name"),
+        "url": url,
+        "url_expires_in": 15 * 60,
+    }
 
 
 @admin_users_router.patch("/{user_id}")

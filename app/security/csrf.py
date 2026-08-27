@@ -42,6 +42,7 @@ MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # Paths that must never require CSRF (external callbacks / health / docs).
 EXEMPT_PREFIXES: tuple[str, ...] = (
     "/billing/webhook",
+    "/webhooks/didit",
     "/docs",
     "/openapi",
     "/redoc",

@@ -23,3 +23,4 @@ class KitDoc(BaseModel):
 class ChecklistUpdate(BaseModel):
     section_id: str
     items: Dict[str, bool]
+    notes: Optional[str] = None

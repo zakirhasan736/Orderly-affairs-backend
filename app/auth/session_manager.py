@@ -137,10 +137,11 @@ async def issue_nok_session(response: Response, user: dict) -> dict:
     )
 
     from app.auth.access_types import resolve_access_type
+    from app.auth.collaborator_security import collaborator_setup_payload
     from app.auth.portal_roles import resolve_dashboard_permissions, role_label
 
     access_type = resolve_access_type(user)
-    return {
+    payload = {
         "authenticated": True,
         "role": "nextkin",
         "access_type": access_type,
@@ -165,6 +166,8 @@ async def issue_nok_session(response: Response, user: dict) -> dict:
             else "Next-of-Kin login successful"
         ),
     }
+    payload.update(collaborator_setup_payload(user))
+    return payload
 
 
 async def issue_admin_session(response: Response, user: dict) -> dict:

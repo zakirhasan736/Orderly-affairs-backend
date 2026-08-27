@@ -12,7 +12,11 @@ from app.security.document_guard import DocumentGuardError, guard_upload
 from app.security.malware_scan import MalwareScanError
 from app.database import users_collection
 from app.auth.portal_roles import can_upload_documents
-from app.auth.access_types import is_family_collaborator, resolve_access_type
+from app.auth.access_types import (
+    is_family_collaborator,
+    is_nextkin_collaborator,
+    resolve_access_type,
+)
 from app.storage.section_s3 import (
     is_section_s3_key,
     presign_section_get_url,
@@ -268,7 +272,14 @@ async def delete_upload(
     user = await users_collection.find_one(
         {"_id": ObjectId(str(decoded["sub"])), "role": "nextkin"}
     )
-    if not user or not is_family_collaborator(user) or not can_upload_documents(user):
+    if not user:
+        raise HTTPException(status_code=403)
+    if is_nextkin_collaborator(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Next of kin cannot delete vault files. You can view and download them.",
+        )
+    if not is_family_collaborator(user) or not can_upload_documents(user):
         raise HTTPException(status_code=403)
 
     owner = await users_collection.find_one(

@@ -46,16 +46,25 @@ async def save_section1(
     )
 
     legal_name = (payload.vital_info or {}).get("full_legal_name")
-    if isinstance(legal_name, str) and legal_name.strip():
+    from app.ai.semantic_field_map import as_plain_text
+    from app.auth.ssdmf import persist_identity_snapshot
+
+    name_text = as_plain_text(legal_name) or ""
+    if name_text:
         await users_collection.update_one(
             {"_id": owner["_id"]},
             {
                 "$set": {
-                    "full_name": legal_name.strip(),
+                    "full_name": name_text,
                     "updated_at": datetime.utcnow(),
                 }
             },
         )
+    await persist_identity_snapshot(
+        owner["_id"],
+        payload.vital_info,
+        full_name_fallback=name_text or str(owner.get("full_name") or ""),
+    )
 
     return {"message": "Section 1 saved"}
 

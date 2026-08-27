@@ -25,6 +25,9 @@ class NextKinCreateRequest(BaseModel):
     key_bag_location: str | None = None
     documents_bag_location: str | None = None
     special_instructions: str | None = None
+    # Upon-death access: owner must confirm the death-certificate authorization.
+    death_certificate_authorization_agreed: bool = False
+    death_certificate_authorization_signature: str | None = None
 
     @field_validator("full_name", "relationship")
     @classmethod

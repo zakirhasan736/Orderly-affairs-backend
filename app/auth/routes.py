@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, HTTPException, Header, Depends, Response
+from fastapi import APIRouter, Request, HTTPException, Header, Depends, Response, Body
 from typing import List, Union
 
 from pydantic import BaseModel, EmailStr
@@ -15,7 +15,7 @@ from app.auth.death_detection import (
     user_is_returning_login,
     user_is_returning_for_session,
 )
-from app.auth.service import mark_owner_deceased, trigger_death_letters
+from app.auth.service import record_pending_death_report
 from bson.errors import InvalidId
 from secrets import token_urlsafe
 from io import BytesIO
@@ -170,6 +170,10 @@ class LinkAuthenticatorRequest(BaseModel):
     code: str
     secret: str | None = None
 
+class CollaboratorPasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
 class OwnerResetRequest(BaseModel):
     email: EmailStr
     captcha_token: str | None = None
@@ -269,6 +273,31 @@ class NextKinUpdateRequest(BaseModel):
     key_bag_location: str | None = None
     documents_bag_location: str | None = None
     special_instructions: str | None = None
+
+
+class DeathCertificateAuthorizationAgreeRequest(BaseModel):
+    agreed: bool
+    signature_name: str
+
+
+class NextKinClaimStartRequest(BaseModel):
+    token: str
+
+
+class NextKinClaimCompleteRequest(BaseModel):
+    token: str
+    password: str
+
+
+class ApproveLivingAccessRequest(BaseModel):
+    password: str | None = None
+    confirm_password: str | None = None
+    mfa_challenge_token: str | None = None
+    step_up_token: str | None = None
+
+    def step_up_password(self) -> str:
+        return (self.password or self.confirm_password or "").strip()
+
 
 class NextKinLoginRequest(BaseModel):
     email: EmailStr
@@ -403,7 +432,7 @@ async def get_authorized_user_for_email(
         return None
 
     try:
-        decoded = decode_access_token(request, authorization)
+        decoded = decode_owner_or_nok_token(request, authorization)
     except HTTPException:
         return None
 
@@ -447,6 +476,14 @@ async def issue_session_for_user(response: Response, user: dict) -> dict:
     role = user.get("role")
     if role == "nextkin":
         returning = await record_nextkin_last_login(str(user["_id"]))
+        if not returning:
+            from app.auth.immediate_access_grant import mark_living_access_active
+
+            await mark_living_access_active(user["_id"])
+        from app.auth.access_types import is_family_collaborator
+
+        if not is_family_collaborator(user):
+            await maybe_notify_owner_nextkin_first_access(nextkin=user)
         session = await issue_nok_session(response, user)
         session["returning_user"] = returning
         return session
@@ -639,141 +676,141 @@ async def approve_nextkin_access(
     owner: dict,
     plain_password: str | None = None,
 ):
+    del plain_password
     if nextkin.get("immediate_access"):
         return
+    from app.auth.immediate_access_grant import begin_owner_immediate_access_grant
 
-    await users_collection.update_one(
-        {"_id": nextkin["_id"]},
-        {
-            "$set": {
-                "immediate_access": True,
-                "nok_letter_received": False,
-                "updated_at": datetime.utcnow(),
-            }
-        },
-    )
+    await begin_owner_immediate_access_grant(nextkin=nextkin, owner=owner)
 
-    await send_nextkin_email(
-        event=NextKinEmailEvent.ACCESS_APPROVED,
-        nextkin=nextkin,
-        owner=owner,
-        plain_password=plain_password,
-    )
 
-# Helper to flip immediate_access and notify the Next-of-Kin
 async def _approve_and_notify_if_needed(
     nextkin: dict,
     owner: dict,
     approved: bool = True,
     plain_password: str | None = None,
 ):
-    if bool(nextkin.get("immediate_access", False)) == approved:
-        return
-
-    update_fields: dict = {
-        "immediate_access": approved,
-        "updated_at": datetime.utcnow(),
-    }
-
-    if approved:
-        update_fields["nok_letter_received"] = False
-        update_fields["access_revoked"] = False
-    elif nextkin.get("access_timing") == "immediate":
-        update_fields["access_revoked"] = True
-
-    await users_collection.update_one(
-        {"_id": nextkin["_id"]},
-        {"$set": update_fields},
+    del plain_password
+    from app.auth.immediate_access_grant import (
+        begin_owner_immediate_access_grant,
+        cancel_pending_immediate_access,
     )
 
-    try:
-        if approved:
-            await send_nextkin_email(
-                event=NextKinEmailEvent.ACCESS_APPROVED,
-                nextkin=nextkin,
-                owner=owner,
-                plain_password=plain_password,
-            )
-        else:
+    was_live = bool(nextkin.get("immediate_access"))
+    was_pending = bool(nextkin.get("immediate_access_pending"))
+
+    if approved:
+        if was_live or was_pending:
+            return
+        await begin_owner_immediate_access_grant(nextkin=nextkin, owner=owner)
+        return
+
+    if not was_live and not was_pending:
+        return
+
+    await cancel_pending_immediate_access(nextkin["_id"])
+    if nextkin.get("access_timing") == "immediate" or was_live or was_pending:
+        await users_collection.update_one(
+            {"_id": nextkin["_id"]},
+            {
+                "$set": {
+                    "access_revoked": True,
+                    "immediate_access": False,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+
+    if was_live:
+        try:
             await send_nextkin_email(
                 event=NextKinEmailEvent.ACCESS_REVOKED,
                 nextkin=nextkin,
                 owner=owner,
             )
-    except Exception as e:
-        print("⚠️ Next-of-Kin access notification email failed:", e)
-
-async def notify_owner_nextkin_login(*, owner: dict, nextkin: dict):
+        except Exception as e:
+            print("⚠️ Next-of-Kin access notification email failed:", e)
     try:
-        from app.notifications.email_layout import (
-            access_url,
-            email_cta_row,
-            escape,
-            kit_url,
-            paper_body,
-            render_reminder_card,
-        )
+        from app.notifications.owner_nok_alerts import notify_owner_revoke_succeeded
 
-        sg = SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-
-        nk_label = nextkin.get("full_name") or nextkin["email"]
-        first = (str(nk_label).strip().split() or ["Someone"])[0]
-        access = nextkin.get("access_level") or "Full Kit Access"
-        when = datetime.utcnow().strftime("%b %d · %I:%M %p UTC").replace(" 0", " ")
-        immediate = bool(nextkin.get("immediate_access"))
-        access_note = (
-            f"{escape(access)} with immediate access turned on."
-            if immediate
-            else f"{escape(access)}."
-        )
-
-        html = render_reminder_card(
-            schedule_label="Event-driven · someone signed in",
-            title=f"{first} opened your kit.",
-            preheader=f"{nk_label} accessed your Orderly Affairs kit",
-            warning=True,
-            body_html="".join(
-                [
-                    paper_body(
-                        f"{escape(when)} · {escape(nextkin.get('email') or '')}. "
-                        f"They have {access_note}"
-                    ),
-                    email_cta_row(
-                        (kit_url(), "This was expected"),
-                        (access_url(), "Revoke access now"),
-                        secondary_variant="danger",
-                    ),
-                ]
-            ),
-        )
-
-        message = Mail(
-            from_email=settings.EMAIL_SENDER,
-            to_emails=owner["email"],
-            subject="Orderly Affairs – Next-of-Kin Access Alert",
-            html_content=html,
-        )
-
-        sg.send(message)
-
-        try:
-            from app.notifications.push_bridge import notify_web_push
-            from app.notifications.email_layout import access_url
-
-            await notify_web_push(
-                owner,
-                title="Next-of-Kin access alert",
-                body=f"{nk_label} opened your kit.",
-                tag="nok-login",
-                url=access_url(),
-                urgency="high",
-            )
-        except Exception as push_exc:
-            print("⚠️ NOK login web push failed:", push_exc)
-
+        await notify_owner_revoke_succeeded(owner=owner)
     except Exception as e:
-        # Never block login
-        print("Owner login notification failed:", e)
+        print("⚠️ Owner revoke confirmation email failed:", e)
+
+
+async def maybe_notify_owner_nextkin_first_access(*, nextkin: dict) -> None:
+    """Email the vault owner once, after this next of kin's first completed login."""
+    from app.auth.access_types import is_family_collaborator
+    from app.auth.collaborator_security import (
+        owner_nok_first_access_claim_filter,
+        should_send_owner_access_alert,
+    )
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    nextkin_oid = nextkin.get("_id")
+    if not nextkin_oid:
+        return
+    fresh = await users_collection.find_one({"_id": nextkin_oid, "role": "nextkin"})
+    if not fresh or is_family_collaborator(fresh):
+        return
+    if not should_send_owner_access_alert(fresh):
+        return
+
+    owner_id = fresh.get("owner_id")
+    nextkin_id = str(fresh.get("_id") or "")
+    if not owner_id or not nextkin_id:
+        return
+    try:
+        owner_oid = ObjectId(str(owner_id))
+    except (InvalidId, TypeError):
+        return
+
+    now = datetime.utcnow()
+    already = {
+        str(item) for item in (
+            (
+                await users_collection.find_one(
+                    {"_id": owner_oid, "role": "owner"},
+                    {"nok_first_access_alert_ids": 1},
+                )
+                or {}
+            ).get("nok_first_access_alert_ids")
+            or []
+        )
+    }
+    if nextkin_id in already:
+        await users_collection.update_one(
+            {"_id": nextkin_oid, "role": "nextkin"},
+            {"$set": {"owner_access_alert_sent_at": now, "updated_at": now}},
+        )
+        return
+
+    owner = await users_collection.find_one_and_update(
+        owner_nok_first_access_claim_filter(
+            owner_id=owner_oid,
+            nextkin_id=nextkin_id,
+        ),
+        {
+            "$addToSet": {"nok_first_access_alert_ids": nextkin_id},
+            "$set": {"updated_at": now},
+        },
+    )
+    if not owner:
+        await users_collection.update_one(
+            {"_id": nextkin_oid, "role": "nextkin"},
+            {"$set": {"owner_access_alert_sent_at": now, "updated_at": now}},
+        )
+        return
+
+    await users_collection.update_one(
+        {"_id": nextkin_oid, "role": "nextkin"},
+        {"$set": {"owner_access_alert_sent_at": now, "updated_at": now}},
+    )
+
+    from app.notifications.owner_nok_alerts import notify_owner_nextkin_signed_in
+
+    await notify_owner_nextkin_signed_in(owner=owner, nextkin=fresh)
 
 # ============================================================
 # 1️⃣ OWNER SIGNUP
@@ -1267,15 +1304,17 @@ async def nextkin_login(request: Request, response: Response):
     if user.get("access_revoked") or not user.get("immediate_access", False):
         raise HTTPException(status_code=403, detail=NOK_LOGIN_GENERIC)
 
+    from app.auth.immediate_access_grant import expire_unused_living_access_if_due
+
+    if await expire_unused_living_access_if_due(user):
+        raise HTTPException(status_code=403, detail=NOK_LOGIN_GENERIC)
+
     owner = await users_collection.find_one(
         {"_id": ObjectId(user["owner_id"]), "role": "owner"}
     )
 
     if owner and owner.get("billing", {}).get("status") == "blocked":
         raise HTTPException(status_code=403, detail=NOK_LOGIN_GENERIC)
-
-    if owner:
-        await notify_owner_nextkin_login(owner=owner, nextkin=user)
 
     # Step-up MFA for NOK / family (email OTP and/or authenticator).
     # Every NOK session requires a second factor. If no MFA method is enrolled,
@@ -1352,9 +1391,7 @@ async def nextkin_login(request: Request, response: Response):
 
         return mfa_response
 
-    await record_nextkin_last_login(str(user["_id"]))
-
-    return await issue_nok_session(response, user)
+    return await issue_session_for_user(response, user)
 
 
 @router.post("/reveal-nextkin-password/{nextkin_id}")
@@ -1435,6 +1472,205 @@ def generate_temp_password(length: int = 12) -> str:
     return "".join(random.choice(alphabet) for _ in range(length))
 
 
+@router.get("/death-certificate-authorization")
+async def get_death_certificate_authorization(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Vault copy of the death-certificate authorization + owner signature status."""
+    decoded = decode_owner_or_nok_token(request, authorization)
+    from app.auth.access_types import is_family_collaborator
+    from app.auth.portal_roles import resolve_dashboard_permissions
+    from app.auth.vault_actor import resolve_actor, resolve_vault_owner
+    from app.legal.death_certificate_authorization import (
+        agreement_status,
+        document_payload,
+    )
+
+    actor = await resolve_actor(decoded)
+    if not actor:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    can_sign = False
+    if actor.get("role") == "owner":
+        owner = actor
+        can_sign = True
+    elif is_family_collaborator(actor):
+        if not actor.get("immediate_access", False):
+            raise HTTPException(status_code=403, detail="Access not approved")
+        owner = await resolve_vault_owner(actor)
+        can_sign = bool(resolve_dashboard_permissions(actor).get("can_manage_nextkin"))
+    elif actor.get("role") == "nextkin":
+        owner = await resolve_vault_owner(actor)
+        can_sign = False
+    else:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return {
+        **document_payload(),
+        **agreement_status(owner),
+        "can_sign": can_sign,
+    }
+
+
+@router.post("/death-certificate-authorization")
+async def agree_death_certificate_authorization(
+    payload: DeathCertificateAuthorizationAgreeRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
+    from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
+    from app.auth.vault_actor import require_owner_or_family
+    from app.legal.death_certificate_authorization import (
+        SIGNATURE_REQUIRED,
+        agreement_set_fields,
+        agreement_status,
+        document_payload,
+    )
+
+    _, owner = await require_owner_or_family(
+        decoded,
+        perm="can_manage_nextkin",
+        area_id=DASHBOARD_AREA_SECTION2_NOK,
+        detail="Only the owner or a family Admin+ can sign this authorization",
+    )
+    if not payload.agreed:
+        raise HTTPException(
+            status_code=400,
+            detail="You must check the box to agree to this Authorization",
+        )
+    signature = (payload.signature_name or "").strip()
+    if not signature:
+        raise HTTPException(status_code=400, detail=SIGNATURE_REQUIRED)
+
+    await users_collection.update_one(
+        {"_id": owner["_id"]},
+        {"$set": agreement_set_fields(signature)},
+    )
+    updated = await users_collection.find_one({"_id": owner["_id"]})
+    return {
+        **document_payload(),
+        **agreement_status(updated),
+        "can_sign": True,
+    }
+
+
+def _mask_email(email: str) -> str:
+    value = (email or "").strip()
+    if "@" not in value:
+        return "hidden"
+    local, _, domain = value.partition("@")
+    if len(local) <= 1:
+        shown = "*"
+    else:
+        shown = local[0] + "***"
+    return f"{shown}@{domain}"
+
+
+@router.post("/claim-nextkin/start")
+async def start_nextkin_claim(payload: NextKinClaimStartRequest):
+    """Validate a one-time vault-unlock claim link (no session yet)."""
+    from app.auth.claim_tokens import claim_is_expired, hash_claim_token
+
+    token = (payload.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="This access link is invalid")
+
+    user = await users_collection.find_one(
+        {"role": "nextkin", "claim_token_hash": hash_claim_token(token)}
+    )
+    if not user or user.get("claim_token_used_at") or claim_is_expired(
+        user.get("claim_token_expires_at")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="This access link is invalid or has expired",
+        )
+    from app.auth.didit import DIDIT_APPROVED, claims_require_didit
+
+    if claims_require_didit() and user.get("didit_status") != DIDIT_APPROVED:
+        raise HTTPException(
+            status_code=400,
+            detail="Identity verification is not complete for this access link",
+        )
+
+    return {
+        "email": _mask_email(str(user.get("email") or "")),
+        "full_name": user.get("full_name"),
+        "relationship": user.get("relationship"),
+    }
+
+
+@router.post("/claim-nextkin/complete")
+async def complete_nextkin_claim(
+    payload: NextKinClaimCompleteRequest,
+    response: Response,
+):
+    """Consume the one-time claim link, set a password, and start the NOK session."""
+    from app.auth.access_types import is_family_collaborator
+    from app.auth.claim_tokens import claim_is_expired, hash_claim_token
+    from app.auth.collaborator_security import password_changed_fields
+    from app.auth.session_manager import issue_nok_session
+    from app.security.password_handler import hash_password
+
+    token = (payload.token or "").strip()
+    password = (payload.password or "").strip()
+    confirm = (payload.confirm_password or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="This access link is invalid")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if password != confirm:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+
+    token_hash = hash_claim_token(token)
+    user = await users_collection.find_one(
+        {"role": "nextkin", "claim_token_hash": token_hash}
+    )
+    if not user or user.get("claim_token_used_at") or claim_is_expired(
+        user.get("claim_token_expires_at")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="This access link is invalid or has expired",
+        )
+    if is_family_collaborator(user):
+        raise HTTPException(status_code=400, detail="This access link is invalid")
+
+    from app.auth.didit import DIDIT_APPROVED, claims_require_didit
+
+    if claims_require_didit() and user.get("didit_status") != DIDIT_APPROVED:
+        raise HTTPException(
+            status_code=400,
+            detail="Identity verification is not complete for this access link",
+        )
+
+    now = datetime.utcnow()
+    await users_collection.update_one(
+        {"_id": user["_id"], "claim_token_hash": token_hash},
+        {
+            "$set": {
+                "password_hash": hash_password(password),
+                "immediate_access": True,
+                "must_enroll_mfa": True,
+                "claim_token_used_at": now,
+                "updated_at": now,
+                **password_changed_fields(),
+            },
+            "$unset": {
+                "claim_token_hash": "",
+                "claim_token_expires_at": "",
+                "master_password": "",
+            },
+        },
+    )
+    refreshed = await users_collection.find_one({"_id": user["_id"]})
+    if not refreshed:
+        raise HTTPException(status_code=400, detail="Could not complete access")
+    return await issue_nok_session(response, refreshed)
+
+
 @router.post("/create-nextkin")
 async def create_nextkin(
     payload: Union[NextKinCreateRequest, list[NextKinCreateRequest]],
@@ -1508,6 +1744,38 @@ async def create_nextkin(
 
         email = normalized["email"]
 
+        if not req.immediate_access:
+            from app.legal.death_certificate_authorization import (
+                PERSON_CONFIRM_REQUIRED,
+                SIGNATURE_REQUIRED,
+                OWNER_RECORD_KEY,
+                agreement_set_fields,
+                owner_has_death_certificate_authorization,
+            )
+
+            if not req.death_certificate_authorization_agreed:
+                return {
+                    "email": email,
+                    "status": "error",
+                    "error": PERSON_CONFIRM_REQUIRED,
+                }
+            if not owner_has_death_certificate_authorization(owner):
+                signature = (
+                    req.death_certificate_authorization_signature or ""
+                ).strip()
+                if not signature:
+                    return {
+                        "email": email,
+                        "status": "error",
+                        "error": SIGNATURE_REQUIRED,
+                    }
+                fields = agreement_set_fields(signature)
+                await users_collection.update_one(
+                    {"_id": owner["_id"]},
+                    {"$set": fields},
+                )
+                owner[OWNER_RECORD_KEY] = fields[OWNER_RECORD_KEY]
+
         # 2️⃣ Prevent duplicate
         existing = await users_collection.find_one({"email": email})
         if existing:
@@ -1517,8 +1785,11 @@ async def create_nextkin(
                 "error": "Next-of-Kin already exists"
             }
 
-        # 3️⃣ Ensure a temp password exists; store hash for auth, keep plain in master_password field (your current model)
-        plain_password = req.master_password or generate_temp_password()
+        # 3️⃣ Immediate access needs a login password. Upon-death NOK
+        # wait for death verification — no master password is stored now.
+        plain_password = None
+        if req.immediate_access:
+            plain_password = req.master_password or generate_temp_password()
 
         new_nok = {
             "email": email,
@@ -1536,24 +1807,27 @@ async def create_nextkin(
                 bool(req.nok_letter_received) if not req.immediate_access else False
             ),
 
-            "password_card_generated": bool(
-                req.password_card_generated or plain_password
-            ),
-            "master_password": plain_password,
+            "password_card_generated": False,
             "card_storage_location": req.card_storage_location,
             "key_bag_location": req.key_bag_location,
             "documents_bag_location": req.documents_bag_location,
             "special_instructions": req.special_instructions,
 
-            "password_hash": hash_password(plain_password),
-
             "role": "nextkin",
             "owner_id": str(owner["_id"]),
             "verified": True,
             "mfa_enabled": False,
+            "must_change_password": True,
+            "must_enroll_mfa": True,
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
         }
+        if not req.immediate_access:
+            new_nok["death_certificate_person_confirmed_at"] = datetime.utcnow()
+        if plain_password:
+            new_nok["master_password"] = plain_password
+            new_nok["password_hash"] = hash_password(plain_password)
+            new_nok["password_card_generated"] = True
 
         stored_nok = prepare_nextkin_profile_for_storage(new_nok)
         insert_res = await users_collection.insert_one(stored_nok)
@@ -1563,33 +1837,14 @@ async def create_nextkin(
             await users_collection.find_one({"_id": new_id})
         )
 
-        # Immediate access → email login credentials.
-        # Upon Death → notify without credentials; master password stays on the card.
-        if req.immediate_access:
-            await users_collection.update_one(
-                {"_id": new_id},
-                {
-                    "$set": {
-                        "immediate_access": True,
-                        "nok_letter_received": False,
-                        "updated_at": datetime.utcnow(),
-                    }
-                },
-            )
-
-            await send_nextkin_email(
-                event=NextKinEmailEvent.ACCESS_APPROVED,
-                nextkin=nextkin,
-                owner=owner,
-                plain_password=plain_password,
-            )
-        else:
-            await send_nextkin_email(
-                event=NextKinEmailEvent.CREATED,
-                nextkin=nextkin,
-                owner=owner,
-                plain_password=None,
-            )
+        # Enrollment only. Living release is a separate owner action
+        # (confirm + password). The NOK login email is sent immediately.
+        await send_nextkin_email(
+            event=NextKinEmailEvent.CREATED,
+            nextkin=nextkin,
+            owner=owner,
+            plain_password=None,
+        )
 
         return {
             "id": str(new_id),
@@ -1597,9 +1852,15 @@ async def create_nextkin(
             "full_name": req.full_name,
             "relationship": req.relationship,
             "status": "ok",
-            "message": f"Next-of-Kin '{req.full_name}' created successfully.",
+            "message": (
+                f"Next-of-Kin '{req.full_name}' created successfully. "
+                "Click Release Access after they accept the invite."
+                if req.immediate_access
+                else f"Next-of-Kin '{req.full_name}' created successfully."
+            ),
             "master_password": plain_password,
-            "temp_password_sent": bool(req.immediate_access),
+            "temp_password_sent": False,
+            "immediate_access_pending": False,
         }
 
     # 5️⃣ Handle single or bulk payloads with SAME endpoint
@@ -1714,6 +1975,10 @@ async def get_my_nextkin(
             "authorized_sections": nk.get("authorized_sections", []),
             "access_type": "nextkin",
             "immediate_access": nk.get("immediate_access", False),
+            "immediate_access_pending": bool(nk.get("immediate_access_pending")),
+            "immediate_access_email_at": nk.get("immediate_access_email_at"),
+            "access_timing": nk.get("access_timing"),
+            "living_access_state": nk.get("living_access_state"),
             "nok_letter_received": nk.get("nok_letter_received", False),
 
             "password_card_generated": nk.get("password_card_generated"),
@@ -1843,8 +2108,9 @@ async def update_nextkin(
             level, sections
         )
 
-    if update_data.get("immediate_access") is True:
-        update_data["nok_letter_received"] = False
+    if "immediate_access" in update_data:
+        # Living access is granted only via Approve (NOK is emailed immediately).
+        update_data.pop("immediate_access")
 
     password_changed = False
     new_password = (payload.master_password or "").strip() or None
@@ -1852,6 +2118,7 @@ async def update_nextkin(
         password_changed = True
         update_data["password_hash"] = hash_password(new_password)
         update_data["master_password"] = new_password
+        update_data["must_change_password"] = True
     elif "master_password" in update_data and not new_password:
         update_data.pop("master_password", None)
 
@@ -2114,7 +2381,16 @@ async def get_nextkin_access(
             "email": owner.get("email"),
             "full_name": owner.get("full_name"),
             "status": owner.get("owner_status", "alive"),
+            "death_report_pending": bool(owner.get("death_report_pending")),
         }
+
+    from app.auth.claimant_roles import public_claimant_flags
+    from app.auth.didit import session_public_payload
+    from app.auth.ssdmf import public_death_verification
+
+    claimant = public_claimant_flags(nextkin)
+    pending = bool((owner or {}).get("death_report_pending"))
+    deceased = (owner or {}).get("owner_status") == "deceased"
 
     return {
         "full_access": full_access,
@@ -2131,6 +2407,12 @@ async def get_nextkin_access(
         "nok_letter_received": nextkin.get("nok_letter_received", False),
         "owner_id": nextkin["owner_id"],
         "owner": owner_summary,
+        "didit": {
+            **session_public_payload(nextkin),
+            **claimant,
+            "required": bool(pending or deceased or claimant.get("didit_before_report")),
+        },
+        "death_verification": public_death_verification(owner) if owner else None,
         "vault_push": vault_push_session_payload(owner),
         "nextkin": {
             "id": str(nextkin["_id"]),
@@ -2149,6 +2431,9 @@ async def approve_nextkin_access(
     nextkin_id: str,
     request: Request,
     authorization: str | None = Header(default=None),
+    payload: ApproveLivingAccessRequest = Body(
+        default_factory=ApproveLivingAccessRequest
+    ),
 ):
     decoded = decode_access_token(request, authorization)
     from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
@@ -2160,6 +2445,27 @@ async def approve_nextkin_access(
         area_id=DASHBOARD_AREA_SECTION2_NOK,
         detail="Only the owner or a family Admin+ with Section 2 access can approve Next-of-Kin",
     )
+
+    from app.auth.living_release_lock import (
+        assert_living_release_unlocked,
+        clear_living_release_failures,
+        record_living_release_failure,
+    )
+
+    proof = payload
+    await assert_living_release_unlocked(owner)
+    try:
+        require_step_up_auth(
+            user=owner,
+            password=proof.step_up_password(),
+            mfa_challenge_token=proof.mfa_challenge_token,
+            step_up_token=proof.step_up_token,
+        )
+    except HTTPException:
+        if proof.step_up_password():
+            await record_living_release_failure(owner)
+        raise
+    await clear_living_release_failures(owner)
 
     nextkin = await users_collection.find_one(
         {
@@ -2180,17 +2486,38 @@ async def approve_nextkin_access(
         )
 
     nextkin_profile = load_nextkin_profile(dict(nextkin)) or dict(nextkin)
+    plain_password = str(nextkin_profile.get("master_password") or "").strip()
+    if not plain_password:
+        plain_password = generate_temp_password()
+        hashed = hash_password(plain_password)
+        await users_collection.update_one(
+            {"_id": nextkin["_id"]},
+            {
+                "$set": {
+                    "master_password": plain_password,
+                    "password_hash": hashed,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+        nextkin_profile["master_password"] = plain_password
+        nextkin_profile["password_hash"] = hashed
+
     await _approve_and_notify_if_needed(
         nextkin_profile,
         owner,
         approved=True,
-        plain_password=nextkin_profile.get("master_password"),
+        plain_password=plain_password,
     )
 
     return {
-        "message": "Next-of-Kin access approved",
+        "message": (
+            "Access released. They will receive login details now. "
+            "If this is not what you intended, revoke their access immediately."
+        ),
         "nextkin_email": nextkin["email"],
         "immediate_access": True,
+        "immediate_access_pending": False,
     }
 
 
@@ -2198,6 +2525,9 @@ async def approve_nextkin_access(
 async def approve_all_nextkin_access(
     request: Request,
     authorization: str | None = Header(default=None),
+    payload: ApproveLivingAccessRequest = Body(
+        default_factory=ApproveLivingAccessRequest
+    ),
 ):
     decoded = decode_access_token(request, authorization)
     from app.auth.family_access import DASHBOARD_AREA_SECTION2_NOK
@@ -2210,6 +2540,26 @@ async def approve_all_nextkin_access(
         detail="Only the owner or a family Admin+ with Section 2 access can approve Next-of-Kin",
     )
 
+    from app.auth.living_release_lock import (
+        assert_living_release_unlocked,
+        clear_living_release_failures,
+        record_living_release_failure,
+    )
+
+    await assert_living_release_unlocked(owner)
+    try:
+        require_step_up_auth(
+            user=owner,
+            password=payload.step_up_password(),
+            mfa_challenge_token=payload.mfa_challenge_token,
+            step_up_token=payload.step_up_token,
+        )
+    except HTTPException:
+        if payload.step_up_password():
+            await record_living_release_failure(owner)
+        raise
+    await clear_living_release_failures(owner)
+
     from app.auth.access_types import NEXTKIN_ACCESS_MONGO_FILTER, is_nextkin_collaborator
 
     cursor = users_collection.find(
@@ -2217,6 +2567,7 @@ async def approve_all_nextkin_access(
             "role": "nextkin",
             "owner_id": str(owner["_id"]),
             "immediate_access": False,
+            "immediate_access_pending": {"$ne": True},
             "access_revoked": {"$ne": True},
             "$and": [NEXTKIN_ACCESS_MONGO_FILTER],
         }
@@ -2226,11 +2577,26 @@ async def approve_all_nextkin_access(
         if not is_nextkin_collaborator(nextkin):
             continue
         nextkin_profile = load_nextkin_profile(dict(nextkin)) or dict(nextkin)
+        plain_password = str(nextkin_profile.get("master_password") or "").strip()
+        if not plain_password:
+            plain_password = generate_temp_password()
+            hashed = hash_password(plain_password)
+            await users_collection.update_one(
+                {"_id": nextkin["_id"]},
+                {
+                    "$set": {
+                        "master_password": plain_password,
+                        "password_hash": hashed,
+                        "updated_at": datetime.utcnow(),
+                    }
+                },
+            )
+            nextkin_profile["master_password"] = plain_password
         await _approve_and_notify_if_needed(
             nextkin_profile,
             owner,
             approved=True,
-            plain_password=nextkin_profile.get("master_password"),
+            plain_password=plain_password,
         )
         approved += 1
 
@@ -2321,7 +2687,11 @@ async def revoke_all_nextkin_access(
             "owner_id": str(owner["_id"]),
             "$and": [NEXTKIN_ACCESS_MONGO_FILTER],
         },
-        {"$set": {"immediate_access": False, "updated_at": now}},
+        {"$set": {
+            "immediate_access": False,
+            "immediate_access_pending": False,
+            "updated_at": now,
+        }, "$unset": {"immediate_access_email_at": ""}},
     )
 
     # best-effort notify each (don’t block if any fails)
@@ -2488,6 +2858,8 @@ async def link_authenticator(
     if not totp.verify(payload.code):
         raise HTTPException(status_code=400, detail="Invalid verification code")
 
+    from app.auth.collaborator_security import mfa_enrolled_fields
+
     await users_collection.update_one(
         {"email": email},
         {
@@ -2500,6 +2872,11 @@ async def link_authenticator(
                 "primary_mfa": user.get("primary_mfa") or "authenticator",
                 "mfa_methods.authenticator": True,
                 "updated_at": datetime.utcnow(),
+                **(
+                    mfa_enrolled_fields()
+                    if user.get("role") == "nextkin"
+                    else {}
+                ),
             }
         },
     )
@@ -2797,17 +3174,32 @@ async def verify_email_code(
 
     await otp_collection.delete_many({"email": email})
 
+    from app.auth.collaborator_security import (
+        collaborator_needs_mfa_enroll,
+        mfa_enrolled_fields,
+    )
+
+    login_otp_only = (
+        user.get("role") == "nextkin"
+        and challenge_ok
+        and not authorized
+        and collaborator_needs_mfa_enroll(user)
+    )
+
+    mfa_set = {
+        "verified": True,
+        "updated_at": datetime.utcnow(),
+    }
+    if not login_otp_only:
+        mfa_set["mfa_enabled"] = True
+        mfa_set["primary_mfa"] = user.get("primary_mfa") or "email"
+        mfa_set["mfa_methods.email"] = True
+        if authorized and user.get("role") == "nextkin":
+            mfa_set.update(mfa_enrolled_fields())
+
     await users_collection.update_one(
         {"_id": user["_id"]},
-        {
-            "$set": {
-                "verified": True,
-                "mfa_enabled": True,
-                "primary_mfa": user.get("primary_mfa") or "email",
-                "mfa_methods.email": True,
-                "updated_at": datetime.utcnow(),
-            }
-        },
+        {"$set": mfa_set},
     )
 
     updated_user = await users_collection.find_one({"_id": user["_id"]})
@@ -2921,9 +3313,13 @@ async def get_session(request: Request):
                 payload["authorized_sections"] = user.get(
                     "authorized_sections"
                 ) or []
-                payload["access_level"] = user.get("access_level")
-                payload["full_name"] = user.get("full_name")
-                payload["returning_user"] = user_is_returning_for_session(user)
+            payload["access_level"] = user.get("access_level")
+            payload["full_name"] = user.get("full_name")
+            payload["returning_user"] = user_is_returning_for_session(user)
+
+            from app.auth.collaborator_security import collaborator_setup_payload
+
+            payload.update(collaborator_setup_payload(user))
 
             owner_doc = None
             owner_id = user.get("owner_id")
@@ -2951,6 +3347,9 @@ async def get_session(request: Request):
             payload["returning_user"] = user_is_returning_for_session(user)
             payload["vault_push"] = vault_push_session_payload(user)
             payload["notification_prefs"] = get_owner_notification_prefs(user)
+            from app.auth.owner_wait import public_owner_wait
+
+            payload["death_claim_alert"] = public_owner_wait(user)
         candidates.append(payload)
 
     if not candidates:
@@ -3181,11 +3580,19 @@ async def _resolve_session_user(decoded: dict):
     role = decoded.get("role") or "owner"
     if role == "nextkin":
         try:
-            return await users_collection.find_one(
+            user = await users_collection.find_one(
                 {"_id": ObjectId(decoded["sub"]), "role": "nextkin"}
             )
         except (InvalidId, KeyError, TypeError):
-            return None
+            user = None
+        if not user:
+            user = await users_collection.find_one(
+                {
+                    "email": decoded.get("email") or decoded.get("sub"),
+                    "role": "nextkin",
+                }
+            )
+        return user
     return await users_collection.find_one(
         {"email": decoded.get("sub"), "role": "owner"}
     )
@@ -3311,7 +3718,9 @@ async def get_me(request: Request, authorization: str | None = Header(None)):
     
     enforce_billing(user)
 
-    return {
+    from app.auth.collaborator_security import collaborator_setup_payload
+
+    payload = {
         "email": user["email"],
         "phone": user.get("phone"),
         "role": user.get("role", "owner"),
@@ -3319,6 +3728,68 @@ async def get_me(request: Request, authorization: str | None = Header(None)):
         "primary_mfa": user.get("primary_mfa"),
         "mfa_methods": normalize_mfa_methods(user),
     }
+    if user.get("role") == "nextkin":
+        payload.update(collaborator_setup_payload(user))
+    if user.get("role") == "owner":
+        from app.legal.death_certificate_authorization import agreement_status
+
+        payload["death_certificate_authorization"] = agreement_status(user)
+        from app.auth.owner_wait import public_owner_wait
+
+        payload["death_claim_alert"] = public_owner_wait(user)
+    return payload
+
+
+@router.post("/collaborator-change-password")
+async def collaborator_change_password(
+    payload: CollaboratorPasswordChangeRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """First-login password reset for family collaborators and next of kin."""
+    decoded = decode_owner_or_nok_token(request, authorization)
+    if decoded.get("role") != "nextkin":
+        raise HTTPException(status_code=403, detail="Only vault collaborators can use this")
+
+    user = await _resolve_session_user(decoded)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    current = (payload.current_password or "").strip()
+    new_password = (payload.new_password or "").strip()
+    stored = user.get("password_hash") or user.get("password") or ""
+    if not current or not verify_password(current, stored):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    if current == new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose a new password that is different from the one you were given",
+        )
+
+    from app.auth.collaborator_security import (
+        collaborator_setup_payload,
+        password_changed_fields,
+    )
+
+    await users_collection.update_one(
+        {"_id": user["_id"]},
+        {
+            "$set": {
+                "password_hash": hash_password(new_password),
+                "master_password": new_password,
+                "updated_at": datetime.utcnow(),
+                **password_changed_fields(),
+            }
+        },
+    )
+    updated = await users_collection.find_one({"_id": user["_id"]})
+    return {
+        "message": "Password updated",
+        **collaborator_setup_payload(updated),
+    }
+
 
 @router.post("/mfa/disable")
 async def disable_mfa_method(
@@ -3551,11 +4022,53 @@ async def nextkin_report_owner_deceased(
 
     require_nok_principal(nextkin, detail=NOK_LOGIN_GENERIC)
 
+    from app.auth.access_types import is_family_collaborator
+
+    if is_family_collaborator(nextkin):
+        raise HTTPException(
+            status_code=403,
+            detail="Family collaborators cannot report a passing.",
+        )
+
     if not verify_password(payload.master_password, nextkin.get("password_hash", "")):
         raise HTTPException(status_code=401, detail=NOK_LOGIN_GENERIC)
 
     if not nextkin.get("immediate_access", False) or nextkin.get("access_revoked"):
         raise HTTPException(status_code=403, detail=NOK_LOGIN_GENERIC)
+
+    from app.auth.claimant_roles import is_attorney_or_executor
+    from app.auth.didit import DIDIT_APPROVED, claims_require_didit
+
+    if (
+        is_attorney_or_executor(nextkin)
+        and claims_require_didit()
+        and nextkin.get("didit_status") != DIDIT_APPROVED
+    ):
+        from app.auth.after_death_policy import didit_needs_manual_review
+
+        if didit_needs_manual_review(nextkin.get("didit_status")):
+            await users_collection.update_one(
+                {"_id": nextkin["_id"]},
+                {
+                    "$set": {
+                        "didit_manual_review_required": True,
+                        "didit_manual_review_reason": (
+                            "Attorney/executor identity was not Approved."
+                        ),
+                    }
+                },
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Your identity check was not Approved. It is in manual review. "
+                    "You cannot report a passing until identity is Approved."
+                ),
+            )
+        raise HTTPException(
+            status_code=400,
+            detail="Verify your identity (ID and selfie) before reporting a passing.",
+        )
 
     try:
         owner = await users_collection.find_one(
@@ -3571,11 +4084,11 @@ async def nextkin_report_owner_deceased(
         return {
             "status": "deceased",
             "already_reported": True,
+            "pending_review": False,
             "message": "This passing has already been recorded.",
             "upon_death_granted": 0,
         }
 
-    from app.auth.death_detection import MIN_DEATH_SIGNAL_CHECKS
     from app.security.auth_rate_limit import enforce_auth_rate_limit
 
     await enforce_auth_rate_limit(
@@ -3583,42 +4096,70 @@ async def nextkin_report_owner_deceased(
         key=f"nok-death-report:{nextkin['_id']}",
     )
 
-    death_ready = bool(owner.get("death_signals_pending_confirmation"))
-    death_count = int(owner.get("death_signal_count") or 0)
-    if not death_ready and death_count < MIN_DEATH_SIGNAL_CHECKS:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Before reporting a passing, complete at least "
-                f"{MIN_DEATH_SIGNAL_CHECKS} survivor checklist items in your "
-                "Full Kit (or wait until the system flags your checklist for "
-                "confirmation). This helps prevent mistaken reports."
-            ),
-        )
-
-    result = await mark_owner_deceased(
-        owner_id=str(owner["_id"]),
-        reported_by_nextkin_id=str(nextkin["_id"]),
-        source="manual_report",
+    result = await record_pending_death_report(
+        owner=owner,
+        reported_by_nextkin=nextkin,
+        source="nok_manual_report",
     )
 
-    if result.get("already_deceased"):
+    if result.get("status") == "deceased":
         return {
             "status": "deceased",
             "already_reported": True,
+            "pending_review": False,
             "message": "This passing has already been recorded.",
             "upon_death_granted": 0,
         }
 
+    already = bool(result.get("already_reported"))
     return {
-        "status": "deceased",
-        "already_reported": False,
+        "status": "pending_review",
+        "already_reported": already,
+        "pending_review": True,
         "message": (
-            "Passing recorded. Death-triggered letters and upon-death access "
-            "notifications have been sent."
+            "We already have this passing report. Orderly Affairs is verifying "
+            "it. Vault access stays sealed until our team releases it."
+            if already
+            else (
+                "Passing report received. The owner was notified. Next of kin "
+                "must verify identity (government ID and a live selfie). Vault "
+                "access stays sealed until identity clears and our team releases it."
+            )
         ),
-        "upon_death_granted": result.get("upon_death_granted", 0),
+        "upon_death_granted": 0,
     }
+
+
+class StopAfterDeathRequest(BaseModel):
+    password: str
+
+
+@router.post("/stop-after-death-request")
+async def stop_after_death_request(
+    payload: StopAfterDeathRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    decoded = decode_access_token(request, authorization)
+    if decoded.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only the vault owner can stop this request")
+    owner = await users_collection.find_one(
+        {"email": str(decoded.get("sub") or "").lower(), "role": "owner"}
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Owner not found")
+    stored = owner.get("password_hash") or owner.get("password") or ""
+    if not payload.password or not verify_password(payload.password, stored):
+        raise HTTPException(status_code=401, detail="Password is incorrect")
+
+    from app.auth.after_death_case import dispute_case, open_case_for_owner
+
+    case = await open_case_for_owner(str(owner["_id"]))
+    if not case:
+        return {"ok": True, "already_stopped": True}
+    ip = request.client.host if request.client else None
+    await dispute_case(case=case, owner=owner, method="i_am_alive", ip=ip)
+    return {"ok": True, "status": "OWNER_DISPUTED"}
 
 
 @router.put("/owner/status")
@@ -3640,8 +4181,8 @@ async def update_owner_status(
             status_code=403,
             detail=(
                 "Owner status cannot be set to deceased here. A verified "
-                "Next-of-Kin must use Report Passing after completing the "
-                "survivor checklist."
+                "Next-of-Kin reports a passing, then Orderly Affairs releases "
+                "vault access from the admin portal."
             ),
         )
 
@@ -3671,12 +4212,15 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
 
     email = payload.email.lower()
 
-    owner = await users_collection.find_one({
-        "email": email,
-        "role": "owner"
-    })
+    user = await users_collection.find_one(
+        {"email": email, "role": "owner"}
+    )
+    if not user:
+        user = await users_collection.find_one(
+            {"email": email, "role": "nextkin"}
+        )
 
-    if not owner:
+    if not user:
         return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
     window_minutes = settings.AUTH_RATE_LIMIT_WINDOW_MINUTES
@@ -3783,7 +4327,12 @@ async def owner_request_password_reset(payload: OwnerResetRequest, request: Requ
             detail="Failed to send password reset code. Please try again.",
         ) from e
 
-    return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
+    from app.auth.collaborator_security import password_reset_identity
+
+    return {
+        "message": PASSWORD_RESET_GENERIC_MESSAGE,
+        **password_reset_identity(user),
+    }
 
 # ============================================================
 # OWNER RESET PASSWORD
@@ -3798,12 +4347,15 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
     await enforce_auth_rate_limit(request, key=f"reset-password:{email}")
     await ensure_otp_verify_not_locked("password_reset", email)
 
-    owner = await users_collection.find_one({
-        "email": email,
-        "role": "owner"
-    })
+    user = await users_collection.find_one(
+        {"email": email, "role": "owner"}
+    )
+    if not user:
+        user = await users_collection.find_one(
+            {"email": email, "role": "nextkin"}
+        )
 
-    if not owner:
+    if not user:
         await record_otp_verify_attempt(
             request=request,
             scope="password_reset",
@@ -3844,22 +4396,37 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
     # 🔒 Hash new password
     hashed_password = hash_password(payload.new_password)
 
-    await users_collection.update_one(
-        {"email": email, "role": "owner"},
-        {
-            "$set": {
-                "password": hashed_password,
-                "updated_at": datetime.utcnow(),
-                # Force new E2EE envelope on next login (old wrap is password-bound).
-                # Pre-existing v3 ciphertext needs a backup restore if the DEK was lost.
-                "e2ee": {
-                    "password_reset_at": datetime.utcnow(),
-                    "needs_setup": True,
-                    "version": 1,
-                },
-            }
-        }
-    )
+    if user and user.get("role") == "nextkin":
+        from app.auth.collaborator_security import password_changed_fields
+
+        await users_collection.update_one(
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "password_hash": hashed_password,
+                    "master_password": payload.new_password,
+                    "updated_at": datetime.utcnow(),
+                    **password_changed_fields(),
+                }
+            },
+        )
+    else:
+        await users_collection.update_one(
+            {"email": email, "role": "owner"},
+            {
+                "$set": {
+                    "password": hashed_password,
+                    "updated_at": datetime.utcnow(),
+                    # Force new E2EE envelope on next login (old wrap is password-bound).
+                    # Pre-existing v3 ciphertext needs a backup restore if the DEK was lost.
+                    "e2ee": {
+                        "password_reset_at": datetime.utcnow(),
+                        "needs_setup": True,
+                        "version": 1,
+                    },
+                }
+            },
+        )
 
     # 🔒 Delete used OTP
     await otp_collection.delete_many({
@@ -3870,6 +4437,9 @@ async def owner_reset_password(payload: OwnerResetPassword, request: Request):
     log_device_fingerprint(request, "password_change", subject=email)
 
     await reset_auth_rate_limit(request, key=f"reset-password:{email}")
+
+    if user and user.get("role") == "nextkin":
+        return {"message": "Password reset successful"}
 
     return {
         "message": "Password reset successful",

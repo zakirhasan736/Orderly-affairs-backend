@@ -30,6 +30,9 @@ NOK_ONLY_EXACT_PATHS = frozenset({
     "/kit/for-nok",
     "/auth/nextkin/report-owner-deceased",
     "/auth/nextkin-access",
+    "/auth/nextkin/didit/session",
+    "/auth/nextkin/didit/status",
+    "/auth/nextkin/death-certificate",
 })
 
 NOK_ONLY_PREFIX_PATHS = (

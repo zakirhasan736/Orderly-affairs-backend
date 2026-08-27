@@ -73,6 +73,7 @@ def _serial(doc: dict) -> dict:
         "approver_b": doc.get("approver_b"),
         "granted_at": doc.get("granted_at"),
         "notes": doc.get("notes"),
+        "nok_claim_emails": doc.get("nok_claim_emails"),
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }
@@ -225,13 +226,31 @@ async def approve_legacy(
 
     await admin_legacy_collection.update_one({"_id": doc["_id"]}, {"$set": updates})
     doc.update(updates)
+
+    granted_nok = 0
+    if updates.get("status") == "granted":
+        from app.auth.service import admin_release_nok_vault_access
+
+        release = await admin_release_nok_vault_access(
+            owner_ref=doc.get("deceased_email") or "",
+            admin_email=admin_email,
+            note=payload.note,
+        )
+        granted_nok = int(release.get("upon_death_granted") or 0)
+        await admin_legacy_collection.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {"nok_claim_emails": granted_nok, "updated_at": datetime.utcnow()}},
+        )
+
     await log_admin_action(
         admin_email,
         "legacy.approve",
         doc.get("case_id"),
-        {"status": updates.get("status")},
+        {"status": updates.get("status"), "nok_claim_emails": granted_nok},
     )
-    return _serial(doc)
+    serial = _serial(doc)
+    serial["nok_claim_emails"] = granted_nok
+    return serial
 
 
 @admin_legacy_router.post("/{item_id}/deny")

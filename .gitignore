@@ -43,6 +43,10 @@ yarn-error.log*
 /storage/
 /var/storage/
 
+# vBizMe public-card export artifacts
+/migration_export/
+/migration/**/__pycache__/
+
 # vercel
 .vercel
 

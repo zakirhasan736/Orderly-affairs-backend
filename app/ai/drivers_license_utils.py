@@ -66,7 +66,9 @@ def harvest_drivers_license_fields(text: object) -> dict[str, str]:
 
     dd = _DD_NUMBER_RE.search(blob)
     if dd:
-        found["drivers_license_dd_number"] = dd.group("dd").strip().upper()
+        dd_value = dd.group("dd").strip().upper()
+        if 1 <= len(dd_value) <= 14:
+            found["drivers_license_dd_number"] = dd_value
 
     cls = _CLASS_RE.search(blob)
     if cls:
@@ -143,6 +145,12 @@ def recover_drivers_license_for_vital_result(
             if key == "date_of_birth":
                 next_vital[key] = value
                 continue
+            # A glued-together barcode is not a DD / audit number.
+            if key == "drivers_license_dd_number":
+                existing = as_plain_text(next_vital.get(key))
+                if existing and len(existing) > 14 and 2 <= len(value) <= 14:
+                    next_vital[key] = value
+                    continue
             if not as_plain_text(next_vital.get(key)):
                 next_vital[key] = value
 

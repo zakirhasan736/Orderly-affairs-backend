@@ -5,7 +5,11 @@ from bson import ObjectId
 from typing import Any, Dict, List
 from datetime import datetime
 from app.database import db, kits_collection, users_collection, section_data_collection, messageofnextkin_collection
-from app.security.checklist_crypto import load_checklist_items, prepare_checklist_for_storage
+from app.security.checklist_crypto import (
+    load_checklist_items,
+    load_checklist_notes,
+    prepare_checklist_for_storage,
+)
 from app.security.kit_data_crypto import (
     prepare_kit_section_for_storage,
     prepare_kit_subsection_for_storage,
@@ -270,8 +274,12 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
     })
 
     checklists = {}
+    checklist_notes = {}
     async for c in checklists_cursor:
         checklists[c["section_id"]] = load_checklist_items(c)
+        note = load_checklist_notes(c)
+        if note:
+            checklist_notes[c["section_id"]] = note
 
     # -------------------------
     # 5️⃣ Final Response
@@ -289,6 +297,7 @@ async def get_kit_for_nextkin(request: Request, authorization: str | None = Head
     "nok_letter": nok_letter,
     "messages": messages,
     "checklists": checklists,
+    "checklist_notes": checklist_notes,
     }
 
 @router.post("/deliver/{message_id}")
@@ -399,11 +408,25 @@ async def save_checklist_progress(
 
     assert_section_read_access(nextkin, str(payload.section_id))
 
+    existing = await kits_collection.find_one(
+        {
+            "owner_id": owner_id,
+            "nextkin_id": nextkin_id,
+            "section_id": payload.section_id,
+        }
+    )
+    notes = (
+        payload.notes
+        if payload.notes is not None
+        else load_checklist_notes(existing)
+    )
+
     encrypted_checklist = prepare_checklist_for_storage(
         owner_id=owner_id,
         nextkin_id=nextkin_id,
         section_id=payload.section_id,
         items=payload.items,
+        notes=notes or "",
     )
     await kits_collection.update_one(
         {

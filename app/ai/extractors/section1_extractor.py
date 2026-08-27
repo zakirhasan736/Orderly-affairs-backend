@@ -57,13 +57,13 @@ Subsection meanings:
 vital_info field meanings (fill when present in the document):
 - full_legal_name = legal name, name as it appears on ID/passport/discharge (e.g. "Jordan Michael Casey").
 - other_names = aliases, maiden names, aka.
-- date_of_birth = DOB only (the birth date labeled DOB / Date of Birth). Never use ISS / issue date or EXP / expiration date as DOB — those go in drivers_license_issue_date / drivers_license_expiration_date. Prefer ISO YYYY-MM-DD (e.g. September 15, 1978 → 1978-09-15). Do not shift the day.
+- date_of_birth = DOB only (the birth date labeled DOB / Date of Birth). Never use ISS / issue date or EXP / expiration date as DOB — those go in drivers_license_issue_date / drivers_license_expiration_date. Store YYYY-MM-DD internally (September 15, 1978 → 1978-09-15). Do not shift the day. US licenses print MM/DD/YYYY — keep that calendar day.
 - social_security_number = last 4 only (e.g. from 923-45-6781 → 6781) or storage note.
-- drivers_license_number = driver's license / state ID number (DL # / LIC # / ID #) when printed.
-- drivers_license_dd_number = DD / document discriminator / audit number (common on Texas licenses, often labeled "DD").
+- drivers_license_number = driver's license / state ID number (DL # / LIC # / ID #) when printed. Do not use the barcode, magstripe, or PDF417 payload as the DL number.
+- drivers_license_dd_number = DD / document discriminator / audit number only (common on Texas licenses, often labeled "DD"). Usually 2–12 characters. Never concatenate barcodes or extra digit strings onto DD.
 - drivers_license_class = license class (e.g. C, A, B, M) from CLASS: on the front or back.
-- drivers_license_issue_date = issue / ISS date; prefer ISO YYYY-MM-DD.
-- drivers_license_expiration_date = expiration / EXP date; prefer ISO YYYY-MM-DD.
+- drivers_license_issue_date = issue / ISS date only (not DOB, not EXP). Store YYYY-MM-DD.
+- drivers_license_expiration_date = expiration / EXP date only (not DOB, not ISS). Store YYYY-MM-DD.
 - phone_number = primary phone.
 - phone_password / voicemail_pin / computer_password / email passwords / google_id_password / apple_id_password / frequent_pins / safe_code = "Stored in uploaded document" when shown; never raw secrets.
 - primary_email_username / secondary_email_username / google_id_username / apple_id_username = usernames or email addresses.

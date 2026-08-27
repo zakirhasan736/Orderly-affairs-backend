@@ -82,3 +82,20 @@ def test_enrich_primary_result_vital_recovers_dl_fields():
     assert vital.get("drivers_license_class") == "C"
     assert vital.get("drivers_license_expiration_date") == "2031-01-01"
     assert vital.get("drivers_license_issue_date") == "2021-01-01"
+
+
+def test_recover_replaces_barcode_glued_dd_number():
+    result = {
+        "section": "vital_information",
+        "patch": {
+            "vital_info": {
+                "drivers_license_dd_number": "81629081015120980843",
+            }
+        },
+    }
+    recovered = recover_drivers_license_for_vital_result(
+        result,
+        "DL 192548900  DD 81629081  CLASS C  ISS 11/10/2020  EXP 09/13/2030",
+    )
+    vital = recovered["patch"]["vital_info"]
+    assert vital["drivers_license_dd_number"] == "81629081"

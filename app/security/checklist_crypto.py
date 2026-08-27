@@ -15,10 +15,11 @@ def prepare_checklist_for_storage(
     nextkin_id: str,
     section_id: str,
     items: list[Any],
+    notes: str = "",
 ) -> dict[str, Any]:
     return {
         "encrypted_items": encrypt_data(
-            {"items": items},
+            {"items": items, "notes": notes or ""},
             context=_encryption_context(owner_id, nextkin_id, section_id),
         ),
         "encryption_version": 2,
@@ -26,8 +27,16 @@ def prepare_checklist_for_storage(
 
 
 def load_checklist_items(doc: dict[str, Any] | None) -> list[Any]:
+    return load_checklist_bundle(doc)[0]
+
+
+def load_checklist_notes(doc: dict[str, Any] | None) -> str:
+    return load_checklist_bundle(doc)[1]
+
+
+def load_checklist_bundle(doc: dict[str, Any] | None) -> tuple[Any, str]:
     if not doc:
-        return []
+        return [], ""
 
     encrypted_items = doc.get("encrypted_items")
     if encrypted_items:
@@ -39,6 +48,6 @@ def load_checklist_items(doc: dict[str, Any] | None) -> list[Any]:
             payload = decrypt_data(encrypted_items, context=context)
         except Exception:
             payload = decrypt_data(encrypted_items)
-        return payload.get("items") or []
+        return payload.get("items") or [], str(payload.get("notes") or "")
 
-    return doc.get("items") or []
+    return doc.get("items") or [], str(doc.get("notes") or "")

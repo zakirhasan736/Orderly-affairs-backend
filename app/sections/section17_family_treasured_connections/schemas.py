@@ -108,12 +108,26 @@ class Pet(BaseModel):
     veterinary_records: Optional[UploadField] = None
 
 
+class FamilyNote(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    document_type: Optional[str] = None
+    created_date: Optional[str] = None
+    creators: Optional[str] = None
+    recipients: Optional[str] = None
+    connections: Optional[str] = None
+    files: Optional[UploadField] = None
+    reminder_on: Optional[bool] = None
+    reminder_date: Optional[str] = None
+    reminder_cadence: Optional[str] = None
+    reminder_note: Optional[str] = None
+
+
 # ---------------- Root Payload ----------------
 # {
 #   "17A": {...},
 #   "17B": [...],
-#   "17C": [...],
-#   ...
+#   "17H": [...],
 # }
 
 class Section17FamilyTreasuredConnectionsPayload(

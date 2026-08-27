@@ -29,6 +29,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.uploads.routes import router as upload_router
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth.routes import router as auth_router
+from app.auth.didit_routes import didit_nok_router, didit_webhook_router
 from app.security.e2ee_routes import e2ee_router
 from app.sections.e2ee_vault_gateway import e2ee_vault_router
 
@@ -209,6 +210,13 @@ async def startup():
     except Exception as exc:
         print("Default admin seed warning:", exc)
 
+    try:
+        from app.auth.after_death_case import ensure_after_death_indexes
+
+        await ensure_after_death_indexes()
+    except Exception as exc:
+        print("After-death index warning:", exc)
+
     # 1️⃣ Start APScheduler-based NOK LETTERS
     start_nok_letter_scheduler()
 
@@ -217,6 +225,14 @@ async def startup():
 
     # 3️⃣ Owner inactivity check (90 days + 15 day follow-up)
     start_owner_inactivity_scheduler()
+
+    from app.auth.immediate_access_scheduler import start_immediate_access_scheduler
+
+    start_immediate_access_scheduler()
+
+    from app.auth.owner_wait_scheduler import start_owner_wait_scheduler
+
+    start_owner_wait_scheduler()
 
     # 4️⃣ Expiry / renewal reminders for ALL sections (10 → 5 → 1 → 0 days)
     start_section_expiry_scheduler()
@@ -266,6 +282,8 @@ async def startup():
 
 app.include_router(upload_router)
 app.include_router(auth_router)
+app.include_router(didit_nok_router)
+app.include_router(didit_webhook_router)
 app.include_router(e2ee_router)
 app.include_router(e2ee_vault_router)
 app.include_router(billing_router)

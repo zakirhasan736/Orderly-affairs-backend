@@ -55,6 +55,16 @@ async def record_owner_last_login(owner_email: str) -> bool:
             "$unset": {"inactivity_warning_sent_at": ""},
         },
     )
+
+    try:
+        from app.auth.after_death_case import note_fresh_owner_login
+
+        owner = await users_collection.find_one({"email": email, "role": "owner"})
+        if owner:
+            await note_fresh_owner_login(owner)
+    except Exception as exc:
+        print("⚠️ After-death login signal failed:", exc)
+
     return returning
 
 

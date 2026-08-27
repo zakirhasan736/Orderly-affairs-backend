@@ -1,0 +1,9 @@
+{
+  "_comment": "Fill after export verification. Match by slug only; do not guess ambiguous users.",
+  "example-slug": {
+    "old_user_id": null,
+    "new_user_id": null,
+    "new_profile_id": null,
+    "status": "unmatched"
+  }
+}

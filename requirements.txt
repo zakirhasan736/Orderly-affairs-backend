@@ -3,7 +3,8 @@ anyio==4.12.1
 APScheduler==3.10.4
 argon2-cffi==25.1.0
 argon2-cffi-bindings==25.1.0
-boto3==1.38.46
+boto3==1.40.2
+botocore==1.40.76
 certifi==2026.1.4
 cffi==2.0.0
 charset-normalizer==3.4.4
@@ -13,7 +14,7 @@ cryptography==43.0.1
 dnspython==2.8.0
 ecdsa==0.19.1
 email_validator==2.2.0
-fastapi==0.115.0
+fastapi==0.115.12
 greenlet==3.3.1
 h11==0.16.0
 idna==3.11
@@ -41,7 +42,7 @@ pywebpush==2.0.1
 six==1.17.0
 SQLAlchemy==2.0.46
 starkbank-ecdsa==2.2.0
-starlette==0.38.6
+starlette==0.41.3
 stripe==14.3.0
 typing_extensions==4.15.0
 tzlocal==5.3.1

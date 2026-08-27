@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import EmailStr
 from pathlib import Path
 from datetime import timedelta
@@ -66,8 +66,9 @@ class Settings(BaseSettings):
     SENDGRID_API_KEY: str
     EMAIL_SENDER: EmailStr
     MESSAGES_FROM_EMAIL: EmailStr = "messages@orderly-affairs.com"
-    # Absolute HTTPS logo URL for HTML emails. Leave blank to use Cloudinary default
-    # (email clients cannot load localhost / private image URLs).
+    # Absolute HTTPS logo URL for HTML emails. Leave blank to use
+    # {FRONTEND_URL}/images/brand-logo.png (or vault.orderly-affairs.com when
+    # FRONTEND_URL is localhost — email clients cannot load private URLs).
     EMAIL_LOGO_URL: str | None = None
     # Optional public support phone shown in NOK letter footers
     SUPPORT_PHONE: str | None = None
@@ -123,6 +124,15 @@ class Settings(BaseSettings):
     OTP_VERIFY_LOCK_MINUTES: int = 15
 
     STRIPE_WEBHOOK_SECRET: str
+
+    # === Didit identity verification (after-death NOK / executor claim) ===
+    DIDIT_API_KEY: str | None = None
+    DIDIT_WEBHOOK_SECRET: str | None = None
+    DIDIT_WORKFLOW_ID: str = "7ef31245-bbf9-4293-b81f-f737f85e4076"
+    # Optional. Didit v3 sessions and SSDMF use the API key + workflow id only.
+    DIDIT_APPLICATION_ID: str | None = None
+    DIDIT_API_BASE: str = "https://verification.didit.me"
+
     # === Base url Info ===
     FRONTEND_URL: str
     # Optional shared cookie domain, e.g. .orderly-affairs.com
@@ -259,9 +269,10 @@ class Settings(BaseSettings):
     # When true, Secrets Manager overwrites values already present in .env.
     AWS_SECRETS_MANAGER_OVERRIDE: bool = False
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"  # ignore stray lines that caused earlier dotenv errors
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",  # ignore stray lines that caused earlier dotenv errors
+    )
 
     @property
     def backup_s3_bucket_name(self) -> str | None:
@@ -425,6 +436,22 @@ def family_dashboard_login_url() -> str:
 def nextkin_login_url() -> str:
     """Public Next-of-Kin sign-in page (frontend route)."""
     return f"{settings.FRONTEND_URL.rstrip('/')}/next-kin"
+
+
+def nextkin_claim_url(token: str) -> str:
+    """One-time vault unlock claim link emailed after death verification."""
+    from urllib.parse import quote
+
+    return f"{settings.FRONTEND_URL.rstrip('/')}/next-kin/claim?token={quote(token, safe='')}"
+
+
+def nextkin_instructions_url() -> str:
+    """Bookmarkable instructions for named next of kin."""
+    return f"{settings.FRONTEND_URL.rstrip('/')}/instructions-for-next-of-kin"
+
+
+def nextkin_didit_callback_url() -> str:
+    return f"{settings.FRONTEND_URL.rstrip('/')}/verify-identity"
 
 
 def owner_login_url() -> str:

@@ -42,24 +42,33 @@ FONT_SANS = (
 FONT_SERIF = "'Instrument Serif',Georgia,'Times New Roman',serif"
 FONT_MONO = "'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace"
 
-# Hosted brand mark for email headers (email clients cannot load localhost).
-_DEFAULT_EMAIL_LOGO_URL = (
-    "https://res.cloudinary.com/davvdgwe3/image/upload/v1784951738/orderly-affairs/brand-logo.png"
-)
+# Same file as the portal: public/images/brand-logo.png (dark mark, transparent).
+BRAND_LOGO_PATH = "/images/brand-logo.png"
+_PUBLIC_PORTAL = "https://vault.orderly-affairs.com"
+_LEGACY_CLOUDINARY_HOST = "res.cloudinary.com/davvdgwe3"
+
+
+def _is_public_https(url: str) -> bool:
+    lowered = url.lower()
+    return lowered.startswith("https://") and "localhost" not in lowered and "127.0.0.1" not in lowered
 
 
 def brand_logo_url() -> str:
-    """Public logo URL used in email headers (must be absolute HTTPS for clients)."""
+    """Absolute HTTPS logo URL. Email clients cannot load localhost or relative paths."""
     custom = (getattr(settings, "EMAIL_LOGO_URL", None) or "").strip()
-    if custom:
+    # Ignore the old Cloudinary copy — portal /images/brand-logo.png is the source.
+    if custom and _LEGACY_CLOUDINARY_HOST not in custom.lower():
         return custom
-    return _DEFAULT_EMAIL_LOGO_URL
+    frontend = (getattr(settings, "FRONTEND_URL", None) or "").strip().rstrip("/")
+    if _is_public_https(frontend):
+        return f"{frontend}{BRAND_LOGO_PATH}"
+    return f"{_PUBLIC_PORTAL}{BRAND_LOGO_PATH}"
 
 
 def email_brand_mark(
     *,
-    box: int = 30,
-    img: int = 22,
+    box: int = 40,
+    img: int = 32,
     class_box: str = "oa-logo-box",
     class_img: str = "oa-logo-img",
 ) -> str:

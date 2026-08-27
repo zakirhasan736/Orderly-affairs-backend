@@ -20,7 +20,7 @@ router = APIRouter(
 
 SECTION_ID = "17"
 SECTION_KEY = "section17_family_treasured_connections"
-SUBSECTIONS = ["17A", "17B", "17C", "17D", "17E", "17F", "17G"]
+SUBSECTIONS = ["17A", "17B", "17C", "17D", "17E", "17F", "17G", "17H"]
 
 
 # ---------------- SAVE ----------------
